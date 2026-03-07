@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.9.34728.123
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "goldOrbStrategy", "goldOrbStrategy\goldOrbStrategy.csproj", "{2EF70DC1-2088-43FE-939E-3F5894604DDD}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{2EF70DC1-2088-43FE-939E-3F5894604DDD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2EF70DC1-2088-43FE-939E-3F5894604DDD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2EF70DC1-2088-43FE-939E-3F5894604DDD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2EF70DC1-2088-43FE-939E-3F5894604DDD}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {B74C458B-2466-5F92-A2DF-535D6508690D}
+	EndGlobalSection
+EndGlobal

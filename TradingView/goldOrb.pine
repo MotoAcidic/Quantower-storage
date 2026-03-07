@@ -1,0 +1,777 @@
+//@version=6
+indicator("Gold ORB Strategy - Live Coach", overlay=true, max_boxes_count=500, max_lines_count=500)
+
+// ============================================================================
+// INPUT SETTINGS
+// ============================================================================
+
+// Timezone & Session Settings
+timezoneGroup = "🌍 Timezone & Session Settings"
+userTimezone = input.string("America/Chicago", "Your Timezone", 
+     options=["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", 
+              "America/Phoenix", "Europe/London", "Europe/Paris", "Asia/Dubai", "Asia/Singapore", 
+              "Asia/Tokyo", "Asia/Hong_Kong", "Australia/Sydney", "UTC"],
+     group=timezoneGroup,
+     tooltip="Select your local timezone - times will adjust automatically")
+
+sessionSelect = input.string("New York (COMEX)", "Trading Session", 
+     options=["New York (COMEX)", "London", "Asian/Tokyo", "Custom Time"],
+     group=timezoneGroup,
+     tooltip="NY: 8:20 ET | London: 8:00 GMT | Tokyo: 9:00 JST")
+
+customSession = input.session("0820-0823", "Custom Session Time", group=timezoneGroup, 
+     tooltip="Only used if 'Custom Time' selected above. Enter in YOUR timezone")
+
+showCountdown = input.bool(true, "Show Session Countdown Timer", group=timezoneGroup)
+
+// Opening Range Settings
+orbGroup = "📊 Opening Range Settings"
+orbLength = input.string("3 Min", "ORB Length", options=["3 Min", "5 Min", "15 Min", "30 Min"], group=orbGroup)
+showORBox = input.bool(true, "Show Opening Range Box", group=orbGroup)
+orBoxColor = input.color(color.new(#2962FF, 90), "OR Box Color", group=orbGroup)
+
+// Strategy Mode
+stratGroup = "🎯 Strategy Mode"
+strategyMode = input.string("Aggressive Breakout", "Strategy Type", 
+     options=["Aggressive Breakout", "Confirmed Breakout", "Break & Retest", "ORB + Fib Pullback"], 
+     group=stratGroup, 
+     tooltip="Aggressive: Immediate entry\nConfirmed: Wait for candle close\nBreak & Retest: Enter on pullback\nFib: Wait for retracement")
+
+confirmationCandle = input.string("1 Min", "Confirmation Candle Size", options=["1 Min", "3 Min", "5 Min"], group=stratGroup)
+useVWAP = input.bool(true, "Use VWAP Confluence", group=stratGroup)
+useEMA = input.bool(true, "Use EMA Confluence", group=stratGroup)
+
+// Indicator Settings
+indGroup = "📈 Indicators & Filters"
+emaLength = input.int(20, "EMA Length", minval=1, group=indGroup)
+emaLength2 = input.int(9, "Fast EMA Length", minval=1, group=indGroup)
+showVolume = input.bool(true, "Show Volume Spike Alerts", group=indGroup)
+volMultiplier = input.float(1.5, "Volume Spike Multiplier", minval=1.0, step=0.1, group=indGroup)
+
+// Risk Management
+riskGroup = "🛡️ Risk Management"
+stopMode = input.string("Full Range", "Stop Loss Mode", 
+     options=["Full Range", "50% Range", "Tight (Fixed)"], 
+     group=riskGroup,
+     tooltip="Full Range: Stop at opposite side\n50% Range: Stop at midpoint\nTight: Fixed dollar amount")
+tightStop = input.float(2.0, "Tight Stop Distance ($)", minval=0.1, step=0.1, group=riskGroup)
+riskReward = input.float(2.0, "Risk:Reward Ratio", minval=0.5, step=0.5, group=riskGroup)
+
+// Fibonacci Settings (for ORB + Fib mode)
+fibGroup = "🔢 Fibonacci Settings"
+showFib = input.bool(true, "Show Fibonacci Levels", group=fibGroup)
+fibEntry1 = input.float(0.5, "Fib Entry Level 1", minval=0, maxval=1, step=0.05, group=fibGroup)
+fibEntry2 = input.float(0.618, "Fib Entry Level 2", minval=0, maxval=1, step=0.05, group=fibGroup)
+
+// Display Settings
+displayGroup = "🎨 Display Settings"
+showLabels = input.bool(true, "Show Entry/Stop/Target Labels", group=displayGroup)
+extendLines = input.bool(true, "Extend ORH/ORL Lines", group=displayGroup)
+showDashboard = input.bool(true, "Show Info Dashboard", group=displayGroup)
+dashPosition = input.string("Top Right", "Dashboard Position", 
+     options=["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right"], 
+     group=displayGroup)
+
+// ============================================================================
+// TIMEZONE & SESSION LOGIC
+// ============================================================================
+
+// Get session times based on selection (in exchange timezone)
+getSessionTime() =>
+    switch sessionSelect
+        "New York (COMEX)" => "0820-0823:23456"  // 8:20 AM ET
+        "London" => "0800-0803:23456"             // 8:00 AM GMT (2:00 AM ET)
+        "Asian/Tokyo" => "0900-0903:23456"        // 9:00 AM JST
+        "Custom Time" => customSession
+        => "0820-0823:23456"
+
+sessionOpen = getSessionTime()
+
+// Session start times in minutes from midnight (in ET for display)
+getSessionStartET() =>
+    switch sessionSelect
+        "New York (COMEX)" => 820  // 8:20 AM ET
+        "London" => 200            // 2:00 AM ET  
+        "Asian/Tokyo" => 1900      // 7:00 PM ET (previous day)
+        => 820
+
+// Get user-friendly session name
+getSessionName() =>
+    switch sessionSelect
+        "New York (COMEX)" => "NY Open (8:20 AM ET)"
+        "London" => "London Open (8:00 AM GMT)"
+        "Asian/Tokyo" => "Tokyo Open (9:00 AM JST)"
+        "Custom Time" => "Custom Session"
+        => "NY Open"
+
+// Calculate countdown to next session
+getCountdownToSession() =>
+    currentHour = hour(time, userTimezone)
+    currentMin = minute(time, userTimezone)
+    currentTimeInMins = currentHour * 60 + currentMin
+    
+    sessionStartET = getSessionStartET()
+    
+    // Convert ET to user timezone offset
+    timezoneOffset = switch userTimezone
+        "America/New_York" => 0
+        "America/Chicago" => -60
+        "America/Denver" => -120
+        "America/Los_Angeles" => -180
+        "America/Phoenix" => -120
+        "Europe/London" => 300
+        "Europe/Paris" => 360
+        "Asia/Dubai" => 540
+        "Asia/Singapore" => 780
+        "Asia/Tokyo" => 840
+        "Asia/Hong_Kong" => 780
+        "Australia/Sydney" => 900
+        "UTC" => 300
+        => 0
+    
+    sessionStartUser = sessionStartET + timezoneOffset
+    if sessionStartUser < 0
+        sessionStartUser := sessionStartUser + 1440
+    if sessionStartUser >= 1440
+        sessionStartUser := sessionStartUser - 1440
+    
+    // Calculate time until session
+    minsUntil = sessionStartUser - currentTimeInMins
+    if minsUntil < 0
+        minsUntil := minsUntil + 1440
+    
+    hours = math.floor(minsUntil / 60)
+    mins = minsUntil % 60
+    
+    [hours, mins, minsUntil]
+
+// Check if we're in the opening range session
+inSession = not na(time(timeframe.period, sessionOpen))
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+// Convert ORB length to minutes
+getORBMinutes() =>
+    switch orbLength
+        "3 Min" => 3
+        "5 Min" => 5
+        "15 Min" => 15
+        "30 Min" => 30
+        => 3
+
+// Calculate VWAP
+vwapValue = ta.vwap(hlc3)
+
+// Calculate EMAs
+ema20 = ta.ema(close, emaLength)
+ema9 = ta.ema(close, emaLength2)
+
+// Volume analysis
+avgVolume = ta.sma(volume, 20)
+volumeSpike = volume > avgVolume * volMultiplier
+
+// Dashboard position helper
+getTablePosition() =>
+    switch dashPosition
+        "Top Right" => position.top_right
+        "Top Left" => position.top_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left" => position.bottom_left
+        "Middle Right" => position.middle_right
+        => position.top_right
+
+// ============================================================================
+// OPENING RANGE CALCULATION
+// ============================================================================
+
+var float orHigh = na
+var float orLow = na
+var int orStartBar = na
+var bool orComplete = false
+var float rangeSize = na
+
+// Detect new trading day by the start of the ORB session
+// Using time("D") breaks on GC because the calendar day rolls at midnight UTC (7 PM EST),
+// which is mid-session. Instead, detect when inSession fires for the first time today.
+newDay = inSession and not inSession[1]
+
+if newDay == true
+    orHigh := na
+    orLow := na
+    orStartBar := na
+    orComplete := false
+    rangeSize := na
+
+// Capture opening range
+if inSession and na(orHigh)
+    orHigh := high
+    orLow := low
+    orStartBar := bar_index
+    orComplete := false
+
+if inSession and not na(orHigh)
+    orHigh := math.max(orHigh, high)
+    orLow := math.min(orLow, low)
+
+// Mark opening range as complete
+orbMinutes = getORBMinutes()
+barsInRange = bar_index - orStartBar
+timeframeMins = timeframe.in_seconds(timeframe.period) / 60
+
+if not na(orStartBar) and not orComplete
+    if barsInRange * timeframeMins >= orbMinutes
+        orComplete := true
+        rangeSize := orHigh - orLow
+
+// ============================================================================
+// DRAWING OPENING RANGE BOX
+// ============================================================================
+
+if showORBox and orComplete and not orComplete[1]
+    box.new(orStartBar, orHigh, bar_index, orLow, 
+         border_color=orBoxColor, 
+         bgcolor=orBoxColor,
+         border_width=2,
+         extend=extend.right)
+
+// Draw ORH and ORL lines with consistent colors
+orhColor = color.new(#00E676, 0)  // Bright Green
+orlColor = color.new(#FF5252, 0)  // Bright Red
+
+plot(orComplete ? orHigh : na, "ORH", color=orhColor, linewidth=3, style=plot.style_linebr)
+plot(orComplete ? orLow : na, "ORL", color=orlColor, linewidth=3, style=plot.style_linebr)
+
+// Add persistent labels at current price location
+var label orhLabel = na
+var label orlLabel = na
+
+if orComplete and not orComplete[1]
+    if not na(orhLabel)
+        label.delete(orhLabel)
+    if not na(orlLabel)
+        label.delete(orlLabel)
+    
+    orhLabel := label.new(bar_index, orHigh, "ORH: " + str.tostring(orHigh, format.mintick), 
+         style=label.style_label_left, 
+         color=orhColor, 
+         textcolor=color.white, 
+         size=size.normal,
+         textalign=text.align_left)
+    
+    orlLabel := label.new(bar_index, orLow, "ORL: " + str.tostring(orLow, format.mintick), 
+         style=label.style_label_left, 
+         color=orlColor, 
+         textcolor=color.white, 
+         size=size.normal,
+         textalign=text.align_left)
+
+// Update label positions to current bar
+if not na(orhLabel) and orComplete
+    label.set_x(orhLabel, bar_index)
+    label.set_y(orhLabel, orHigh)
+
+if not na(orlLabel) and orComplete
+    label.set_x(orlLabel, bar_index)
+    label.set_y(orlLabel, orLow)
+
+// ============================================================================
+// BREAKOUT DETECTION
+// ============================================================================
+
+var bool longSignal = false
+var bool shortSignal = false
+var float entryPrice = na
+var float stopPrice = na
+var float targetPrice = na
+
+// Reset signals on new day
+if newDay == true
+    longSignal := false
+    shortSignal := false
+    entryPrice := na
+    stopPrice := na
+    targetPrice := na
+
+// Breakout conditions
+bullishBreakout = orComplete and close > orHigh and close[1] <= orHigh
+bearishBreakout = orComplete and close < orLow and close[1] >= orLow
+
+// VWAP filter
+vwapBullish = not useVWAP or close > vwapValue
+vwapBearish = not useVWAP or close < vwapValue
+
+// EMA filter
+emaBullish = not useEMA or (ema9 > ema20 and close > ema9)
+emaBearish = not useEMA or (ema9 < ema20 and close < ema9)
+
+// Strategy-specific entry logic
+if strategyMode == "Aggressive Breakout"
+    if bullishBreakout and vwapBullish and not longSignal
+        longSignal := true
+        entryPrice := close
+        
+        stopPrice := stopMode == "Full Range" ? orLow - (tightStop * 0.1) :
+                     stopMode == "50% Range" ? orLow + (rangeSize * 0.5) :
+                     close - tightStop
+        
+        riskAmount = entryPrice - stopPrice
+        targetPrice := entryPrice + (riskAmount * riskReward)
+    
+    if bearishBreakout and vwapBearish and not shortSignal
+        shortSignal := true
+        entryPrice := close
+        
+        stopPrice := stopMode == "Full Range" ? orHigh + (tightStop * 0.1) :
+                     stopMode == "50% Range" ? orHigh - (rangeSize * 0.5) :
+                     close + tightStop
+        
+        riskAmount = stopPrice - entryPrice
+        targetPrice := entryPrice - (riskAmount * riskReward)
+
+else if strategyMode == "Confirmed Breakout"
+    if bullishBreakout and vwapBullish and emaBullish and not longSignal
+        longSignal := true
+        entryPrice := close
+        stopPrice := stopMode == "Full Range" ? orLow - (tightStop * 0.1) : orLow + (rangeSize * 0.5)
+        riskAmount = entryPrice - stopPrice
+        targetPrice := entryPrice + (riskAmount * riskReward)
+    
+    if bearishBreakout and vwapBearish and emaBearish and not shortSignal
+        shortSignal := true
+        entryPrice := close
+        stopPrice := stopMode == "Full Range" ? orHigh + (tightStop * 0.1) : orHigh - (rangeSize * 0.5)
+        riskAmount = stopPrice - entryPrice
+        targetPrice := entryPrice - (riskAmount * riskReward)
+
+else if strategyMode == "Break & Retest"
+    retest_tolerance = rangeSize * 0.1
+    
+    if bullishBreakout and not longSignal
+        if math.abs(low - orHigh) <= retest_tolerance and vwapBullish and emaBullish
+            longSignal := true
+            entryPrice := close
+            stopPrice := orHigh - (rangeSize * 0.2)
+            riskAmount = entryPrice - stopPrice
+            targetPrice := entryPrice + (riskAmount * riskReward)
+    
+    if bearishBreakout and not shortSignal
+        if math.abs(high - orLow) <= retest_tolerance and vwapBearish and emaBearish
+            shortSignal := true
+            entryPrice := close
+            stopPrice := orLow + (rangeSize * 0.2)
+            riskAmount = stopPrice - entryPrice
+            targetPrice := entryPrice - (riskAmount * riskReward)
+
+else if strategyMode == "ORB + Fib Pullback"
+    if bullishBreakout and showFib
+        moveSize = high - orHigh
+        fib50 = high - (moveSize * fibEntry1)
+        fib618 = high - (moveSize * fibEntry2)
+        
+        if close <= fib618 and close >= fib50 and vwapBullish and emaBullish and not longSignal
+            longSignal := true
+            entryPrice := close
+            stopPrice := orLow
+            riskAmount = entryPrice - stopPrice
+            targetPrice := entryPrice + (riskAmount * riskReward)
+    
+    if bearishBreakout and showFib
+        moveSize = orLow - low
+        fib50 = low + (moveSize * fibEntry1)
+        fib618 = low + (moveSize * fibEntry2)
+        
+        if close >= fib618 and close <= fib50 and vwapBearish and emaBearish and not shortSignal
+            shortSignal := true
+            entryPrice := close
+            stopPrice := orHigh
+            riskAmount = stopPrice - entryPrice
+            targetPrice := entryPrice - (riskAmount * riskReward)
+
+// ============================================================================
+// LIVE TRADE COACHING LOGIC
+// ============================================================================
+
+var string coachMessage = ""
+var string tradeSetup = ""
+var string actionRequired = ""
+var color messageColor = color.gray
+
+// Building Opening Range
+if not orComplete and not na(orStartBar)
+    coachMessage := "📊 BUILDING OPENING RANGE..."
+    tradeSetup := "Wait until " + str.tostring(orbMinutes) + " min completes"
+    actionRequired := "NO ACTION - Stay patient"
+    messageColor := color.new(#9E9E9E, 0)
+
+// Opening Range Complete - Waiting for Breakout
+else if orComplete and not longSignal and not shortSignal
+    coachMessage := "⏳ RANGE SET - WATCHING FOR BREAKOUT"
+    
+    distToORH = ((orHigh - close) / close) * 100
+    distToORL = ((close - orLow) / close) * 100
+    
+    if close > (orHigh + orLow) / 2
+        tradeSetup := "📈 Price near ORH - " + str.tostring(math.round(distToORH, 2)) + "% away"
+        actionRequired := "PREPARE: Set buy stop @ " + str.tostring(orHigh, format.mintick)
+    else
+        tradeSetup := "📉 Price near ORL - " + str.tostring(math.round(distToORL, 2)) + "% away"
+        actionRequired := "PREPARE: Set sell stop @ " + str.tostring(orLow, format.mintick)
+    
+    messageColor := color.new(#FFEB3B, 0)
+    
+    if useVWAP and close > vwapValue and close > (orHigh + orLow) / 2
+        tradeSetup := tradeSetup + "\n✓ Above VWAP - Bullish bias"
+    else if useVWAP and close < vwapValue and close < (orHigh + orLow) / 2
+        tradeSetup := tradeSetup + "\n✓ Below VWAP - Bearish bias"
+    
+    if useEMA and ema9 > ema20
+        tradeSetup := tradeSetup + "\n✓ EMAs aligned bullish"
+    else if useEMA and ema9 < ema20
+        tradeSetup := tradeSetup + "\n✓ EMAs aligned bearish"
+
+// Breakout Happening - PRE-ENTRY
+else if orComplete and (bullishBreakout or bearishBreakout) and not longSignal and not shortSignal
+    if bullishBreakout
+        coachMessage := "🚨 BULLISH BREAKOUT DETECTED!"
+        
+        if vwapBullish and emaBullish
+            tradeSetup := "✓ All systems GO"
+            actionRequired := "🟢 BUY NOW @ " + str.tostring(close, format.mintick)
+            messageColor := color.new(#00E676, 0)
+        else
+            tradeSetup := "⚠️ Missing confluence:"
+            if not vwapBullish
+                tradeSetup := tradeSetup + "\n✗ Below VWAP"
+            if not emaBullish
+                tradeSetup := tradeSetup + "\n✗ EMA not aligned"
+            actionRequired := "WAIT - Let it retest or skip"
+            messageColor := color.new(#FF9800, 0)
+    
+    if bearishBreakout
+        coachMessage := "🚨 BEARISH BREAKOUT DETECTED!"
+        
+        if vwapBearish and emaBearish
+            tradeSetup := "✓ All systems GO"
+            actionRequired := "🔴 SELL NOW @ " + str.tostring(close, format.mintick)
+            messageColor := color.new(#FF5252, 0)
+        else
+            tradeSetup := "⚠️ Missing confluence:"
+            if not vwapBearish
+                tradeSetup := tradeSetup + "\n✗ Above VWAP"
+            if not emaBearish
+                tradeSetup := tradeSetup + "\n✗ EMA not aligned"
+            actionRequired := "WAIT - Let it retest or skip"
+            messageColor := color.new(#FF9800, 0)
+
+// In Trade - POSITION MANAGEMENT
+else if longSignal
+    coachMessage := "🟢 LONG POSITION ACTIVE"
+    
+    currentPL = close - entryPrice
+    plPercent = (currentPL / entryPrice) * 100
+    targetDistance = targetPrice - close
+    stopDistance = close - stopPrice
+    
+    tradeSetup := "Entry: " + str.tostring(entryPrice, format.mintick) + 
+                  "\nCurrent: " + str.tostring(close, format.mintick) +
+                  "\nP&L: $" + str.tostring(currentPL, "#.##") + " (" + str.tostring(plPercent, "#.##") + "%)"
+    
+    if close >= targetPrice
+        actionRequired := "🎯 TARGET HIT! Take profit or trail stop"
+        messageColor := color.new(#00E676, 0)
+    else if currentPL > 0 and currentPL >= (entryPrice - stopPrice) * 0.5
+        actionRequired := "💰 Move stop to breakeven\n" + str.tostring(targetDistance, format.mintick) + " to target"
+        messageColor := color.new(#00E676, 0)
+    else if close <= stopPrice
+        actionRequired := "🛑 STOP HIT - Exit now!"
+        messageColor := color.new(#FF5252, 0)
+    else if close < ema9 and useEMA
+        actionRequired := "⚠️ Below fast EMA - Consider exit\n" + str.tostring(targetDistance, format.mintick) + " to target"
+        messageColor := color.new(#FF9800, 0)
+    else
+        actionRequired := "✓ HOLD - Trade running well\n" + str.tostring(targetDistance, format.mintick) + " to target"
+        messageColor := color.new(#00E676, 0)
+
+else if shortSignal
+    coachMessage := "🔴 SHORT POSITION ACTIVE"
+    
+    currentPL = entryPrice - close
+    plPercent = (currentPL / entryPrice) * 100
+    targetDistance = close - targetPrice
+    stopDistance = stopPrice - close
+    
+    tradeSetup := "Entry: " + str.tostring(entryPrice, format.mintick) + 
+                  "\nCurrent: " + str.tostring(close, format.mintick) +
+                  "\nP&L: $" + str.tostring(currentPL, "#.##") + " (" + str.tostring(plPercent, "#.##") + "%)"
+    
+    if close <= targetPrice
+        actionRequired := "🎯 TARGET HIT! Take profit or trail stop"
+        messageColor := color.new(#00E676, 0)
+    else if currentPL > 0 and currentPL >= (stopPrice - entryPrice) * 0.5
+        actionRequired := "💰 Move stop to breakeven\n" + str.tostring(targetDistance, format.mintick) + " to target"
+        messageColor := color.new(#00E676, 0)
+    else if close >= stopPrice
+        actionRequired := "🛑 STOP HIT - Exit now!"
+        messageColor := color.new(#FF5252, 0)
+    else if close > ema9 and useEMA
+        actionRequired := "⚠️ Above fast EMA - Consider exit\n" + str.tostring(targetDistance, format.mintick) + " to target"
+        messageColor := color.new(#FF9800, 0)
+    else
+        actionRequired := "✓ HOLD - Trade running well\n" + str.tostring(targetDistance, format.mintick) + " to target"
+        messageColor := color.new(#00E676, 0)
+
+// ============================================================================
+// VISUAL SIGNALS
+// ============================================================================
+
+// Plot VWAP with better visibility
+plot(useVWAP ? vwapValue : na, "VWAP", color=color.new(#FF9800, 0), linewidth=2, style=plot.style_line)
+
+// Plot EMAs with better colors
+plot(useEMA ? ema20 : na, "EMA 20", color=color.new(#2196F3, 0), linewidth=2)
+plot(useEMA ? ema9 : na, "EMA 9", color=color.new(#9C27B0, 0), linewidth=2)
+
+// Entry signals
+plotshape(longSignal and not longSignal[1], "Long Entry", shape.triangleup, location.belowbar, 
+     color=color.new(#00E676, 0), size=size.large, text="LONG")
+plotshape(shortSignal and not shortSignal[1], "Short Entry", shape.triangledown, location.abovebar, 
+     color=color.new(#FF5252, 0), size=size.large, text="SHORT")
+
+// Volume spike markers
+bgcolor(volumeSpike and showVolume ? color.new(#FFEB3B, 85) : na, title="Volume Spike BG")
+plotchar(volumeSpike and showVolume, "Volume", "▲", location.bottom, 
+     color=color.new(#FFEB3B, 0), size=size.small)
+
+// Draw stop and target levels
+var line stopLine = na
+var line targetLine = na
+var label stopLabel = na
+var label targetLabel = na
+
+if longSignal and not longSignal[1]
+    if not na(stopLine)
+        line.delete(stopLine)
+    if not na(targetLine)
+        line.delete(targetLine)
+    if not na(stopLabel)
+        label.delete(stopLabel)
+    if not na(targetLabel)
+        label.delete(targetLabel)
+    
+    stopLine := line.new(bar_index, stopPrice, bar_index + 20, stopPrice, 
+         color=orlColor, width=2, style=line.style_dashed, extend=extend.right)
+    targetLine := line.new(bar_index, targetPrice, bar_index + 20, targetPrice, 
+         color=orhColor, width=2, style=line.style_dashed, extend=extend.right)
+    
+    if showLabels
+        stopLabel := label.new(bar_index, stopPrice, "STOP: " + str.tostring(stopPrice, format.mintick), 
+             style=label.style_label_left, color=orlColor, textcolor=color.white, size=size.normal)
+        targetLabel := label.new(bar_index, targetPrice, "TARGET: " + str.tostring(targetPrice, format.mintick), 
+             style=label.style_label_left, color=orhColor, textcolor=color.white, size=size.normal)
+
+if shortSignal and not shortSignal[1]
+    if not na(stopLine)
+        line.delete(stopLine)
+    if not na(targetLine)
+        line.delete(targetLine)
+    if not na(stopLabel)
+        label.delete(stopLabel)
+    if not na(targetLabel)
+        label.delete(targetLabel)
+    
+    stopLine := line.new(bar_index, stopPrice, bar_index + 20, stopPrice, 
+         color=orlColor, width=2, style=line.style_dashed, extend=extend.right)
+    targetLine := line.new(bar_index, targetPrice, bar_index + 20, targetPrice, 
+         color=orhColor, width=2, style=line.style_dashed, extend=extend.right)
+    
+    if showLabels
+        stopLabel := label.new(bar_index, stopPrice, "STOP: " + str.tostring(stopPrice, format.mintick), 
+             style=label.style_label_left, color=orlColor, textcolor=color.white, size=size.normal)
+        targetLabel := label.new(bar_index, targetPrice, "TARGET: " + str.tostring(targetPrice, format.mintick), 
+             style=label.style_label_left, color=orhColor, textcolor=color.white, size=size.normal)
+
+// Update label positions
+if not na(stopLabel) and (longSignal or shortSignal)
+    label.set_x(stopLabel, bar_index)
+if not na(targetLabel) and (longSignal or shortSignal)
+    label.set_x(targetLabel, bar_index)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(longSignal and not longSignal[1], "Long Entry Signal", "🟢 ORB LONG ENTRY: {{ticker}} @ {{close}}")
+alertcondition(shortSignal and not shortSignal[1], "Short Entry Signal", "🔴 ORB SHORT ENTRY: {{ticker}} @ {{close}}")
+alertcondition(bullishBreakout, "Bullish Breakout", "📈 Price broke above ORH: {{ticker}}")
+alertcondition(bearishBreakout, "Bearish Breakout", "📉 Price broke below ORL: {{ticker}}")
+
+// ============================================================================
+// DASHBOARD - COACHING & STATS
+// ============================================================================
+
+var table infoTable = table.new(getTablePosition(), 2, 10, 
+     bgcolor=color.new(#1E1E1E, 5), 
+     frame_color=color.new(#424242, 0), 
+     frame_width=2,
+     border_width=1,
+     border_color=color.new(#424242, 0))
+
+var table coachTable = table.new(position.top_center, 1, 4,
+     bgcolor=color.new(#1E1E1E, 5),
+     frame_color=messageColor,
+     frame_width=3,
+     border_width=1,
+     border_color=color.new(#424242, 0))
+
+if barstate.islast and showDashboard
+    
+    // SESSION COUNTDOWN
+    [hoursUntil, minsUntil, totalMins] = getCountdownToSession()
+    
+    countdownText = ""
+    countdownColor = color.gray
+    
+    if totalMins <= 60 and totalMins > 5
+        countdownText := "⏰ " + getSessionName() + " in " + str.tostring(hoursUntil) + "h " + str.tostring(minsUntil) + "m"
+        countdownColor := color.new(#FFEB3B, 0)
+    else if totalMins <= 5
+        countdownText := "🔥 " + getSessionName() + " STARTING IN " + str.tostring(minsUntil) + " MIN!"
+        countdownColor := color.new(#FF5252, 0)
+    else if inSession
+        countdownText := "🟢 " + getSessionName() + " - SESSION ACTIVE"
+        countdownColor := color.new(#00E676, 0)
+    else
+        countdownText := "⏰ Next: " + getSessionName() + " in " + str.tostring(hoursUntil) + "h " + str.tostring(minsUntil) + "m"
+        countdownColor := color.new(#9E9E9E, 0)
+    
+    if showCountdown
+        table.cell(coachTable, 0, 0, countdownText,
+             text_color=countdownColor,
+             text_size=size.normal,
+             bgcolor=color.new(#2E2E2E, 0),
+             text_halign=text.align_center)
+    
+    // COACHING MESSAGES
+    table.cell(coachTable, 0, 1, coachMessage,
+         text_color=messageColor,
+         text_size=size.large,
+         bgcolor=color.new(#2E2E2E, 0),
+         text_halign=text.align_center)
+    
+    table.cell(coachTable, 0, 2, tradeSetup,
+         text_color=color.new(#FFFFFF, 0),
+         text_size=size.normal,
+         bgcolor=color.new(#1E1E1E, 0),
+         text_halign=text.align_center)
+    
+    table.cell(coachTable, 0, 3, actionRequired,
+         text_color=messageColor,
+         text_size=size.large,
+         bgcolor=color.new(#2E2E2E, 0),
+         text_halign=text.align_center)
+    
+    // STATS DASHBOARD
+    table.cell(infoTable, 0, 0, "⚡ GOLD ORB", 
+         text_color=color.new(#FFD700, 0), 
+         text_size=size.large, 
+         bgcolor=color.new(#2E2E2E, 0),
+         text_halign=text.align_center)
+    table.cell(infoTable, 1, 0, orbLength, 
+         text_color=color.new(#FFD700, 0), 
+         text_size=size.large, 
+         bgcolor=color.new(#2E2E2E, 0),
+         text_halign=text.align_center)
+    
+    table.cell(infoTable, 0, 1, "Mode", 
+         text_color=color.new(#BBBBBB, 0), 
+         text_size=size.normal,
+         text_halign=text.align_left)
+    modeText = strategyMode == "Aggressive Breakout" ? "⚡ Aggressive" :
+               strategyMode == "Confirmed Breakout" ? "✓ Confirmed" :
+               strategyMode == "Break & Retest" ? "↩️ Retest" : "📊 Fib"
+    table.cell(infoTable, 1, 1, modeText, 
+         text_color=color.new(#FFD700, 0), 
+         text_size=size.normal,
+         text_halign=text.align_right)
+    
+    table.cell(infoTable, 0, 2, "ORH", 
+         text_color=color.new(#BBBBBB, 0), 
+         text_size=size.normal,
+         text_halign=text.align_left)
+    table.cell(infoTable, 1, 2, not na(orHigh) ? str.tostring(orHigh, format.mintick) : "---", 
+         text_color=orhColor, 
+         text_size=size.normal,
+         text_halign=text.align_right)
+    
+    table.cell(infoTable, 0, 3, "ORL", 
+         text_color=color.new(#BBBBBB, 0), 
+         text_size=size.normal,
+         text_halign=text.align_left)
+    table.cell(infoTable, 1, 3, not na(orLow) ? str.tostring(orLow, format.mintick) : "---", 
+         text_color=orlColor, 
+         text_size=size.normal,
+         text_halign=text.align_right)
+    
+    table.cell(infoTable, 0, 4, "Range", 
+         text_color=color.new(#BBBBBB, 0), 
+         text_size=size.normal,
+         text_halign=text.align_left)
+    table.cell(infoTable, 1, 4, not na(rangeSize) ? "$" + str.tostring(rangeSize, format.mintick) : "---", 
+         text_color=color.new(#FF9800, 0), 
+         text_size=size.normal,
+         text_halign=text.align_right)
+    
+    table.cell(infoTable, 0, 5, "Risk:Reward", 
+         text_color=color.new(#BBBBBB, 0), 
+         text_size=size.normal,
+         text_halign=text.align_left)
+    table.cell(infoTable, 1, 5, "1:" + str.tostring(riskReward, "#.#"), 
+         text_color=color.new(#00BCD4, 0), 
+         text_size=size.normal,
+         text_halign=text.align_right)
+    
+    table.cell(infoTable, 0, 6, "VWAP", 
+         text_color=color.new(#BBBBBB, 0), 
+         text_size=size.small,
+         text_halign=text.align_left)
+    table.cell(infoTable, 1, 6, useVWAP ? "✓ ON" : "✗ OFF", 
+         text_color=useVWAP ? orhColor : color.new(#666666, 0), 
+         text_size=size.small,
+         text_halign=text.align_right)
+    
+    table.cell(infoTable, 0, 7, "EMA", 
+         text_color=color.new(#BBBBBB, 0), 
+         text_size=size.small,
+         text_halign=text.align_left)
+    table.cell(infoTable, 1, 7, useEMA ? "✓ ON" : "✗ OFF", 
+         text_color=useEMA ? orhColor : color.new(#666666, 0), 
+         text_size=size.small,
+         text_halign=text.align_right)
+    
+    table.cell(infoTable, 0, 8, "─────────", 
+         text_color=color.new(#424242, 0), 
+         text_size=size.small,
+         text_halign=text.align_center)
+    table.cell(infoTable, 1, 8, "─────────", 
+         text_color=color.new(#424242, 0), 
+         text_size=size.small,
+         text_halign=text.align_center)
+    
+    table.cell(infoTable, 0, 9, "STATUS", 
+         text_color=color.new(#BBBBBB, 0), 
+         text_size=size.normal,
+         text_halign=text.align_left)
+    
+    statusText = longSignal ? "🟢 LONG" : 
+                 shortSignal ? "🔴 SHORT" : 
+                 orComplete ? "⏳ WAITING" : "🔄 BUILDING"
+    statusColor = longSignal ? orhColor : 
+                  shortSignal ? orlColor : 
+                  orComplete ? color.new(#FFEB3B, 0) : color.new(#9E9E9E, 0)
+    
+    table.cell(infoTable, 1, 9, statusText, 
+         text_color=statusColor, 
+         text_size=size.normal,
+         text_halign=text.align_right)

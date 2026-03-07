@@ -1,0 +1,373 @@
+//@version=6
+indicator("ES Futures ORB Strategy", overlay=true, max_boxes_count=500, max_lines_count=500)
+
+// ============================================================================
+// INPUT SETTINGS
+// ============================================================================
+
+// Opening Range Settings
+orbGroup = "Opening Range Settings"
+minBreakoutDist = input.float(5.0, "Minimum Breakout Distance (points)", minval=0.0, step=0.25, group=orbGroup,
+     tooltip="Minimum points above/below OR for valid breakout")
+
+// Entry Settings
+entryGroup = "Entry Settings"
+entryMode = input.string("Immediate Breakout", "Entry Mode",
+     options=["Immediate Breakout", "Wait for 50% Retest", "Wait for Any Retest"],
+     group=entryGroup,
+     tooltip="Immediate: Enter on breakout\n50% Retest: Wait for pullback to midpoint\nAny Retest: Wait for any pullback to OR level")
+
+// Volume Filter
+volumeGroup = "Volume Filter"
+useVolumeFilter = input.bool(true, "Use Volume Filter (before 9:30 AM EST)", group=volumeGroup)
+minVolume = input.int(1000, "Minimum Breakout Candle Volume", minval=1, group=volumeGroup,
+     tooltip="Required volume on breakout candle before 9:30 AM EST")
+
+// Risk Management
+riskGroup = "Risk Management"
+stopMode = input.string("Full Range", "Stop Loss Mode",
+     options=["Full Range", "50% Range", "Fixed Points"],
+     group=riskGroup,
+     tooltip="Full Range: Stop at opposite side of OR\n50% Range: Stop at midpoint\nFixed Points: Fixed point distance")
+fixedStopPoints = input.float(10.0, "Fixed Stop Distance (points)", minval=0.25, step=0.25, group=riskGroup,
+     tooltip="Only used if 'Fixed Points' stop mode selected")
+riskReward = input.float(2.0, "Risk:Reward Ratio", minval=0.5, step=0.5, group=riskGroup)
+
+// Display Settings
+displayGroup = "Display Settings"
+showLabels = input.bool(true, "Show Entry/Stop/Target Labels", group=displayGroup)
+showMidpoint = input.bool(true, "Show 50% Midpoint Line", group=displayGroup)
+
+// ============================================================================
+// SESSION LOGIC (FIXED: 8:00-8:15 AM EST)
+// ============================================================================
+
+// ES Opening Range: 8:00-8:15 AM EST (15 minutes)
+sessionOpen = "0800-0815:23456"
+inSession = not na(time(timeframe.period, sessionOpen, "America/New_York"))
+
+// Check if current time is before 9:30 AM EST for volume filter
+currentTimeEST = time("1", "America/New_York")
+hour_est = hour(currentTimeEST, "America/New_York")
+minute_est = minute(currentTimeEST, "America/New_York")
+timeInMinutes = hour_est * 60 + minute_est
+before930 = timeInMinutes < 570  // 9:30 AM = 570 minutes
+
+// ============================================================================
+// OPENING RANGE CALCULATION
+// ============================================================================
+
+// Declare ALL labels and lines as var at the TOP (Critical Fix #1)
+var label orhLabel = na
+var label orlLabel = na
+var label midLabel = na
+var line stopLine = na
+var line targetLine = na
+var label stopLabel = na
+var label targetLabel = na
+
+var float orHigh = na
+var float orLow = na
+var int orStartBar = na
+var bool orComplete = false
+var float rangeSize = na
+var float midPoint = na
+
+// Detect new trading day by the start of the 8:00 AM EST ORB session
+// Using time("D") breaks on ES because the calendar day rolls at midnight UTC (7 PM EST),
+// which is mid-session. Instead, detect when inSession fires for the first time today.
+newDay = inSession and not inSession[1]
+
+// Critical Fix #2: Delete all labels/lines on new day
+if newDay == true
+    orHigh := na
+    orLow := na
+    orStartBar := na
+    orComplete := false
+    rangeSize := na
+    midPoint := na
+
+    // Delete all labels and lines from previous session
+    if not na(orhLabel)
+        label.delete(orhLabel)
+        orhLabel := na
+    if not na(orlLabel)
+        label.delete(orlLabel)
+        orlLabel := na
+    if not na(midLabel)
+        label.delete(midLabel)
+        midLabel := na
+    if not na(stopLine)
+        line.delete(stopLine)
+        stopLine := na
+    if not na(targetLine)
+        line.delete(targetLine)
+        targetLine := na
+    if not na(stopLabel)
+        label.delete(stopLabel)
+        stopLabel := na
+    if not na(targetLabel)
+        label.delete(targetLabel)
+        targetLabel := na
+
+// Capture opening range
+if inSession and na(orHigh)
+    orHigh := high
+    orLow := low
+    orStartBar := bar_index
+    orComplete := false
+
+if inSession and not na(orHigh)
+    orHigh := math.max(orHigh, high)
+    orLow := math.min(orLow, low)
+
+// Mark opening range as complete (15 minutes)
+barsInRange = bar_index - orStartBar
+timeframeMins = timeframe.in_seconds(timeframe.period) / 60
+
+if not na(orStartBar) and not orComplete
+    if barsInRange * timeframeMins >= 15  // Fixed 15-minute OR
+        orComplete := true
+        rangeSize := orHigh - orLow
+        midPoint := (orHigh + orLow) / 2
+
+// ============================================================================
+// DRAWING OPENING RANGE LINES
+// ============================================================================
+
+// Critical Fix #3: NO blue background boxes (commented out)
+// if orComplete and not orComplete[1]
+//     box.new(orStartBar, orHigh, bar_index, orLow,
+//          border_color=color.new(#2962FF, 70),
+//          bgcolor=color.new(#2962FF, 90),
+//          border_width=2,
+//          extend=extend.right)
+
+// Draw ORH and ORL lines
+orhColor = color.new(#00E676, 0)  // Bright Green
+orlColor = color.new(#FF5252, 0)  // Bright Red
+midColor = color.new(#FFEB3B, 0)  // Yellow
+
+plot(orComplete ? orHigh : na, "ORH", color=orhColor, linewidth=2, style=plot.style_linebr)
+plot(orComplete ? orLow : na, "ORL", color=orlColor, linewidth=2, style=plot.style_linebr)
+plot(orComplete and showMidpoint ? midPoint : na, "50% Mid", color=midColor, linewidth=1, style=plot.style_linebr)
+
+// Add persistent labels
+if orComplete and not orComplete[1]
+    if not na(orhLabel)
+        label.delete(orhLabel)
+    if not na(orlLabel)
+        label.delete(orlLabel)
+    if not na(midLabel)
+        label.delete(midLabel)
+
+    orhLabel := label.new(bar_index, orHigh, "ORH: " + str.tostring(orHigh, format.mintick),
+         style=label.style_label_left,
+         color=orhColor,
+         textcolor=color.white,
+         size=size.small,
+         textalign=text.align_left)
+
+    orlLabel := label.new(bar_index, orLow, "ORL: " + str.tostring(orLow, format.mintick),
+         style=label.style_label_left,
+         color=orlColor,
+         textcolor=color.white,
+         size=size.small,
+         textalign=text.align_left)
+
+    if showMidpoint
+        midLabel := label.new(bar_index, midPoint, "Mid: " + str.tostring(midPoint, format.mintick),
+             style=label.style_label_left,
+             color=midColor,
+             textcolor=color.black,
+             size=size.tiny,
+             textalign=text.align_left)
+
+// Update label positions to current bar
+if not na(orhLabel) and orComplete
+    label.set_x(orhLabel, bar_index)
+    label.set_y(orhLabel, orHigh)
+
+if not na(orlLabel) and orComplete
+    label.set_x(orlLabel, bar_index)
+    label.set_y(orlLabel, orLow)
+
+if not na(midLabel) and orComplete and showMidpoint
+    label.set_x(midLabel, bar_index)
+    label.set_y(midLabel, midPoint)
+
+// ============================================================================
+// BREAKOUT DETECTION
+// ============================================================================
+
+var bool longSignal = false
+var bool shortSignal = false
+var float entryPrice = na
+var float stopPrice = na
+var float targetPrice = na
+
+// Reset signals on new day
+if newDay == true
+    longSignal := false
+    shortSignal := false
+    entryPrice := na
+    stopPrice := na
+    targetPrice := na
+
+// Basic breakout detection (min distance check)
+bullishBreakout = orComplete and close > (orHigh + minBreakoutDist) and close[1] <= (orHigh + minBreakoutDist)
+bearishBreakout = orComplete and close < (orLow - minBreakoutDist) and close[1] >= (orLow - minBreakoutDist)
+
+// Volume filter (before 9:30 AM EST only)
+volumeOK = not useVolumeFilter or not before930 or volume >= minVolume
+
+// Entry logic based on entry mode
+if entryMode == "Immediate Breakout"
+    // Enter immediately on breakout with volume confirmation
+    if bullishBreakout and volumeOK and not longSignal
+        longSignal := true
+        entryPrice := close
+
+        // Calculate stop based on mode
+        stopPrice := stopMode == "Full Range" ? orLow :
+                     stopMode == "50% Range" ? midPoint :
+                     close - fixedStopPoints
+
+        riskAmount = entryPrice - stopPrice
+        targetPrice := entryPrice + (riskAmount * riskReward)
+
+    if bearishBreakout and volumeOK and not shortSignal
+        shortSignal := true
+        entryPrice := close
+
+        stopPrice := stopMode == "Full Range" ? orHigh :
+                     stopMode == "50% Range" ? midPoint :
+                     close + fixedStopPoints
+
+        riskAmount = stopPrice - entryPrice
+        targetPrice := entryPrice - (riskAmount * riskReward)
+
+else if entryMode == "Wait for 50% Retest"
+    // Wait for pullback to 50% midpoint after breakout
+    if bullishBreakout and volumeOK
+        if low <= midPoint and close > midPoint and not longSignal
+            longSignal := true
+            entryPrice := close
+
+            stopPrice := stopMode == "Full Range" ? orLow :
+                         stopMode == "50% Range" ? midPoint :
+                         close - fixedStopPoints
+
+            riskAmount = entryPrice - stopPrice
+            targetPrice := entryPrice + (riskAmount * riskReward)
+
+    if bearishBreakout and volumeOK
+        if high >= midPoint and close < midPoint and not shortSignal
+            shortSignal := true
+            entryPrice := close
+
+            stopPrice := stopMode == "Full Range" ? orHigh :
+                         stopMode == "50% Range" ? midPoint :
+                         close + fixedStopPoints
+
+            riskAmount = stopPrice - entryPrice
+            targetPrice := entryPrice - (riskAmount * riskReward)
+
+else if entryMode == "Wait for Any Retest"
+    // Wait for any pullback to OR level
+    retestTolerance = rangeSize * 0.1
+
+    if bullishBreakout and volumeOK
+        if math.abs(low - orHigh) <= retestTolerance and not longSignal
+            longSignal := true
+            entryPrice := close
+
+            stopPrice := stopMode == "Full Range" ? orLow :
+                         stopMode == "50% Range" ? midPoint :
+                         close - fixedStopPoints
+
+            riskAmount = entryPrice - stopPrice
+            targetPrice := entryPrice + (riskAmount * riskReward)
+
+    if bearishBreakout and volumeOK
+        if math.abs(high - orLow) <= retestTolerance and not shortSignal
+            shortSignal := true
+            entryPrice := close
+
+            stopPrice := stopMode == "Full Range" ? orHigh :
+                         stopMode == "50% Range" ? midPoint :
+                         close + fixedStopPoints
+
+            riskAmount = stopPrice - entryPrice
+            targetPrice := entryPrice - (riskAmount * riskReward)
+
+// ============================================================================
+// VISUAL SIGNALS
+// ============================================================================
+
+// Entry signals
+plotshape(longSignal and not longSignal[1], "Long Entry", shape.triangleup, location.belowbar,
+     color=color.new(#00E676, 0), size=size.normal, text="LONG")
+plotshape(shortSignal and not shortSignal[1], "Short Entry", shape.triangledown, location.abovebar,
+     color=color.new(#FF5252, 0), size=size.normal, text="SHORT")
+
+// Critical Fix #4: NO volume spike bgcolor (commented out)
+// bgcolor(volumeSpike and showVolume ? color.new(#FFEB3B, 85) : na, title="Volume Spike BG")
+
+// Draw stop and target levels when in trade
+if longSignal and not longSignal[1]
+    if not na(stopLine)
+        line.delete(stopLine)
+    if not na(targetLine)
+        line.delete(targetLine)
+    if not na(stopLabel)
+        label.delete(stopLabel)
+    if not na(targetLabel)
+        label.delete(targetLabel)
+
+    stopLine := line.new(bar_index, stopPrice, bar_index + 20, stopPrice,
+         color=orlColor, width=2, style=line.style_dashed, extend=extend.right)
+    targetLine := line.new(bar_index, targetPrice, bar_index + 20, targetPrice,
+         color=orhColor, width=2, style=line.style_dashed, extend=extend.right)
+
+    if showLabels
+        stopLabel := label.new(bar_index, stopPrice, "STOP: " + str.tostring(stopPrice, format.mintick),
+             style=label.style_label_left, color=orlColor, textcolor=color.white, size=size.small)
+        targetLabel := label.new(bar_index, targetPrice, "TARGET: " + str.tostring(targetPrice, format.mintick),
+             style=label.style_label_left, color=orhColor, textcolor=color.white, size=size.small)
+
+if shortSignal and not shortSignal[1]
+    if not na(stopLine)
+        line.delete(stopLine)
+    if not na(targetLine)
+        line.delete(targetLine)
+    if not na(stopLabel)
+        label.delete(stopLabel)
+    if not na(targetLabel)
+        label.delete(targetLabel)
+
+    stopLine := line.new(bar_index, stopPrice, bar_index + 20, stopPrice,
+         color=orlColor, width=2, style=line.style_dashed, extend=extend.right)
+    targetLine := line.new(bar_index, targetPrice, bar_index + 20, targetPrice,
+         color=orhColor, width=2, style=line.style_dashed, extend=extend.right)
+
+    if showLabels
+        stopLabel := label.new(bar_index, stopPrice, "STOP: " + str.tostring(stopPrice, format.mintick),
+             style=label.style_label_left, color=orlColor, textcolor=color.white, size=size.small)
+        targetLabel := label.new(bar_index, targetPrice, "TARGET: " + str.tostring(targetPrice, format.mintick),
+             style=label.style_label_left, color=orhColor, textcolor=color.white, size=size.small)
+
+// Update label positions
+if not na(stopLabel) and (longSignal or shortSignal)
+    label.set_x(stopLabel, bar_index)
+if not na(targetLabel) and (longSignal or shortSignal)
+    label.set_x(targetLabel, bar_index)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(longSignal and not longSignal[1], "Long Entry Signal", "ES ORB LONG ENTRY @ {{close}}")
+alertcondition(shortSignal and not shortSignal[1], "Short Entry Signal", "ES ORB SHORT ENTRY @ {{close}}")
+alertcondition(bullishBreakout, "Bullish Breakout", "ES broke above ORH")
+alertcondition(bearishBreakout, "Bearish Breakout", "ES broke below ORL")
