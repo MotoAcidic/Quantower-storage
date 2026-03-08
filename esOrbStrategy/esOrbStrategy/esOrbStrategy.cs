@@ -99,14 +99,14 @@ namespace esOrbStrategy
         [InputParameter("Profit Target (points)", 18)]
         public double profitTargetPoints = 15.0;
 
-        [InputParameter("Strong Volume Immediate Entry Threshold", 20)]
-        public double strongVolumeThreshold = 1000.0;
+        [InputParameter("Max ORB Range Size (points)", 20)]
+        public double maxOrbRangeSize = 20.0;
 
-        [InputParameter("Retest Timeout (minutes)", 21)] 
-        public int retestTimeoutMinutes = 15;
+        [InputParameter("Pre-market Volume Threshold", 21)]
+        public double preMarketVolumeThreshold = 500.0;
 
-        [InputParameter("Enable Immediate Entry on Strong Volume", 22)]
-        public bool enableImmediateStrongVolumeEntry = true;
+        [InputParameter("ORB Trading Cutoff Time (EST)", 22)]
+        public int orbTradingCutoffHour = 11;
 
         [InputParameter("EST Timezone Offset (hours)", 23)]
         public double estTimezoneOffset = -5.0; // EST is UTC-5 (change to -4 for EDT)
@@ -140,6 +140,10 @@ namespace esOrbStrategy
         private bool retestInvalidated = false;
         private double previousClose = 0.0;
         private DateTime waitingForRetestStartTime = DateTime.MinValue;
+        
+        // Basic tracking for simple retest strategy
+        private bool preMarketSetupValid = false;
+        private DateTime lastPreMarketCheck = DateTime.MinValue;
 
         // Risk Management
         private int tradeCount = 0;
@@ -312,8 +316,10 @@ namespace esOrbStrategy
 
             if (positions.Length == 0)
             {
-                // Use centralized reset method
-                ResetRetestState();
+                // Reset tracking variables
+                waitingForRetest = false;
+                lastTradeDirection = "";
+                waitingForRetestStartTime = DateTime.MinValue;
 
                 // Reset enhanced retest tracking variables  
                 retestLevelReached = false;
@@ -400,6 +406,9 @@ namespace esOrbStrategy
             retestRespected = false;
             retestInvalidated = false;
             previousClose = 0.0;
+            
+            // Start each day assuming setup is valid unless proven otherwise
+            preMarketSetupValid = true;
         }
 
         private void CheckOrbSession()
@@ -478,47 +487,60 @@ namespace esOrbStrategy
             var high = HistoricalDataExtensions.High(this.hdm, 0);
             var low = HistoricalDataExtensions.Low(this.hdm, 0);
             var currentTime = HistoricalDataExtensions.Time(this.hdm, 0);
+            var currentVolume = HistoricalDataExtensions.Volume(this.hdm, 0);
 
             // Convert to EST for proper market open check
             DateTime estTime = currentTime.AddHours(this.estTimezoneOffset);
+            
+            // Check if ORB range is too large (don't trade if > 20 points)
+            if (orbHigh != double.MinValue && orbLow != double.MaxValue)
+            {
+                double orbRange = orbHigh - orbLow;
+                if (orbRange > maxOrbRangeSize)
+                {
+                    this.Log($"❌ ORB RANGE TOO LARGE: {orbRange:F2} points > {maxOrbRangeSize} - No trading", StrategyLoggingLevel.Trading);
+                    return;
+                }
+            }
+            
+            // Stop ORB trading after 11 AM EST
+            if (estTime.Hour >= orbTradingCutoffHour)
+            {
+                // Only do session reversal trading after ORB cutoff
+                if (enableSessionReversalTrading)
+                {
+                    UpdateSessionHighsLows();
+                    CheckForSessionReversals();
+                }
+                return;
+            }
+            
+            // Monitor pre-market conditions during 8:15 AM - 9:30 AM EST (after ORB is captured)
+            if ((estTime.Hour == 8 && estTime.Minute >= 15) || 
+                (estTime.Hour > 8 && estTime.Hour < 9) || 
+                (estTime.Hour == 9 && estTime.Minute < 30))
+            {
+                CheckPreMarketConditions(close, high, low, currentVolume, estTime);
+            }
+            
             bool isAfterMarketOpen = estTime.Hour >= marketOpenHour && 
                                    (estTime.Hour > marketOpenHour || estTime.Minute >= marketOpenMinute);
 
             bool bullishBreakout = high > (orbHigh + MinBreakoutDistance);
             bool bearishBreakout = low < (orbLow - MinBreakoutDistance);
 
-            // Check volume requirement - now only after 9:30 AM EST
-            bool hasVolume = true;
-            if (!isAfterMarketOpen)
+            // Only enter trades after 9:30 AM EST with valid pre-market setup
+            if (!isAfterMarketOpen || !preMarketSetupValid)
             {
-                var currentVolume = HistoricalDataExtensions.Volume(this.hdm, 0);
-                hasVolume = currentVolume >= MinVolumeBeforeOpen;
-                if (!hasVolume)
+                if (isAfterMarketOpen && !preMarketSetupValid)
                 {
-                    this.Log($"Volume requirement not met before market open. Current: {currentVolume}, Required: {MinVolumeBeforeOpen}");
+                    this.Log($"⚠️ No valid pre-market setup - Midpoint was disrespected, skipping ORB trades (Smart protection!)", StrategyLoggingLevel.Trading);
                 }
-            }
-
-            // Only enter trades after 9:30 AM EST with proper volume
-            if (!isAfterMarketOpen || !hasVolume)
-            {
                 return;
             }
 
-            switch (SelectedEntryMode)
-            {
-                case EntryMode.ImmediateBreakout:
-                    HandleImmediateBreakout(bullishBreakout, bearishBreakout, close);
-                    break;
-
-                case EntryMode.WaitFor50PercentRetest:
-                    Handle50PercentRespectRetest(bullishBreakout, bearishBreakout, close, high, low);
-                    break;
-
-                case EntryMode.WaitForAnyRetest:
-                    HandleAnyRetest(bullishBreakout, bearishBreakout, close, high, low);
-                    break;
-            }
+            // Use manual trading approach based on pre-market direction
+            HandleManualTradingApproach(close, high, low, currentVolume, estTime);
             
             this.previousClose = close;
             
@@ -740,6 +762,87 @@ namespace esOrbStrategy
                 }
             }
         }
+        
+        private void CheckPreMarketConditions(double close, double high, double low, double currentVolume, DateTime estTime)
+        {
+            if (orbHigh == double.MinValue || orbLow == double.MaxValue) return;
+            
+            double orbMidpoint = (orbHigh + orbLow) / 2.0;
+            double tolerance = this.CurrentSymbol.TickSize * 2;
+            
+            // Simple range size check
+            double rangeSize = (orbHigh - orbLow) / this.CurrentSymbol.TickSize;
+            if (rangeSize > maxOrbRangeSize)
+            {
+                preMarketSetupValid = false;
+                this.Log($"❌ ORB RANGE TOO LARGE - {rangeSize:F1} points > {maxOrbRangeSize} limit", StrategyLoggingLevel.Trading);
+                return;
+            }
+            
+            // Check if midpoint was disrespected during pre-market (this protects from bad setups)
+            bool touchedMidpointAbove = high >= (orbMidpoint - tolerance) && previousClose <= orbMidpoint && close > orbMidpoint;
+            bool touchedMidpointBelow = low <= (orbMidpoint + tolerance) && previousClose >= orbMidpoint && close < orbMidpoint;
+            
+            if (touchedMidpointAbove || touchedMidpointBelow)
+            {
+                preMarketSetupValid = false;
+                this.Log($"❌ MIDPOINT DISRESPECTED in pre-market at {orbMidpoint:F2}. Setup INVALID (Smart protection!)", StrategyLoggingLevel.Trading);
+                return;
+            }
+            
+            // Setup is valid if we have a reasonable range and midpoint wasn't disrespected
+            preMarketSetupValid = true;
+            this.Log($"✅ Valid ORB setup - Range: {rangeSize:F1} points, Midpoint: {orbMidpoint:F2} respected", StrategyLoggingLevel.Trading);
+        }
+        
+        private void HandleManualTradingApproach(double close, double high, double low, double currentVolume, DateTime estTime)
+        {
+            if (orbHigh == double.MinValue || orbLow == double.MaxValue) return;
+            
+            double tolerance = this.CurrentSymbol.TickSize * 2;
+            
+            // Simple retest logic: Look for touches of ORB boundaries and bounces
+            
+            // RETEST OF ORB HIGH - Look for respect/bounce
+            bool retestingOrbHigh = (low <= orbHigh + tolerance) && (high >= orbHigh - tolerance);
+            if (retestingOrbHigh)
+            {
+                // If price touched ORB high but closed above it = LONG (showing respect as support)
+                if (low <= orbHigh && close > orbHigh)
+                {
+                    this.Log($"✅ ORB HIGH RETEST & BOUNCE - Low: {low:F2}, Close: {close:F2} above {orbHigh:F2} - LONG", StrategyLoggingLevel.Trading);
+                    PlaceLongTrade(close);
+                    return;
+                }
+                // If price touched ORB high but closed below it = SHORT (rejection/failed retest)
+                else if (high >= orbHigh && close < orbHigh)
+                {
+                    this.Log($"✅ ORB HIGH REJECTION - High: {high:F2}, Close: {close:F2} below {orbHigh:F2} - SHORT", StrategyLoggingLevel.Trading);
+                    PlaceShortTrade(close);
+                    return;
+                }
+            }
+            
+            // RETEST OF ORB LOW - Look for respect/bounce  
+            bool retestingOrbLow = (high >= orbLow - tolerance) && (low <= orbLow + tolerance);
+            if (retestingOrbLow)
+            {
+                // If price touched ORB low but closed above it = LONG (showing respect as support)
+                if (low <= orbLow && close > orbLow)
+                {
+                    this.Log($"✅ ORB LOW RETEST & BOUNCE - Low: {low:F2}, Close: {close:F2} above {orbLow:F2} - LONG", StrategyLoggingLevel.Trading);
+                    PlaceLongTrade(close);
+                    return;
+                }
+                // If price touched ORB low but closed below it = SHORT (breakdown)
+                else if (high >= orbLow && close < orbLow)
+                {
+                    this.Log($"✅ ORB LOW BREAKDOWN - High: {high:F2}, Close: {close:F2} below {orbLow:F2} - SHORT", StrategyLoggingLevel.Trading);
+                    PlaceShortTrade(close);
+                    return;
+                }
+            }
+        }
 
         private void HandleImmediateBreakout(bool bullishBreakout, bool bearishBreakout, double close)
         {
@@ -755,241 +858,20 @@ namespace esOrbStrategy
 
         private void Handle50PercentRespectRetest(bool bullishBreakout, bool bearishBreakout, double close, double high, double low)
         {
-            if (orbHigh <= double.MinValue || orbLow >= double.MaxValue) return;
-            
-            double orbMidpoint = (orbHigh + orbLow) / 2.0;
-            double tolerance = this.CurrentSymbol.TickSize * 2;
-            double currentVolume = HistoricalDataExtensions.Volume(this.hdm, 0);
-            DateTime currentTime = HistoricalDataExtensions.Time(this.hdm, 0);
-            
-            // Check for any new breakout (can change direction)
-            if (bullishBreakout || bearishBreakout)
+            // For ORB breakouts, use simple immediate entry logic
+            if (bullishBreakout && lastTradeDirection != "Long")
             {
-                if (bullishBreakout)
-                {
-                    this.Log($"🔥 BULLISH BREAKOUT above {orbHigh:F2} at {close:F2} - Volume: {currentVolume}", StrategyLoggingLevel.Trading);
-                    
-                    // Check for immediate entry on strong volume
-                    if (enableImmediateStrongVolumeEntry && currentVolume >= strongVolumeThreshold)
-                    {
-                        this.Log($"⚡ STRONG VOLUME ({currentVolume} >= {strongVolumeThreshold}) - IMMEDIATE LONG ENTRY!", StrategyLoggingLevel.Trading);
-                        PlaceLongTrade(close);
-                        return;
-                    }
-                    
-                    // If we were waiting for a short retest, this invalidates it
-                    if (waitingForRetest && lastTradeDirection == "WaitingShort")
-                    {
-                        this.Log($"🔄 DIRECTION CHANGE - Bullish volume override! Entering LONG immediately", StrategyLoggingLevel.Trading);
-                        PlaceLongTrade(close);
-                        waitingForRetest = false;
-                        return;
-                    }
-                    
-                    // Start waiting for potential retest of ORB high as support
-                    waitingForRetest = true;
-                    retestLevel = orbHigh;
-                    lastTradeDirection = "WaitingLong";
-                    waitingForRetestStartTime = currentTime;
-                    this.Log($"📊 Moderate volume ({currentVolume}) - Waiting for RETEST of ORB HIGH ({orbHigh:F2}) as support", StrategyLoggingLevel.Trading);
-                }
-                else if (bearishBreakout)
-                {
-                    this.Log($"🔥 BEARISH BREAKOUT below {orbLow:F2} at {close:F2} - Volume: {currentVolume}", StrategyLoggingLevel.Trading);
-                    
-                    // Check for immediate entry on strong volume
-                    if (enableImmediateStrongVolumeEntry && currentVolume >= strongVolumeThreshold)
-                    {
-                        this.Log($"⚡ STRONG VOLUME ({currentVolume} >= {strongVolumeThreshold}) - IMMEDIATE SHORT ENTRY!", StrategyLoggingLevel.Trading);
-                        PlaceShortTrade(close);
-                        return;
-                    }
-                    
-                    // If we were waiting for a long retest, this invalidates it
-                    if (waitingForRetest && lastTradeDirection == "WaitingLong")
-                    {
-                        this.Log($"🔄 DIRECTION CHANGE - Bearish volume override! Entering SHORT immediately", StrategyLoggingLevel.Trading);
-                        PlaceShortTrade(close);
-                        waitingForRetest = false;
-                        return;
-                    }
-                    
-                    // Start waiting for potential retest of ORB low as resistance
-                    waitingForRetest = true;
-                    retestLevel = orbLow;
-                    lastTradeDirection = "WaitingShort";
-                    waitingForRetestStartTime = currentTime;
-                    this.Log($"📊 Moderate volume ({currentVolume}) - Waiting for RETEST of ORB LOW ({orbLow:F2}) as resistance", StrategyLoggingLevel.Trading);
-                }
-                return;
+                PlaceLongTrade(close);
             }
-            
-            // Check for retest timeout
-            if (waitingForRetest && waitingForRetestStartTime != DateTime.MinValue)
+            else if (bearishBreakout && lastTradeDirection != "Short")
             {
-                double minutesWaiting = (currentTime - waitingForRetestStartTime).TotalMinutes;
-                if (minutesWaiting >= retestTimeoutMinutes)
-                {
-                    this.Log($"⏰ RETEST TIMEOUT after {minutesWaiting:F1} minutes - Entering {lastTradeDirection.Replace("Waiting", "").ToUpper()} position anyway!", StrategyLoggingLevel.Trading);
-                    
-                    if (lastTradeDirection == "WaitingLong")
-                    {
-                        PlaceLongTrade(close);
-                    }
-                    else if (lastTradeDirection == "WaitingShort")
-                    {
-                        PlaceShortTrade(close);
-                    }
-                    
-                    waitingForRetest = false;
-                    return;
-                }
-            }
-            
-            // Monitor for retests of key levels
-            if (waitingForRetest && !retestInvalidated)
-            {
-                // Check for retest of multiple levels: ORB boundaries AND midpoint
-                bool retestingOrbHigh = Math.Abs(close - orbHigh) <= tolerance || 
-                                       (low <= orbHigh + tolerance && high >= orbHigh - tolerance);
-                bool retestingOrbLow = Math.Abs(close - orbLow) <= tolerance || 
-                                      (high >= orbLow - tolerance && low <= orbLow + tolerance);
-                bool retestingMidpoint = Math.Abs(close - orbMidpoint) <= tolerance || 
-                                       (low <= orbMidpoint + tolerance && high >= orbMidpoint - tolerance);
-                
-                if (lastTradeDirection == "WaitingLong")
-                {
-                    // For long setups: Watch for retests of ORB high or midpoint as support
-                    if ((retestingOrbHigh || retestingMidpoint) && !retestLevelReached)
-                    {
-                        retestLevelReached = true;
-                        string levelName = retestingOrbHigh ? "ORB HIGH" : "MIDPOINT";
-                        double actualLevel = retestingOrbHigh ? orbHigh : orbMidpoint;
-                        this.Log($"🎯 {levelName} RETEST in progress at {actualLevel:F2} - Watching for support/rejection", StrategyLoggingLevel.Trading);
-                        retestLevel = actualLevel;
-                    }
-                    
-                    if (retestLevelReached)
-                    {
-                        // Look for clear respect/support of the level
-                        if (low <= retestLevel && close > retestLevel && !retestRespected)
-                        {
-                            retestRespected = true;
-                            waitingForRetest = false;
-                            this.Log($"✅ LEVEL RESPECTED! Touched {retestLevel:F2} (low: {low:F2}) but CLOSED ABOVE at {close:F2}", StrategyLoggingLevel.Trading);
-                            this.Log($"🚀 Volume: {currentVolume} - Entering LONG position", StrategyLoggingLevel.Trading);
-                            PlaceLongTrade(close);
-                        }
-                        // Invalidation: Close below the retest level
-                        else if (close < (retestLevel - tolerance) && !retestRespected)
-                        {
-                            this.Log($"❌ LONG SETUP INVALIDATED - Closed below {retestLevel:F2} at {close:F2}", StrategyLoggingLevel.Trading);
-                            
-                            // Check if this turns into a bearish breakout
-                            if (close < orbLow - tolerance)
-                            {
-                                this.Log($"🔄 SWITCHING TO SHORT - Price broke below ORB LOW! Volume: {currentVolume}", StrategyLoggingLevel.Trading);
-                                PlaceShortTrade(close);
-                                waitingForRetest = false;
-                            }
-                            else
-                            {
-                                // Reset and wait for new setup
-                                ResetRetestState();
-                            }
-                        }
-                    }
-                }
-                else if (lastTradeDirection == "WaitingShort")
-                {
-                    // For short setups: Watch for retests of ORB low or midpoint as resistance
-                    if ((retestingOrbLow || retestingMidpoint) && !retestLevelReached)
-                    {
-                        retestLevelReached = true;
-                        string levelName = retestingOrbLow ? "ORB LOW" : "MIDPOINT";
-                        double actualLevel = retestingOrbLow ? orbLow : orbMidpoint;
-                        this.Log($"🎯 {levelName} RETEST in progress at {actualLevel:F2} - Watching for resistance/rejection", StrategyLoggingLevel.Trading);
-                        retestLevel = actualLevel;
-                    }
-                    
-                    if (retestLevelReached)
-                    {
-                        // Look for clear respect/resistance at the level
-                        if (high >= retestLevel && close < retestLevel && !retestRespected)
-                        {
-                            retestRespected = true;
-                            waitingForRetest = false;
-                            this.Log($"✅ LEVEL RESPECTED! Touched {retestLevel:F2} (high: {high:F2}) but CLOSED BELOW at {close:F2}", StrategyLoggingLevel.Trading);
-                            this.Log($"📉 Volume: {currentVolume} - Entering SHORT position", StrategyLoggingLevel.Trading);
-                            PlaceShortTrade(close);
-                        }
-                        // Invalidation: Close above the retest level
-                        else if (close > (retestLevel + tolerance) && !retestRespected)
-                        {
-                            this.Log($"❌ SHORT SETUP INVALIDATED - Closed above {retestLevel:F2} at {close:F2}", StrategyLoggingLevel.Trading);
-                            
-                            // Check if this turns into a bullish breakout
-                            if (close > orbHigh + tolerance)
-                            {
-                                this.Log($"🔄 SWITCHING TO LONG - Price broke above ORB HIGH! Volume: {currentVolume}", StrategyLoggingLevel.Trading);
-                                PlaceLongTrade(close);
-                                waitingForRetest = false;
-                            }
-                            else
-                            {
-                                // Reset and wait for new setup
-                                ResetRetestState();
-                            }
-                        }
-                    }
-                }
+                PlaceShortTrade(close);
             }
         }
         
-        private void ResetRetestState()
-        {
-            waitingForRetest = false;
-            retestLevelReached = false;
-            retestRespected = false;
-            retestInvalidated = false;
-            lastTradeDirection = "";
-            waitingForRetestStartTime = DateTime.MinValue;
-            this.Log($"🔄 RETEST STATE RESET - Ready for new setup", StrategyLoggingLevel.Trading);
-        }
+        // ResetRetestState method removed - using simplified manual trading approach
 
-        private void HandleAnyRetest(bool bullishBreakout, bool bearishBreakout, double close, double high, double low)
-        {
-            if (!waitingForRetest)
-            {
-                if (bullishBreakout)
-                {
-                    waitingForRetest = true;
-                    retestLevel = orbHigh;
-                    lastTradeDirection = "WaitingLong";
-                    this.Log($"Bullish breakout detected. Waiting for any retest to {retestLevel}");
-                }
-                else if (bearishBreakout)
-                {
-                    waitingForRetest = true;
-                    retestLevel = orbLow;
-                    lastTradeDirection = "WaitingShort";
-                    this.Log($"Bearish breakout detected. Waiting for any retest to {retestLevel}");
-                }
-            }
-            else
-            {
-                if (lastTradeDirection == "WaitingLong" && low <= retestLevel)
-                {
-                    PlaceLongTrade(close);
-                    waitingForRetest = false;
-                }
-                else if (lastTradeDirection == "WaitingShort" && high >= retestLevel)
-                {
-                    PlaceShortTrade(close);
-                    waitingForRetest = false;
-                }
-            }
-        }
+        // HandleAnyRetest method removed - using simplified manual trading approach
 
         private void PlaceLongTrade(double entryPrice)
         {
