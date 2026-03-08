@@ -180,20 +180,32 @@ A collection of automated trading strategies for the Quantower platform. Each st
 | **Quantity** | 1 | Number of contracts/shares per trade |
 | **Period** | SECOND30 | Chart timeframe for analysis (30-second bars) |
 | **Start Point** | -1 day | Historical data start point |
-| **ORB Session Start Hour (24h format)** | 20 | Hour when ORB session begins (20 = 8:00 PM) |
-| **ORB Session Start Minute** | 0 | Minute when ORB session begins |
-| **ORB Session End Hour (24h format)** | 20 | Hour when ORB session ends (20 = 8:00 PM) |
-| **ORB Session End Minute** | 5 | Minute when ORB session ends (5 = 8:05 PM) |
-| **Strategy Mode** | "Confirmed Breakout" | Entry mode: "Aggressive Breakout" or "Confirmed Breakout" |
-| **Confirmation Candle Minutes** | 1 | Minutes to wait for breakout confirmation |
-| **Risk Reward Ratio** | 2.0 | Target profit as multiple of risk (2.0 = 2:1 ratio) |
-| **Range Offset (in ticks)** | 0 | Additional buffer above/below ORB boundaries |
-| **Max Trades** | 10 | Maximum number of trades allowed |
-| **Max Profit** | 1000 | Strategy stops when this profit level is reached |
-| **Max Loss** | 500 | Strategy stops when this loss level is reached |
-| **Use Stop Orders** | true | Use stop orders for breakout entry vs market orders |
+| **ORB Start Time - Hour (24hr)** | 20 | Hour when ORB session begins (20 = 8:00 PM EST) |
+| **ORB Start Time - Minute** | 0 | Minute when ORB session begins (0 = :00 minutes) |
+| **ORB End Time - Hour (24hr)** | 20 | Hour when ORB session ends (20 = 8:00 PM EST) |
+| **ORB End Time - Minute** | 5 | Minute when ORB session ends (5 = :05 minutes = 5 minute window) |
+| **Breakout Entry Mode** | ConfirmedBreakout | Dropdown: "AggressiveBreakout" or "ConfirmedBreakout" |
+| **Confirmation Wait Time (minutes)** | 1 | Minutes to wait for breakout confirmation after initial break |
+| **Risk:Reward Ratio** | 2.0 | Target profit as multiple of risk (2.0 = 2:1 ratio) |
+| **ORB Buffer Distance (ticks)** | 0 | Additional safety buffer above/below ORB boundaries in ticks |
+| **Max Daily Trades** | 10 | Maximum number of trades allowed per day |
+| **Daily Profit Target** | 1000 | Strategy stops when this profit level is reached |
+| **Daily Loss Limit** | 500 | Strategy stops when this loss level is reached |
+| **Use Stop Orders (vs Market)** | true | Use stop orders for breakout entry vs immediate market orders |
 
-**How it works:** Captures the high and low during the specified ORB session (8:00-8:05 PM by default), then monitors for price breakouts above the high or below the low. In "Confirmed Breakout" mode, waits for a confirmation candle before entering. Risk/reward targets are calculated automatically based on the ORB range size.
+**How it works:** 
+
+1. **ORB Creation**: Captures the high/low during your specified time window (e.g., 8:00-8:05 PM EST)
+2. **Breakout Detection**: Monitors for price breaking above ORB High or below ORB Low  
+3. **Entry Modes**:
+   - **Aggressive**: Enters immediately on breakout
+   - **Confirmed**: Waits for confirmation time before entering
+4. **Risk Management**: Stop loss placed at opposite ORB boundary + buffer, take profit calculated using risk:reward ratio
+
+**Parameter Explanations:**
+- **ORB Buffer Distance**: Adds extra ticks above/below ORB levels for safer entry/exit (0 = exact ORB levels)
+- **Confirmation Wait**: Prevents false breakouts by waiting X minutes to confirm price stays broken out 
+- **Risk:Reward**: If risk is $10, a 2:1 ratio means profit target is $20
 
 ---
 

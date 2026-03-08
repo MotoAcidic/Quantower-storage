@@ -7,6 +7,12 @@ using TradingPlatform.BusinessLayer;
 
 namespace goldOrbStrategy
 {
+    public enum BreakoutMode
+    {
+        AggressiveBreakout,
+        ConfirmedBreakout
+    }
+
     public sealed class goldOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     {
         [InputParameter("Symbol", 0)]
@@ -33,40 +39,40 @@ namespace goldOrbStrategy
         [InputParameter("Start point", 6)]
         public DateTime StartPoint { get; set; }
 
-        [InputParameter("ORB Session Start Hour (24h format)")]
-        public int orbSessionStartHour = 20; // 8 PM
+        [InputParameter("ORB Start Time - Hour (24hr)", 7)]
+        public int orbStartHour = 20; // 8 PM EST
 
-        [InputParameter("ORB Session Start Minute")]
-        public int orbSessionStartMinute = 0; // 8:00 PM
+        [InputParameter("ORB Start Time - Minute", 8)]
+        public int orbStartMinute = 0; // :00
 
-        [InputParameter("ORB Session End Hour (24h format)")]
-        public int orbSessionEndHour = 20; // 8 PM
+        [InputParameter("ORB End Time - Hour (24hr)", 9)]
+        public int orbEndHour = 20; // 8 PM EST
 
-        [InputParameter("ORB Session End Minute")]
-        public int orbSessionEndMinute = 5; // 8:05 PM
+        [InputParameter("ORB End Time - Minute", 10)]
+        public int orbEndMinute = 5; // :05 (makes it 8:00-8:05 PM = 5 minute window)
 
-        [InputParameter("Strategy Mode")]
-        public string strategyMode = "Confirmed Breakout"; // Options: "Aggressive Breakout", "Confirmed Breakout"
+        [InputParameter("Breakout Entry Mode", 11)]
+        public BreakoutMode entryMode = BreakoutMode.ConfirmedBreakout;
 
-        [InputParameter("Confirmation Candle Minutes")]
-        public int confirmationCandleMinutes = 1; // Minutes for confirmation candle
+        [InputParameter("Confirmation Wait Time (minutes)", 12)]
+        public int confirmationMinutes = 1;
 
-        [InputParameter("Risk Reward Ratio")]
+        [InputParameter("Risk:Reward Ratio", 13)]
         public double riskRewardRatio = 2.0;
 
-        [InputParameter("Range Offset (in ticks)")]
-        public int rangeOffsetTicks = 0;
+        [InputParameter("ORB Buffer Distance (ticks)", 14)]
+        public int orbBufferTicks = 0;
 
-        [InputParameter("Max Trades")]
+        [InputParameter("Max Daily Trades", 15)]
         public int maxTrades = 10;
 
-        [InputParameter("Max Profit")]
+        [InputParameter("Daily Profit Target", 16)]
         public int maxProfit = 1000;
 
-        [InputParameter("Max Loss")]
+        [InputParameter("Daily Loss Limit", 17)]
         public int maxLoss = 500;
 
-        [InputParameter("Use Stop Orders")]
+        [InputParameter("Use Stop Orders (vs Market)", 18)]
         public bool useStopOrders = true;
 
         public override string[] MonitoringConnectionsIds => new string[] { this.CurrentSymbol?.ConnectionId, this.CurrentAccount?.ConnectionId };
@@ -212,8 +218,6 @@ namespace goldOrbStrategy
             this.longPositionsCount = positions.Count(x => x.Side == Side.Buy);
             this.shortPositionsCount = positions.Count(x => x.Side == Side.Sell);
 
-            double currentPositionsQty = positions.Sum(x => x.Side == Side.Buy ? x.Quantity : -x.Quantity);
-
             this.tradeCounter += 1;
             this.Log($"Position added. Trade count: {this.tradeCounter}");
         }
@@ -301,8 +305,8 @@ namespace goldOrbStrategy
             }
 
             // Calculate ORB session times for current day
-            this.orbSessionStart = currentDate.AddHours(this.orbSessionStartHour).AddMinutes(this.orbSessionStartMinute);
-            this.orbSessionEnd = currentDate.AddHours(this.orbSessionEndHour).AddMinutes(this.orbSessionEndMinute);
+            this.orbSessionStart = currentDate.AddHours(this.orbStartHour).AddMinutes(this.orbStartMinute);
+            this.orbSessionEnd = currentDate.AddHours(this.orbEndHour).AddMinutes(this.orbEndMinute);
 
             // Handle session spanning midnight
             if (this.orbSessionEnd <= this.orbSessionStart)
@@ -364,7 +368,7 @@ namespace goldOrbStrategy
             bool bearishBreakout = currentClose < this.orbLow && previousClose >= this.orbLow;
 
             // Handle strategy modes
-            if (this.strategyMode == "Aggressive Breakout")
+            if (this.entryMode == BreakoutMode.AggressiveBreakout)
             {
                 if (bullishBreakout && !this.buyOrderPlaced)
                 {
@@ -375,7 +379,7 @@ namespace goldOrbStrategy
                     this.PlaceSellOrder(currentClose);
                 }
             }
-            else if (this.strategyMode == "Confirmed Breakout")
+            else if (this.entryMode == BreakoutMode.ConfirmedBreakout)
             {
                 // For confirmed breakouts, wait for confirmation candle
                 if (bullishBreakout && !this.bullishBreakoutDetected)
@@ -402,7 +406,7 @@ namespace goldOrbStrategy
         {
             TimeSpan timeSinceBreakout = currentTime - this.breakoutTime;
             
-            if (timeSinceBreakout.TotalMinutes >= this.confirmationCandleMinutes)
+            if (timeSinceBreakout.TotalMinutes >= this.confirmationMinutes)
             {
                 if (this.bullishBreakoutDetected && currentClose > this.orbHigh && !this.buyOrderPlaced)
                 {
@@ -426,7 +430,7 @@ namespace goldOrbStrategy
 
         private void PlaceBuyOrder(double entryPrice)
         {
-            double stopPrice = this.orbLow - (this.rangeOffsetTicks * 0.25);
+            double stopPrice = this.orbLow - (this.orbBufferTicks * 0.25);
             double riskAmount = entryPrice - stopPrice;
             double targetPrice = entryPrice + (riskAmount * this.riskRewardRatio);
 
@@ -468,7 +472,7 @@ namespace goldOrbStrategy
 
         private void PlaceSellOrder(double entryPrice)
         {
-            double stopPrice = this.orbHigh + (this.rangeOffsetTicks * 0.25);
+            double stopPrice = this.orbHigh + (this.orbBufferTicks * 0.25);
             double riskAmount = stopPrice - entryPrice;
             double targetPrice = entryPrice - (riskAmount * this.riskRewardRatio);
 
