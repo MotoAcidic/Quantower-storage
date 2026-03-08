@@ -116,6 +116,12 @@ namespace esOrbStrategy
         private double retestLevel;
         private string lastTradeDirection = "";
 
+        // Enhanced 50% retest tracking
+        private bool retestLevelReached = false;
+        private bool retestRespected = false;
+        private bool retestInvalidated = false;
+        private double previousClose = 0.0;
+
         // Risk Management
         private int tradeCount = 0;
         private double totalPnL = 0;
@@ -149,7 +155,7 @@ namespace esOrbStrategy
             : base()
         {
             this.Name = "ES ORB Strategy";
-            this.Description = "E-mini S&P 500 Opening Range Breakout Strategy";
+            this.Description = "E-mini S&P 500 ORB - Enhanced 50% Retest with Respect Logic & 9:30 AM Volume Check";
 
             this.Period = Period.SECOND30;
             this.StartPoint = Core.TimeUtils.DateTimeUtcNow.AddDays(-1);
@@ -261,6 +267,12 @@ namespace esOrbStrategy
                 waitingForRetest = false;
                 lastTradeDirection = "";
 
+                // Reset enhanced 50% retest tracking
+                retestLevelReached = false;
+                retestRespected = false;
+                retestInvalidated = false;
+                previousClose = 0.0;
+
                 // Reset trailing stop tracking
                 this.currentTrailingStop = 0.0;
                 this.trailingStopActive = false;
@@ -334,6 +346,12 @@ namespace esOrbStrategy
             orbCaptured = false;
             waitingForRetest = false;
             retestLevel = 0;
+            
+            // Reset 50% retest tracking
+            retestLevelReached = false;
+            retestRespected = false;
+            retestInvalidated = false;
+            previousClose = 0.0;
         }
 
         private void CheckOrbSession()
@@ -350,8 +368,17 @@ namespace esOrbStrategy
             if (this.lastOrbDate != currentDate)
             {
                 this.InitializeOrbSession();
+                
+                // Reset daily PnL and trade tracking variables
+                this.tradeCount = 0;
+                this.totalPnL = 0.0;
+                this.totalNetPl = 0.0;
+                this.totalGrossPl = 0.0;
+                this.totalFee = 0.0;
+                this.tradeCounter = 0;
+                
                 this.lastOrbDate = currentDate;
-                this.Log($"New trading day detected: {currentDate:yyyy-MM-dd}");
+                this.Log($"🗓️ NEW TRADING DAY: {currentDate:yyyy-MM-dd} - Daily PnL and trade limits RESET", StrategyLoggingLevel.Trading);
             }
 
             // Calculate ORB session times for current day in EST
@@ -404,91 +431,162 @@ namespace esOrbStrategy
             var low = HistoricalDataExtensions.Low(this.hdm, 0);
             var currentTime = HistoricalDataExtensions.Time(this.hdm, 0);
 
+            // Convert to EST for proper market open check
+            DateTime estTime = currentTime.AddHours(this.estTimezoneOffset);
+            bool isAfterMarketOpen = estTime.Hour >= marketOpenHour && 
+                                   (estTime.Hour > marketOpenHour || estTime.Minute >= marketOpenMinute);
+
             bool bullishBreakout = high > (orbHigh + MinBreakoutDistance);
             bool bearishBreakout = low < (orbLow - MinBreakoutDistance);
 
-            // Check volume requirement before market open
+            // Check volume requirement - now only after 9:30 AM EST
             bool hasVolume = true;
-            if (currentTime.Hour < marketOpenHour || (currentTime.Hour == marketOpenHour && currentTime.Minute < marketOpenMinute))
+            if (!isAfterMarketOpen)
             {
                 var currentVolume = HistoricalDataExtensions.Volume(this.hdm, 0);
                 hasVolume = currentVolume >= MinVolumeBeforeOpen;
+                if (!hasVolume)
+                {
+                    this.Log($"Volume requirement not met before market open. Current: {currentVolume}, Required: {MinVolumeBeforeOpen}");
+                }
+            }
+
+            // Only enter trades after 9:30 AM EST with proper volume
+            if (!isAfterMarketOpen || !hasVolume)
+            {
+                return;
             }
 
             switch (SelectedEntryMode)
             {
                 case EntryMode.ImmediateBreakout:
-                    HandleImmediateBreakout(bullishBreakout, bearishBreakout, close, hasVolume);
+                    HandleImmediateBreakout(bullishBreakout, bearishBreakout, close);
                     break;
 
                 case EntryMode.WaitFor50PercentRetest:
-                    Handle50PercentRetest(bullishBreakout, bearishBreakout, close, high, low, hasVolume);
+                    Handle50PercentRespectRetest(bullishBreakout, bearishBreakout, close, high, low);
                     break;
 
                 case EntryMode.WaitForAnyRetest:
-                    HandleAnyRetest(bullishBreakout, bearishBreakout, close, high, low, hasVolume);
+                    HandleAnyRetest(bullishBreakout, bearishBreakout, close, high, low);
                     break;
             }
+            
+            this.previousClose = close;
         }
 
-        private void HandleImmediateBreakout(bool bullishBreakout, bool bearishBreakout, double close, bool hasVolume)
+        private void HandleImmediateBreakout(bool bullishBreakout, bool bearishBreakout, double close)
         {
-            if (bullishBreakout && hasVolume && lastTradeDirection != "Long")
+            if (bullishBreakout && lastTradeDirection != "Long")
             {
                 PlaceLongTrade(close);
             }
-            else if (bearishBreakout && hasVolume && lastTradeDirection != "Short")
+            else if (bearishBreakout && lastTradeDirection != "Short")
             {
                 PlaceShortTrade(close);
             }
         }
 
-        private void Handle50PercentRetest(bool bullishBreakout, bool bearishBreakout, double close, double high, double low, bool hasVolume)
+        private void Handle50PercentRespectRetest(bool bullishBreakout, bool bearishBreakout, double close, double high, double low)
         {
             if (!waitingForRetest)
             {
-                if (bullishBreakout && hasVolume)
+                // Initial breakout detection
+                if (bullishBreakout)
                 {
                     waitingForRetest = true;
-                    retestLevel = orbHigh + (close - orbHigh) * 0.5;
+                    retestLevel = orbHigh + (close - orbHigh) * 0.5; // 50% retracement from breakout
                     lastTradeDirection = "WaitingLong";
-                    this.Log($"Bullish breakout detected. Waiting for 50% retest to {retestLevel}");
+                    retestLevelReached = false;
+                    retestRespected = false;
+                    retestInvalidated = false;
+                    this.Log($"📈 BULLISH BREAKOUT - Waiting for 50% retest and RESPECT at {retestLevel:F2}", StrategyLoggingLevel.Trading);
                 }
-                else if (bearishBreakout && hasVolume)
+                else if (bearishBreakout)
                 {
                     waitingForRetest = true;
-                    retestLevel = orbLow + (close - orbLow) * 0.5;
+                    retestLevel = orbLow + (close - orbLow) * 0.5; // 50% retracement from breakout
                     lastTradeDirection = "WaitingShort";
-                    this.Log($"Bearish breakout detected. Waiting for 50% retest to {retestLevel}");
+                    retestLevelReached = false;
+                    retestRespected = false;
+                    retestInvalidated = false;
+                    this.Log($"📉 BEARISH BREAKOUT - Waiting for 50% retest and RESPECT at {retestLevel:F2}", StrategyLoggingLevel.Trading);
                 }
             }
-            else
+            else if (!retestInvalidated)
             {
-                if (lastTradeDirection == "WaitingLong" && low <= retestLevel)
+                // Monitoring retest behavior
+                if (lastTradeDirection == "WaitingLong")
                 {
-                    PlaceLongTrade(close);
-                    waitingForRetest = false;
+                    // For long: price should come down to retest level and bounce
+                    if (low <= retestLevel && !retestLevelReached)
+                    {
+                        retestLevelReached = true;
+                        this.Log($"🎯 50% RETEST LEVEL REACHED - Monitoring for respect/rejection at {retestLevel:F2}", StrategyLoggingLevel.Trading);
+                    }
+                    
+                    if (retestLevelReached)
+                    {
+                        // Check for respect (bounce) - price was at/below retest level and now moving up
+                        if (this.previousClose <= retestLevel && close > retestLevel && !retestRespected)
+                        {
+                            retestRespected = true;
+                            this.Log($"✅ 50% LEVEL RESPECTED - Price bounced from {retestLevel:F2}. Entering LONG at {close:F2}", StrategyLoggingLevel.Trading);
+                            PlaceLongTrade(close);
+                            waitingForRetest = false;
+                        }
+                        // Check for invalidation - price goes significantly through retest level without bounce
+                        else if (low < (retestLevel - 2.0) && !retestRespected) // 2 point buffer
+                        {
+                            retestInvalidated = true;
+                            waitingForRetest = false;
+                            this.Log($"❌ 50% RETEST INVALIDATED - Price broke through {retestLevel:F2} without respect. No trade.", StrategyLoggingLevel.Trading);
+                        }
+                    }
                 }
-                else if (lastTradeDirection == "WaitingShort" && high >= retestLevel)
+                else if (lastTradeDirection == "WaitingShort")
                 {
-                    PlaceShortTrade(close);
-                    waitingForRetest = false;
+                    // For short: price should come up to retest level and get rejected
+                    if (high >= retestLevel && !retestLevelReached)
+                    {
+                        retestLevelReached = true;
+                        this.Log($"🎯 50% RETEST LEVEL REACHED - Monitoring for respect/rejection at {retestLevel:F2}", StrategyLoggingLevel.Trading);
+                    }
+                    
+                    if (retestLevelReached)
+                    {
+                        // Check for respect (rejection) - price was at/above retest level and now moving down
+                        if (this.previousClose >= retestLevel && close < retestLevel && !retestRespected)
+                        {
+                            retestRespected = true;
+                            this.Log($"✅ 50% LEVEL RESPECTED - Price rejected from {retestLevel:F2}. Entering SHORT at {close:F2}", StrategyLoggingLevel.Trading);
+                            PlaceShortTrade(close);
+                            waitingForRetest = false;
+                        }
+                        // Check for invalidation - price goes significantly through retest level without rejection
+                        else if (high > (retestLevel + 2.0) && !retestRespected) // 2 point buffer
+                        {
+                            retestInvalidated = true;
+                            waitingForRetest = false;
+                            this.Log($"❌ 50% RETEST INVALIDATED - Price broke through {retestLevel:F2} without respect. No trade.", StrategyLoggingLevel.Trading);
+                        }
+                    }
                 }
             }
         }
 
-        private void HandleAnyRetest(bool bullishBreakout, bool bearishBreakout, double close, double high, double low, bool hasVolume)
+        private void HandleAnyRetest(bool bullishBreakout, bool bearishBreakout, double close, double high, double low)
         {
             if (!waitingForRetest)
             {
-                if (bullishBreakout && hasVolume)
+                if (bullishBreakout)
                 {
                     waitingForRetest = true;
                     retestLevel = orbHigh;
                     lastTradeDirection = "WaitingLong";
                     this.Log($"Bullish breakout detected. Waiting for any retest to {retestLevel}");
                 }
-                else if (bearishBreakout && hasVolume)
+                else if (bearishBreakout)
                 {
                     waitingForRetest = true;
                     retestLevel = orbLow;
@@ -602,7 +700,19 @@ namespace esOrbStrategy
 
         private bool IsMaxPnLExceeded()
         {
-            return totalPnL >= MaxProfit || totalPnL <= -MaxLoss;
+            bool profitExceeded = totalPnL >= MaxProfit;
+            bool lossExceeded = totalPnL <= -MaxLoss;
+            
+            if (profitExceeded)
+            {
+                this.Log($"💰 DAILY PROFIT TARGET REACHED: ${totalPnL:F2} >= ${MaxProfit} - No more trades today", StrategyLoggingLevel.Trading);
+            }
+            else if (lossExceeded)
+            {
+                this.Log($"🚫 DAILY LOSS LIMIT REACHED: ${totalPnL:F2} <= -${MaxLoss} - No more trades today", StrategyLoggingLevel.Trading);
+            }
+            
+            return profitExceeded || lossExceeded;
         }
 
         private void UpdateTrailingStop()
