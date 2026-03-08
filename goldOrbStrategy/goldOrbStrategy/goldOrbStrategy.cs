@@ -56,10 +56,10 @@ namespace goldOrbStrategy
         public int orbStartMinute = 0; // :00
 
         [InputParameter("ORB End Time - Hour (24hr)", 9)]
-        public int orbEndHour = 20; // 8 PM EST
+        public int orbEndHour = 24; // 12 AM EST (Midnight)
 
         [InputParameter("ORB End Time - Minute", 10)]
-        public int orbEndMinute = 5; // :05 (makes it 8:00-8:05 PM = 5 minute window)
+        public int orbEndMinute = 0; // :00 (8:00 PM - 12:00 AM = 4 hour window)
 
         [InputParameter("Breakout Entry Mode", 11, variants: new object[]
         {
@@ -68,7 +68,7 @@ namespace goldOrbStrategy
             "Retest 50% Zone", BreakoutMode.Retest50Percent,
             "Candle Closure", BreakoutMode.CandleClosure
         })]
-        public BreakoutMode entryMode = BreakoutMode.CandleClosure;
+        public BreakoutMode entryMode = BreakoutMode.FirstBreakout;
 
         [InputParameter("Confirmation Wait Time (minutes)", 12)]
         public int confirmationMinutes = 1;
@@ -97,7 +97,10 @@ namespace goldOrbStrategy
         [InputParameter("Use Stop Orders (vs Market)", 20)]
         public bool useStopOrders = true;
 
-        [InputParameter("Stop Loss Mode", 21, variants: new object[]
+        [InputParameter("EST Timezone Offset (hours)", 21)]
+        public double estTimezoneOffset = -5.0; // EST is UTC-5 (change to -4 for EDT)
+
+        [InputParameter("Stop Loss Mode", 22, variants: new object[]
         {
             "Full ORB Range", StopLossMode.FullOrbRange,
             "50% ORB Range", StopLossMode.FiftyPercentOrb,
@@ -106,10 +109,10 @@ namespace goldOrbStrategy
         })]
         public StopLossMode stopLossMode = StopLossMode.FullOrbRange;
 
-        [InputParameter("Fixed Stop Loss (Price Distance)", 22)]
+        [InputParameter("Fixed Stop Loss (Price Distance)", 23)]
         public double fixedStopLossDollar = 5.0;
 
-        [InputParameter("Fixed Stop Loss (Ticks)", 23)]
+        [InputParameter("Fixed Stop Loss (Ticks)", 24)]
         public int fixedStopLossTicks = 20;
 
         public override string[] MonitoringConnectionsIds => new string[] { this.CurrentSymbol?.ConnectionId, this.CurrentAccount?.ConnectionId };
@@ -354,32 +357,55 @@ namespace goldOrbStrategy
         private void UpdateOrbSession()
         {
             DateTime currentTime = HistoricalDataExtensions.Time(this.hdm, 0);
-            DateTime currentDate = currentTime.Date;
+            
+            // Convert to EST using configurable offset
+            DateTime estTime = currentTime.AddHours(this.estTimezoneOffset);
+            DateTime currentDate = estTime.Date;
+            
+            this.Log($"Current UTC Time: {currentTime:yyyy-MM-dd HH:mm:ss}, EST Time: {estTime:yyyy-MM-dd HH:mm:ss}");
 
             // Reset ORB on new day
             if (this.lastOrbDate != currentDate)
             {
                 this.ResetOrbForNewDay();
                 this.lastOrbDate = currentDate;
+                this.Log($"New trading day detected: {currentDate:yyyy-MM-dd}");
             }
 
-            // Calculate ORB session times for current day
+            // Fix hour 24 issue - convert to hour 0 of next day
+            int actualEndHour = this.orbEndHour == 24 ? 0 : this.orbEndHour;
+            
+            // Calculate ORB session times for current day in EST
             this.orbSessionStart = currentDate.AddHours(this.orbStartHour).AddMinutes(this.orbStartMinute);
-            this.orbSessionEnd = currentDate.AddHours(this.orbEndHour).AddMinutes(this.orbEndMinute);
+            DateTime endDate = this.orbEndHour == 24 ? currentDate.AddDays(1) : currentDate;
+            this.orbSessionEnd = endDate.AddHours(actualEndHour).AddMinutes(this.orbEndMinute);
 
-            // Handle session spanning midnight
-            if (this.orbSessionEnd <= this.orbSessionStart)
-            {
-                this.orbSessionEnd = this.orbSessionEnd.AddDays(1);
-            }
-
+            this.Log($"ORB Session Window: {this.orbSessionStart:HH:mm} to {this.orbSessionEnd:HH:mm} EST");
+            
             // Check if we're in ORB session
-            this.inOrbSession = currentTime >= this.orbSessionStart && currentTime <= this.orbSessionEnd;
+            bool previousInSession = this.inOrbSession;
+            this.inOrbSession = estTime >= this.orbSessionStart && estTime < this.orbSessionEnd;
+            
+            if (this.inOrbSession != previousInSession)
+            {
+                if (this.inOrbSession)
+                {
+                    this.Log($"ORB SESSION STARTED at {estTime:HH:mm:ss} EST");
+                }
+                else
+                {
+                    this.Log($"ORB SESSION ENDED at {estTime:HH:mm:ss} EST - Range: {this.orbHigh} to {this.orbLow}");
+                }
+            }
 
             if (!this.inOrbSession && this.orbHigh > double.MinValue && this.orbLow < double.MaxValue)
             {
-                this.orbComplete = true;
-                this.rangeSize = this.orbHigh - this.orbLow;
+                if (!this.orbComplete)
+                {
+                    this.orbComplete = true;
+                    this.rangeSize = this.orbHigh - this.orbLow;
+                    this.Log($"ORB COMPLETE - High: {this.orbHigh}, Low: {this.orbLow}, Range: {this.rangeSize}");
+                }
             }
         }
 
@@ -405,14 +431,21 @@ namespace goldOrbStrategy
             {
                 this.orbHigh = Math.Max(this.orbHigh, currentHigh);
                 this.orbLow = Math.Min(this.orbLow, currentLow);
-                this.Log($"ORB Session Active - High: {this.orbHigh}, Low: {this.orbLow}");
+                this.Log($"ORB Session Active - Current Price: {currentClose}, High: {this.orbHigh}, Low: {this.orbLow}, Range: {this.orbHigh - this.orbLow}");
                 return;
             }
 
             // Process breakouts after ORB completion
             if (!this.orbComplete || this.rangeSize <= 0)
+            {
+                if (!this.orbComplete)
+                    this.Log($"Waiting for ORB completion. InSession: {this.inOrbSession}, Complete: {this.orbComplete}");
+                else
+                    this.Log($"ORB range too small: {this.rangeSize}");
                 return;
-
+            }
+            
+            this.Log($"Processing breakout logic - ORB High: {this.orbHigh}, Low: {this.orbLow}, Current: {currentClose}");
             this.ProcessBreakoutLogic(currentTime, currentClose);
         }
 
@@ -432,12 +465,15 @@ namespace goldOrbStrategy
             switch (this.entryMode)
             {
                 case BreakoutMode.FirstBreakout:
+                    this.Log($"First Breakout Mode - Checking breakouts. Bullish: {bullishBreakout}, Bearish: {bearishBreakout}");
                     if (bullishBreakout && !this.buyOrderPlaced)
                     {
+                        this.Log($"BULLISH BREAKOUT DETECTED - Price {currentClose} > ORB High {this.orbHigh}");
                         this.PlaceBuyOrder(currentClose);
                     }
                     else if (bearishBreakout && !this.sellOrderPlaced)
                     {
+                        this.Log($"BEARISH BREAKOUT DETECTED - Price {currentClose} < ORB Low {this.orbLow}");
                         this.PlaceSellOrder(currentClose);
                     }
                     break;
@@ -481,22 +517,17 @@ namespace goldOrbStrategy
             
             if (timeSinceBreakout.TotalMinutes >= this.confirmationMinutes)
             {
-                if (this.bullishBreakoutDetected && currentClose > this.orbHigh && !this.buyOrderPlaced)
+                if (this.bullishBreakoutDetected && !this.buyOrderPlaced)
                 {
+                    this.Log($"Bullish breakout confirmed after {this.confirmationMinutes} minute(s). Placing buy order at {currentClose}");
                     this.PlaceBuyOrder(currentClose);
                     this.bullishBreakoutDetected = false;
                 }
-                else if (this.bearishBreakoutDetected && currentClose < this.orbLow && !this.sellOrderPlaced)
+                else if (this.bearishBreakoutDetected && !this.sellOrderPlaced)
                 {
+                    this.Log($"Bearish breakout confirmed after {this.confirmationMinutes} minute(s). Placing sell order at {currentClose}");
                     this.PlaceSellOrder(currentClose);
                     this.bearishBreakoutDetected = false;
-                }
-                else
-                {
-                    // Confirmation failed, reset breakout detection
-                    this.bullishBreakoutDetected = false;
-                    this.bearishBreakoutDetected = false;
-                    this.Log("Breakout confirmation failed. Reset signals.");
                 }
             }
         }

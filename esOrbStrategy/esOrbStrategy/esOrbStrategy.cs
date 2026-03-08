@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Diagnostics.Metrics;
 using System.Linq;
 using TradingPlatform.BusinessLayer;
 
@@ -86,6 +87,18 @@ namespace esOrbStrategy
         [InputParameter("Show Midpoint Line", 14)]
         public bool ShowMidpointLine = true;
 
+        [InputParameter("Enable Trailing Stop", 15)]
+        public bool enableTrailingStop = true;
+
+        [InputParameter("Trailing Stop Distance (points)", 16)]
+        public double trailingStopDistance = 2.0;
+
+        [InputParameter("Use Fixed Profit Target", 17)]
+        public bool useFixedProfitTarget = false;
+
+        [InputParameter("Profit Target (points)", 18)]
+        public double profitTargetPoints = 15.0;
+
         public override string[] MonitoringConnectionsIds => new string[] { this.CurrentSymbol?.ConnectionId, this.CurrentAccount?.ConnectionId };
 
         private HistoricalData hdm;
@@ -103,8 +116,18 @@ namespace esOrbStrategy
         // Risk Management
         private int tradeCount = 0;
         private double totalPnL = 0;
+        private double totalNetPl = 0;
+        private double totalGrossPl = 0;
+        private double totalFee = 0;
+        private int tradeCounter = 0;
         private int longPositionsCount = 0;
         private int shortPositionsCount = 0;
+
+        // Trailing stop tracking
+        private double currentTrailingStop = 0.0;
+        private bool trailingStopActive = false;
+        private double highestProfitPrice = 0.0;
+        private double lowestProfitPrice = 0.0;
 
         // Session times constants (EST) - Fixed for ES ORB: 8:00-8:15 AM
         private readonly int orbStartHour = 8;
@@ -165,6 +188,7 @@ namespace esOrbStrategy
             Core.Instance.PositionAdded += this.Core_PositionAdded;
             Core.Instance.PositionRemoved += this.Core_PositionRemoved;
             Core.Instance.TradeAdded += this.Core_TradeAdded;
+            Core.TradeAdded += this.Core_TradeAdded;
 
             this.hdm.HistoryItemUpdated += this.Hdm_HistoryItemUpdated;
             this.hdm.NewHistoryItem += this.Hdm_OnNewHistoryItem;
@@ -184,8 +208,24 @@ namespace esOrbStrategy
             Core.Instance.PositionAdded -= this.Core_PositionAdded;
             Core.Instance.PositionRemoved -= this.Core_PositionRemoved;
             Core.Instance.TradeAdded -= this.Core_TradeAdded;
+            Core.TradeAdded -= this.Core_TradeAdded;
 
             base.OnStop();
+        }
+
+        protected override void OnInitializeMetrics(Meter meter)
+        {
+            base.OnInitializeMetrics(meter);
+
+            meter.CreateObservableCounter("total-long-positions", () => this.longPositionsCount, description: "Total long positions");
+            meter.CreateObservableCounter("total-short-positions", () => this.shortPositionsCount, description: "Total short positions");
+            meter.CreateObservableCounter("total-pl-net", () => this.totalNetPl, description: "Total Net profit/loss");
+            meter.CreateObservableCounter("total-pl-gross", () => this.totalGrossPl, description: "Total Gross profit/loss");
+            meter.CreateObservableCounter("total-fee", () => this.totalFee, description: "Total fee");
+            meter.CreateObservableCounter("trade-count", () => this.tradeCounter, description: "Trade Count");
+            meter.CreateObservableGauge("orb-high", () => this.orbHigh, description: "Opening Range High");
+            meter.CreateObservableGauge("orb-low", () => this.orbLow, description: "Opening Range Low");
+            meter.CreateObservableGauge("orb-range", () => this.orbHigh != double.MinValue && this.orbLow != double.MaxValue ? this.orbHigh - this.orbLow : 0, description: "ORB Range Size");
         }
 
         private void Core_PositionAdded(Position obj)
@@ -196,6 +236,7 @@ namespace esOrbStrategy
             this.shortPositionsCount = positions.Count(x => x.Side == Side.Sell);
 
             this.tradeCount += 1;
+            this.tradeCounter += 1;
             this.Log($"Position added. Trade count: {this.tradeCount}");
         }
 
@@ -211,6 +252,12 @@ namespace esOrbStrategy
             {
                 waitingForRetest = false;
                 lastTradeDirection = "";
+
+                // Reset trailing stop tracking
+                this.currentTrailingStop = 0.0;
+                this.trailingStopActive = false;
+                this.highestProfitPrice = 0.0;
+                this.lowestProfitPrice = 0.0;
 
                 // Cancel any pending orders
                 foreach (var order in orders)
@@ -230,6 +277,17 @@ namespace esOrbStrategy
             if (obj.NetPnl != null)
             {
                 this.totalPnL += obj.NetPnl.Value;
+                this.totalNetPl += obj.NetPnl.Value;
+            }
+
+            if (obj.GrossPnl != null)
+            {
+                this.totalGrossPl += obj.GrossPnl.Value;
+            }
+
+            if (obj.Fee != null)
+            {
+                this.totalFee += obj.Fee.Value;
             }
         }
 
@@ -250,6 +308,13 @@ namespace esOrbStrategy
             if (orbCaptured && !HasActivePositions() && !IsMaxTradesReached() && !IsMaxPnLExceeded())
             {
                 this.CheckForEntry();
+            }
+
+            // Update trailing stop and check profit targets for active positions
+            if (HasActivePositions())
+            {
+                UpdateTrailingStop();
+                CheckProfitTargets();
             }
         }
 
@@ -508,6 +573,129 @@ namespace esOrbStrategy
         private bool IsMaxPnLExceeded()
         {
             return totalPnL >= MaxProfit || totalPnL <= -MaxLoss;
+        }
+
+        private void UpdateTrailingStop()
+        {
+            if (!enableTrailingStop)
+                return;
+
+            var positions = Core.Instance.Positions.Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount).ToArray();
+            
+            if (positions.Length == 0)
+            {
+                // No positions, reset trailing stop
+                trailingStopActive = false;
+                currentTrailingStop = 0.0;
+                highestProfitPrice = 0.0;
+                lowestProfitPrice = 0.0;
+                return;
+            }
+
+            double currentPrice = HistoricalDataExtensions.Close(this.hdm, 0);
+
+            foreach (var position in positions)
+            {
+                if (position.Side == Side.Buy)
+                {
+                    // Long position - track highest price for trailing stop
+                    if (highestProfitPrice == 0.0 || currentPrice > highestProfitPrice)
+                    {
+                        highestProfitPrice = currentPrice;
+                        currentTrailingStop = currentPrice - trailingStopDistance;
+                        trailingStopActive = true;
+                        this.Log($"Updated trailing stop for LONG: {currentTrailingStop}");
+                    }
+                    
+                    // Check if price hits trailing stop
+                    if (trailingStopActive && currentPrice <= currentTrailingStop)
+                    {
+                        ClosePosition(position, "Trailing Stop Hit");
+                    }
+                }
+                else if (position.Side == Side.Sell)
+                {
+                    // Short position - track lowest price for trailing stop
+                    if (lowestProfitPrice == 0.0 || currentPrice < lowestProfitPrice)
+                    {
+                        lowestProfitPrice = currentPrice;
+                        currentTrailingStop = currentPrice + trailingStopDistance;
+                        trailingStopActive = true;
+                        this.Log($"Updated trailing stop for SHORT: {currentTrailingStop}");
+                    }
+                    
+                    // Check if price hits trailing stop
+                    if (trailingStopActive && currentPrice >= currentTrailingStop)
+                    {
+                        ClosePosition(position, "Trailing Stop Hit");
+                    }
+                }
+            }
+        }
+
+        private void CheckProfitTargets()
+        {
+            if (!useFixedProfitTarget)
+                return;
+
+            var positions = Core.Instance.Positions.Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount).ToArray();
+            
+            if (positions.Length == 0)
+                return;
+
+            double currentPrice = HistoricalDataExtensions.Close(this.hdm, 0);
+
+            foreach (var position in positions)
+            {
+                double profitTarget = 0.0;
+                bool targetHit = false;
+
+                if (position.Side == Side.Buy)
+                {
+                    // Long position - check if price reached target above entry (using ORB high as reference)
+                    profitTarget = orbHigh + profitTargetPoints;
+                    targetHit = currentPrice >= profitTarget;
+                }
+                else if (position.Side == Side.Sell)
+                {
+                    // Short position - check if price reached target below entry (using ORB low as reference)
+                    profitTarget = orbLow - profitTargetPoints;
+                    targetHit = currentPrice <= profitTarget;
+                }
+
+                if (targetHit)
+                {
+                    ClosePosition(position, $"Profit Target Hit: {profitTargetPoints} points");
+                }
+            }
+        }
+
+        private void ClosePosition(Position position, string reason)
+        {
+            try
+            {
+                var result = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters()
+                {
+                    Account = this.CurrentAccount,
+                    Symbol = this.CurrentSymbol,
+                    Side = position.Side == Side.Buy ? Side.Sell : Side.Buy,
+                    OrderTypeId = OrderType.Market,
+                    Quantity = position.Quantity
+                });
+
+                if (result.Status == TradingOperationResultStatus.Success)
+                {
+                    this.Log($"Position closed: {reason} at {HistoricalDataExtensions.Close(this.hdm, 0)}");
+                }
+                else
+                {
+                    this.Log($"Failed to close position: {result.Message}", StrategyLoggingLevel.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                this.Log($"Error closing position: {ex.Message}");
+            }
         }
     }
 }
