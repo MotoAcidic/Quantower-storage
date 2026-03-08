@@ -9,8 +9,18 @@ namespace goldOrbStrategy
 {
     public enum BreakoutMode
     {
-        AggressiveBreakout,
-        ConfirmedBreakout
+        FirstBreakout,
+        RetestHigh,
+        Retest50Percent,
+        CandleClosure
+    }
+
+    public enum StopLossMode
+    {
+        FullOrbRange,
+        FiftyPercentOrb,
+        FixedPriceDistance,
+        FixedTickAmount
     }
 
     public sealed class goldOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
@@ -51,8 +61,14 @@ namespace goldOrbStrategy
         [InputParameter("ORB End Time - Minute", 10)]
         public int orbEndMinute = 5; // :05 (makes it 8:00-8:05 PM = 5 minute window)
 
-        [InputParameter("Breakout Entry Mode", 11)]
-        public BreakoutMode entryMode = BreakoutMode.ConfirmedBreakout;
+        [InputParameter("Breakout Entry Mode", 11, variants: new object[]
+        {
+            "First Breakout", BreakoutMode.FirstBreakout,
+            "Retest High", BreakoutMode.RetestHigh,
+            "Retest 50% Zone", BreakoutMode.Retest50Percent,
+            "Candle Closure", BreakoutMode.CandleClosure
+        })]
+        public BreakoutMode entryMode = BreakoutMode.CandleClosure;
 
         [InputParameter("Confirmation Wait Time (minutes)", 12)]
         public int confirmationMinutes = 1;
@@ -63,17 +79,38 @@ namespace goldOrbStrategy
         [InputParameter("ORB Buffer Distance (ticks)", 14)]
         public int orbBufferTicks = 0;
 
-        [InputParameter("Max Daily Trades", 15)]
+        [InputParameter("Enable Trailing Stop", 15)]
+        public bool enableTrailingStop = true;
+
+        [InputParameter("Trailing Stop Distance (points)", 16)]
+        public double trailingStopDistance = 2.0;
+
+        [InputParameter("Max Daily Trades", 17)]
         public int maxTrades = 10;
 
-        [InputParameter("Daily Profit Target", 16)]
+        [InputParameter("Daily Profit Target", 18)]
         public int maxProfit = 1000;
 
-        [InputParameter("Daily Loss Limit", 17)]
+        [InputParameter("Daily Loss Limit", 19)]
         public int maxLoss = 500;
 
-        [InputParameter("Use Stop Orders (vs Market)", 18)]
+        [InputParameter("Use Stop Orders (vs Market)", 20)]
         public bool useStopOrders = true;
+
+        [InputParameter("Stop Loss Mode", 21, variants: new object[]
+        {
+            "Full ORB Range", StopLossMode.FullOrbRange,
+            "50% ORB Range", StopLossMode.FiftyPercentOrb,
+            "Fixed Price Distance", StopLossMode.FixedPriceDistance,
+            "Fixed Tick Amount", StopLossMode.FixedTickAmount
+        })]
+        public StopLossMode stopLossMode = StopLossMode.FullOrbRange;
+
+        [InputParameter("Fixed Stop Loss (Price Distance)", 22)]
+        public double fixedStopLossDollar = 5.0;
+
+        [InputParameter("Fixed Stop Loss (Ticks)", 23)]
+        public int fixedStopLossTicks = 20;
 
         public override string[] MonitoringConnectionsIds => new string[] { this.CurrentSymbol?.ConnectionId, this.CurrentAccount?.ConnectionId };
 
@@ -108,6 +145,17 @@ namespace goldOrbStrategy
         // Position state tracking
         private bool buyOrderPlaced = false;
         private bool sellOrderPlaced = false;
+
+        // Retest tracking
+        private bool waitingForRetest = false;
+        private double retestLevel = 0.0;
+        private string retestDirection = "";
+
+        // Trailing stop tracking
+        private double currentTrailingStop = 0.0;
+        private bool trailingStopActive = false;
+        private double highestProfitPrice = 0.0;
+        private double lowestProfitPrice = 0.0;
 
         public goldOrbStrategy()
             : base()
@@ -235,6 +283,17 @@ namespace goldOrbStrategy
                 this.buyOrderPlaced = false;
                 this.sellOrderPlaced = false;
 
+                // Reset retest tracking
+                this.waitingForRetest = false;
+                this.retestLevel = 0.0;
+                this.retestDirection = "";
+
+                // Reset trailing stop tracking
+                this.currentTrailingStop = 0.0;
+                this.trailingStopActive = false;
+                this.highestProfitPrice = 0.0;
+                this.lowestProfitPrice = 0.0;
+
                 // Cancel any pending orders
                 foreach (var order in orders)
                 {
@@ -360,6 +419,8 @@ namespace goldOrbStrategy
         private void ProcessBreakoutLogic(DateTime currentTime, double currentClose)
         {
             double previousClose = HistoricalDataExtensions.Close(this.hdm, 1);
+            double currentHigh = HistoricalDataExtensions.High(this.hdm, 0);
+            double currentLow = HistoricalDataExtensions.Low(this.hdm, 0);
 
             // Detect bullish breakout
             bool bullishBreakout = currentClose > this.orbHigh && previousClose <= this.orbHigh;
@@ -368,38 +429,50 @@ namespace goldOrbStrategy
             bool bearishBreakout = currentClose < this.orbLow && previousClose >= this.orbLow;
 
             // Handle strategy modes
-            if (this.entryMode == BreakoutMode.AggressiveBreakout)
+            switch (this.entryMode)
             {
-                if (bullishBreakout && !this.buyOrderPlaced)
-                {
-                    this.PlaceBuyOrder(currentClose);
-                }
-                else if (bearishBreakout && !this.sellOrderPlaced)
-                {
-                    this.PlaceSellOrder(currentClose);
-                }
-            }
-            else if (this.entryMode == BreakoutMode.ConfirmedBreakout)
-            {
-                // For confirmed breakouts, wait for confirmation candle
-                if (bullishBreakout && !this.bullishBreakoutDetected)
-                {
-                    this.bullishBreakoutDetected = true;
-                    this.breakoutTime = currentTime;
-                    this.breakoutPrice = currentClose;
-                    this.Log($"Bullish breakout detected at {currentClose}. Waiting for confirmation...");
-                }
-                else if (bearishBreakout && !this.bearishBreakoutDetected)
-                {
-                    this.bearishBreakoutDetected = true;
-                    this.breakoutTime = currentTime;
-                    this.breakoutPrice = currentClose;
-                    this.Log($"Bearish breakout detected at {currentClose}. Waiting for confirmation...");
-                }
+                case BreakoutMode.FirstBreakout:
+                    if (bullishBreakout && !this.buyOrderPlaced)
+                    {
+                        this.PlaceBuyOrder(currentClose);
+                    }
+                    else if (bearishBreakout && !this.sellOrderPlaced)
+                    {
+                        this.PlaceSellOrder(currentClose);
+                    }
+                    break;
 
-                // Check for confirmation
-                this.CheckForConfirmation(currentTime, currentClose);
+                case BreakoutMode.RetestHigh:
+                    this.HandleRetestHighMode(bullishBreakout, bearishBreakout, currentClose, currentHigh, currentLow);
+                    break;
+
+                case BreakoutMode.Retest50Percent:
+                    this.HandleRetest50PercentMode(bullishBreakout, bearishBreakout, currentClose, currentHigh, currentLow);
+                    break;
+
+                case BreakoutMode.CandleClosure:
+                    if (bullishBreakout && !this.bullishBreakoutDetected && !this.buyOrderPlaced)
+                    {
+                        this.bullishBreakoutDetected = true;
+                        this.breakoutTime = currentTime;
+                        this.breakoutPrice = currentClose;
+                        this.Log($"Bullish breakout detected at {currentClose}. Waiting for confirmation...");
+                    }
+                    else if (bearishBreakout && !this.bearishBreakoutDetected && !this.sellOrderPlaced)
+                    {
+                        this.bearishBreakoutDetected = true;
+                        this.breakoutTime = currentTime;
+                        this.breakoutPrice = currentClose;
+                        this.Log($"Bearish breakout detected at {currentClose}. Waiting for confirmation...");
+                    }
+
+                    // Check for confirmation
+                    this.CheckForConfirmation(currentTime, currentClose);
+                    break;
             }
+
+            // Update trailing stop if positions are open
+            this.UpdateTrailingStop();
         }
 
         private void CheckForConfirmation(DateTime currentTime, double currentClose)
@@ -430,7 +503,7 @@ namespace goldOrbStrategy
 
         private void PlaceBuyOrder(double entryPrice)
         {
-            double stopPrice = this.orbLow - (this.orbBufferTicks * 0.25);
+            double stopPrice = this.CalculateStopLoss(entryPrice, Side.Buy);
             double riskAmount = entryPrice - stopPrice;
             double targetPrice = entryPrice + (riskAmount * this.riskRewardRatio);
 
@@ -472,7 +545,7 @@ namespace goldOrbStrategy
 
         private void PlaceSellOrder(double entryPrice)
         {
-            double stopPrice = this.orbHigh + (this.orbBufferTicks * 0.25);
+            double stopPrice = this.CalculateStopLoss(entryPrice, Side.Sell);
             double riskAmount = stopPrice - entryPrice;
             double targetPrice = entryPrice - (riskAmount * this.riskRewardRatio);
 
@@ -528,9 +601,248 @@ namespace goldOrbStrategy
             this.buyOrderPlaced = false;
             this.sellOrderPlaced = false;
 
+            // Reset retest tracking
+            this.waitingForRetest = false;
+            this.retestLevel = 0.0;
+            this.retestDirection = "";
+
+            // Reset trailing stop tracking
+            this.currentTrailingStop = 0.0;
+            this.trailingStopActive = false;
+            this.highestProfitPrice = 0.0;
+            this.lowestProfitPrice = 0.0;
+
             this.Log("ORB reset for new trading day");
         }
 
+        private void HandleRetestHighMode(bool bullishBreakout, bool bearishBreakout, double currentClose, double currentHigh, double currentLow)
+        {
+            if (!this.waitingForRetest)
+            {
+                if (bullishBreakout && !this.buyOrderPlaced)
+                {
+                    this.waitingForRetest = true;
+                    this.retestLevel = this.orbHigh;
+                    this.retestDirection = "Long";
+                    this.Log($"Bullish breakout detected. Waiting for retest of ORB high: {this.orbHigh}");
+                }
+                else if (bearishBreakout && !this.sellOrderPlaced)
+                {
+                    this.waitingForRetest = true;
+                    this.retestLevel = this.orbLow;
+                    this.retestDirection = "Short";
+                    this.Log($"Bearish breakout detected. Waiting for retest of ORB low: {this.orbLow}");
+                }
+            }
+            else
+            {
+                if (this.retestDirection == "Long" && currentLow <= this.retestLevel)
+                {
+                    this.PlaceBuyOrder(currentClose);
+                    this.waitingForRetest = false;
+                    this.Log($"Retest of ORB high completed. Entering long at {currentClose}");
+                }
+                else if (this.retestDirection == "Short" && currentHigh >= this.retestLevel)
+                {
+                    this.PlaceSellOrder(currentClose);
+                    this.waitingForRetest = false;
+                    this.Log($"Retest of ORB low completed. Entering short at {currentClose}");
+                }
+            }
+        }
+
+        private void HandleRetest50PercentMode(bool bullishBreakout, bool bearishBreakout, double currentClose, double currentHigh, double currentLow)
+        {
+            if (!this.waitingForRetest)
+            {
+                if (bullishBreakout && !this.buyOrderPlaced)
+                {
+                    this.waitingForRetest = true;
+                    this.retestLevel = this.orbHigh + ((currentClose - this.orbHigh) * 0.5);
+                    this.retestDirection = "Long";
+                    this.Log($"Bullish breakout detected. Waiting for 50% retest to: {this.retestLevel}");
+                }
+                else if (bearishBreakout && !this.sellOrderPlaced)
+                {
+                    this.waitingForRetest = true;
+                    this.retestLevel = this.orbLow + ((currentClose - this.orbLow) * 0.5);
+                    this.retestDirection = "Short";
+                    this.Log($"Bearish breakout detected. Waiting for 50% retest to: {this.retestLevel}");
+                }
+            }
+            else
+            {
+                if (this.retestDirection == "Long" && currentLow <= this.retestLevel)
+                {
+                    this.PlaceBuyOrder(currentClose);
+                    this.waitingForRetest = false;
+                    this.Log($"50% retest completed. Entering long at {currentClose}");
+                }
+                else if (this.retestDirection == "Short" && currentHigh >= this.retestLevel)
+                {
+                    this.PlaceSellOrder(currentClose);
+                    this.waitingForRetest = false;
+                    this.Log($"50% retest completed. Entering short at {currentClose}");
+                }
+            }
+        }
+
+        private void UpdateTrailingStop()
+        {
+            if (!this.enableTrailingStop)
+                return;
+
+            var positions = Core.Instance.Positions.Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount).ToArray();
+            
+            if (positions.Length == 0)
+            {
+                // No positions, reset trailing stop
+                this.trailingStopActive = false;
+                this.currentTrailingStop = 0.0;
+                this.highestProfitPrice = 0.0;
+                this.lowestProfitPrice = 0.0;
+                return;
+            }
+
+            double currentPrice = HistoricalDataExtensions.Close(this.hdm, 0);
+
+            foreach (var position in positions)
+            {
+                if (position.Side == Side.Buy)
+                {
+                    // Long position - track highest price for trailing stop
+                    if (currentPrice > this.highestProfitPrice)
+                    {
+                        this.highestProfitPrice = currentPrice;
+                        this.currentTrailingStop = currentPrice - this.trailingStopDistance;
+                        this.trailingStopActive = true;
+                        this.Log($"Updated trailing stop for LONG: {this.currentTrailingStop}");
+                    }
+                    
+                    // Check if price hits trailing stop
+                    if (this.trailingStopActive && currentPrice <= this.currentTrailingStop)
+                    {
+                        this.ClosePosition(position, "Trailing Stop Hit");
+                    }
+                }
+                else if (position.Side == Side.Sell)
+                {
+                    // Short position - track lowest price for trailing stop
+                    if (this.lowestProfitPrice == 0.0 || currentPrice < this.lowestProfitPrice)
+                    {
+                        this.lowestProfitPrice = currentPrice;
+                        this.currentTrailingStop = currentPrice + this.trailingStopDistance;
+                        this.trailingStopActive = true;
+                        this.Log($"Updated trailing stop for SHORT: {this.currentTrailingStop}");
+                    }
+                    
+                    // Check if price hits trailing stop
+                    if (this.trailingStopActive && currentPrice >= this.currentTrailingStop)
+                    {
+                        this.ClosePosition(position, "Trailing Stop Hit");
+                    }
+                }
+            }
+        }
+
+        private void ClosePosition(Position position, string reason)
+        {
+            var result = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters()
+            {
+                Account = this.CurrentAccount,
+                Symbol = this.CurrentSymbol,
+                Side = position.Side == Side.Buy ? Side.Sell : Side.Buy,
+                OrderTypeId = OrderType.Market,
+                Quantity = position.Quantity
+            });
+
+            if (result.Status == TradingOperationResultStatus.Success)
+            {
+                this.Log($"Position closed: {reason} at {HistoricalDataExtensions.Close(this.hdm, 0)}");
+            }
+            else
+            {
+                this.Log($"Failed to close position: {result.Message}", StrategyLoggingLevel.Error);
+            }
+        }
+        private double CalculateStopLoss(double entryPrice, Side side)
+        {
+            double stopPrice;
+            string stopDescription;
+
+            switch (this.stopLossMode)
+            {
+                case StopLossMode.FullOrbRange:
+                    if (side == Side.Buy)
+                    {
+                        stopPrice = this.orbLow - (this.orbBufferTicks * 0.25);
+                        stopDescription = "Full ORB Range (ORB Low)";
+                    }
+                    else
+                    {
+                        stopPrice = this.orbHigh + (this.orbBufferTicks * 0.25);
+                        stopDescription = "Full ORB Range (ORB High)";
+                    }
+                    break;
+
+                case StopLossMode.FiftyPercentOrb:
+                    double orbMidpoint = (this.orbHigh + this.orbLow) / 2.0;
+                    if (side == Side.Buy)
+                    {
+                        stopPrice = orbMidpoint - (this.orbBufferTicks * 0.25);
+                        stopDescription = "50% ORB Range (Midpoint)";
+                    }
+                    else
+                    {
+                        stopPrice = orbMidpoint + (this.orbBufferTicks * 0.25);
+                        stopDescription = "50% ORB Range (Midpoint)";
+                    }
+                    break;
+
+                case StopLossMode.FixedPriceDistance:
+                    if (side == Side.Buy)
+                    {
+                        stopPrice = entryPrice - this.fixedStopLossDollar;
+                        stopDescription = $"Fixed Price Distance ({this.fixedStopLossDollar} points)";
+                    }
+                    else
+                    {
+                        stopPrice = entryPrice + this.fixedStopLossDollar;
+                        stopDescription = $"Fixed Price Distance ({this.fixedStopLossDollar} points)";
+                    }
+                    break;
+
+                case StopLossMode.FixedTickAmount:
+                    if (side == Side.Buy)
+                    {
+                        stopPrice = entryPrice - (this.fixedStopLossTicks * this.CurrentSymbol.TickSize);
+                        stopDescription = $"Fixed Tick Amount ({this.fixedStopLossTicks} ticks)";
+                    }
+                    else
+                    {
+                        stopPrice = entryPrice + (this.fixedStopLossTicks * this.CurrentSymbol.TickSize);
+                        stopDescription = $"Fixed Tick Amount ({this.fixedStopLossTicks} ticks)";
+                    }
+                    break;
+
+                default:
+                    // Fallback to full ORB range
+                    if (side == Side.Buy)
+                    {
+                        stopPrice = this.orbLow - (this.orbBufferTicks * 0.25);
+                        stopDescription = "Default Full ORB Range";
+                    }
+                    else
+                    {
+                        stopPrice = this.orbHigh + (this.orbBufferTicks * 0.25);
+                        stopDescription = "Default Full ORB Range";
+                    }
+                    break;
+            }
+
+            this.Log($"Stop Loss Mode: {stopDescription} - Stop Price: {stopPrice}");
+            return stopPrice;
+        }
         private void ProcessTradingRefuse()
         {
             this.Log("Strategy received refuse for trading action. Stopping strategy.", StrategyLoggingLevel.Error);
