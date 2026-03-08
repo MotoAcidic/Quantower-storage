@@ -19,15 +19,15 @@ namespace SimpleMACross
         public Account CurrentAccount { get; set; }
 
         /// <summary>
-        /// Period for Fast MA indicator
+        /// Period for Fast SMA indicator
         /// </summary>
-        [InputParameter("Fast MA", 2, minimum: 1, maximum: 100, increment: 1, decimalPlaces: 0)]
+        [InputParameter("Fast SMA", 2, minimum: 1, maximum: 100, increment: 1, decimalPlaces: 0)]
         public int FastMA { get; set; }
 
         /// <summary>
-        /// Period for Slow MA indicator
+        /// Period for Slow SMA indicator
         /// </summary>
-        [InputParameter("Slow MA", 3, minimum: 1, maximum: 100, increment: 1, decimalPlaces: 0)]
+        [InputParameter("Slow SMA", 3, minimum: 1, maximum: 100, increment: 1, decimalPlaces: 0)]
         public int SlowMA { get; set; }
 
         /// <summary>
@@ -202,8 +202,21 @@ namespace SimpleMACross
             this.shortPositionsCount = positions.Count(x => x.Side == Side.Sell);
 
             if (!positions.Any())
+            {
                 this.waitClosePositions = false;
                 this.inPosition = false;
+                
+                // Cancel any remaining stop loss or take profit orders
+                var orders = Core.Instance.Orders.Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount).ToArray();
+                foreach (var order in orders)
+                {
+                    var cancelResult = order.Cancel();
+                    if (cancelResult.Status == TradingOperationResultStatus.Success)
+                    {
+                        this.Log($"Cancelled remaining order: {order.OrderTypeId}", StrategyLoggingLevel.Trading);
+                    }
+                }
+            }
         }
 
         private void Core_OrdersHistoryAdded(OrderHistory obj)
@@ -361,14 +374,13 @@ namespace SimpleMACross
 
                 if (sma_10_x > sma_20_x)
                 {
-                    if (price_x < lastLow_x || pnlTicks > 150)
+                    if (price_x < lastLow_x)
                     {
                         this.waitClosePositions = true;
-                        this.Log($"Start close positions ({positions.Length})");
+                        this.Log($"Start close positions - Exit signal triggered ({positions.Length})");
 
                         foreach (var item in positions)
                         {
-                            //item.StopLoss.Cancel(); // Doesn't work. Actually breaks the position close. Gotta find another way to do this here.
                             var result = item.Close();
 
                             if (result.Status == TradingOperationResultStatus.Failure)
@@ -386,14 +398,13 @@ namespace SimpleMACross
                 }
                 else if (sma_10_x < sma_20_x)
                 {
-                    if (price_x > lastHigh_x || pnlTicks > 150)
+                    if (price_x > lastHigh_x)
                     {
                         this.waitClosePositions = true;
-                        this.Log($"Start close positions ({positions.Length})");
+                        this.Log($"Start close positions - Exit signal triggered ({positions.Length})");
 
                         foreach (var item in positions)
                         {
-                            //item.StopLoss.Cancel(); // Doesn't work. Actually breaks the position close. Gotta find another way to do this here.
                             var result = item.Close();
                             
 
