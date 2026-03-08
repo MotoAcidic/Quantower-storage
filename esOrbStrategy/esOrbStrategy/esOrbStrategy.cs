@@ -99,8 +99,26 @@ namespace esOrbStrategy
         [InputParameter("Profit Target (points)", 18)]
         public double profitTargetPoints = 15.0;
 
-        [InputParameter("EST Timezone Offset (hours)", 19)]
+        [InputParameter("Strong Volume Immediate Entry Threshold", 20)]
+        public double strongVolumeThreshold = 1000.0;
+
+        [InputParameter("Retest Timeout (minutes)", 21)] 
+        public int retestTimeoutMinutes = 15;
+
+        [InputParameter("Enable Immediate Entry on Strong Volume", 22)]
+        public bool enableImmediateStrongVolumeEntry = true;
+
+        [InputParameter("EST Timezone Offset (hours)", 23)]
         public double estTimezoneOffset = -5.0; // EST is UTC-5 (change to -4 for EDT)
+
+        [InputParameter("Enable Session High/Low Reversal Trading", 24)]
+        public bool enableSessionReversalTrading = false;
+
+        [InputParameter("Session Reversal Volume Threshold", 25)]
+        public double sessionReversalVolumeThreshold = 500.0;
+
+        [InputParameter("Session Reversal Timeout (minutes)", 26)]
+        public int sessionReversalTimeoutMinutes = 30;
 
         public override string[] MonitoringConnectionsIds => new string[] { this.CurrentSymbol?.ConnectionId, this.CurrentAccount?.ConnectionId };
 
@@ -121,6 +139,7 @@ namespace esOrbStrategy
         private bool retestRespected = false;
         private bool retestInvalidated = false;
         private double previousClose = 0.0;
+        private DateTime waitingForRetestStartTime = DateTime.MinValue;
 
         // Risk Management
         private int tradeCount = 0;
@@ -145,6 +164,28 @@ namespace esOrbStrategy
         private readonly int orbEndMinute = 15;
         private readonly int marketOpenHour = 9;
         private readonly int marketOpenMinute = 30;
+
+        // Session High/Low tracking for reversals
+        private double asiaSessionHigh = double.MinValue;
+        private double asiaSessionLow = double.MaxValue;
+        private double londonSessionHigh = double.MinValue;
+        private double londonSessionLow = double.MaxValue;
+        private double nySessionHigh = double.MinValue;
+        private double nySessionLow = double.MaxValue;
+        
+        private bool asiaHighTested = false;
+        private bool asiaLowTested = false;
+        private bool londonHighTested = false;
+        private bool londonLowTested = false;
+        private bool nyHighTested = false;
+        private bool nyLowTested = false;
+        
+        private DateTime lastSessionUpdate = DateTime.MinValue;
+        private string currentSession = "";
+        private bool waitingForSessionReversal = false;
+        private double sessionReversalLevel = 0.0;
+        private string sessionReversalDirection = "";
+        private DateTime sessionReversalStartTime = DateTime.MinValue;
 
         // ORB session tracking
         private DateTime orbSessionStart;
@@ -208,6 +249,13 @@ namespace esOrbStrategy
             this.hdm.NewHistoryItem += this.Hdm_OnNewHistoryItem;
 
             this.InitializeOrbSession();
+            
+            // Initialize session tracking
+            if (enableSessionReversalTrading)
+            {
+                this.Log("📊 Session High/Low Reversal Trading ENABLED", StrategyLoggingLevel.Trading);
+                this.InitializeSessionTracking();
+            }
         }
 
         protected override void OnStop()
@@ -473,6 +521,224 @@ namespace esOrbStrategy
             }
             
             this.previousClose = close;
+            
+            // Update session highs/lows and check for reversals if enabled
+            if (enableSessionReversalTrading)
+            {
+                UpdateSessionHighsLows();
+                CheckForSessionReversals();
+            }
+        }
+        
+        private void InitializeSessionTracking()
+        {
+            // Reset all session data daily
+            asiaSessionHigh = double.MinValue;
+            asiaSessionLow = double.MaxValue;
+            londonSessionHigh = double.MinValue;
+            londonSessionLow = double.MaxValue;
+            nySessionHigh = double.MinValue;
+            nySessionLow = double.MaxValue;
+            
+            asiaHighTested = false;
+            asiaLowTested = false;
+            londonHighTested = false;
+            londonLowTested = false;
+            nyHighTested = false;
+            nyLowTested = false;
+            
+            this.Log("📊 Session tracking initialized for Asia/London/NY reversals", StrategyLoggingLevel.Trading);
+        }
+        
+        private string GetCurrentSession(DateTime estTime)
+        {
+            int hour = estTime.Hour;
+            int minute = estTime.Minute;
+            int totalMinutes = hour * 60 + minute;
+            
+            // EST Session Times:
+            // Asia: 6:00 PM - 2:00 AM (18:00 - 02:00 next day)
+            // London: 3:00 AM - 12:00 PM (03:00 - 12:00)  
+            // New York: 8:00 AM - 5:00 PM (08:00 - 17:00)
+            
+            if ((totalMinutes >= 18 * 60) || (totalMinutes < 2 * 60)) // 6 PM to 2 AM
+            {
+                return "Asia";
+            }
+            else if (totalMinutes >= 3 * 60 && totalMinutes < 12 * 60) // 3 AM to 12 PM
+            {
+                return "London";
+            }
+            else if (totalMinutes >= 8 * 60 && totalMinutes < 17 * 60) // 8 AM to 5 PM
+            {
+                return "NewYork";
+            }
+            
+            return "Overlap"; // During overlap periods
+        }
+        
+        private void UpdateSessionHighsLows()
+        {
+            DateTime currentTime = HistoricalDataExtensions.Time(this.hdm, 0);
+            DateTime estTime = currentTime.AddHours(this.estTimezoneOffset);
+            double high = HistoricalDataExtensions.High(this.hdm, 0);
+            double low = HistoricalDataExtensions.Low(this.hdm, 0);
+            
+            string session = GetCurrentSession(estTime);
+            
+            // Check if we've moved to a new day - reset all sessions
+            if (lastSessionUpdate.Date != estTime.Date)
+            {
+                InitializeSessionTracking();
+                lastSessionUpdate = estTime;
+                this.Log($"🌅 NEW DAY - Session highs/lows reset for {estTime:yyyy-MM-dd}", StrategyLoggingLevel.Trading);
+            }
+            
+            // Update session-specific highs/lows
+            switch (session)
+            {
+                case "Asia":
+                    if (high > asiaSessionHigh || asiaSessionHigh == double.MinValue)
+                    {
+                        asiaSessionHigh = high;
+                        asiaHighTested = false;
+                        this.Log($"🌏 ASIA Session High updated: {asiaSessionHigh:F2} (UNTESTED)", StrategyLoggingLevel.Trading);
+                    }
+                    if (low < asiaSessionLow || asiaSessionLow == double.MaxValue)
+                    {
+                        asiaSessionLow = low;
+                        asiaLowTested = false;
+                        this.Log($"🌏 ASIA Session Low updated: {asiaSessionLow:F2} (UNTESTED)", StrategyLoggingLevel.Trading);
+                    }
+                    break;
+                    
+                case "London":
+                    if (high > londonSessionHigh || londonSessionHigh == double.MinValue)
+                    {
+                        londonSessionHigh = high;
+                        londonHighTested = false;
+                        this.Log($"🇬🇧 LONDON Session High updated: {londonSessionHigh:F2} (UNTESTED)", StrategyLoggingLevel.Trading);
+                    }
+                    if (low < londonSessionLow || londonSessionLow == double.MaxValue)
+                    {
+                        londonSessionLow = low;
+                        londonLowTested = false;
+                        this.Log($"🇬🇧 LONDON Session Low updated: {londonSessionLow:F2} (UNTESTED)", StrategyLoggingLevel.Trading);
+                    }
+                    break;
+                    
+                case "NewYork":
+                    if (high > nySessionHigh || nySessionHigh == double.MinValue)
+                    {
+                        nySessionHigh = high;
+                        nyHighTested = false;
+                        this.Log($"🇺🇸 NEW YORK Session High updated: {nySessionHigh:F2} (UNTESTED)", StrategyLoggingLevel.Trading);
+                    }
+                    if (low < nySessionLow || nySessionLow == double.MaxValue)
+                    {
+                        nySessionLow = low;
+                        nyLowTested = false;
+                        this.Log($"🇺🇸 NEW YORK Session Low updated: {nySessionLow:F2} (UNTESTED)", StrategyLoggingLevel.Trading);
+                    }
+                    break;
+            }
+            
+            currentSession = session;
+        }
+
+        private void CheckForSessionReversals()
+        {
+            double close = HistoricalDataExtensions.Close(this.hdm, 0);
+            double high = HistoricalDataExtensions.High(this.hdm, 0);
+            double low = HistoricalDataExtensions.Low(this.hdm, 0);
+            double currentVolume = HistoricalDataExtensions.Volume(this.hdm, 0);
+            double tolerance = this.CurrentSymbol.TickSize * 3;
+            
+            // Check for tests of untested session highs/lows and look for reversals
+            
+            // Asia Session High Reversal (Short)
+            if (!asiaHighTested && asiaSessionHigh > double.MinValue && high >= (asiaSessionHigh - tolerance))
+            {
+                asiaHighTested = true;
+                this.Log($"🎯 ASIA HIGH TESTED at {asiaSessionHigh:F2} - Watching for REVERSAL SHORT", StrategyLoggingLevel.Trading);
+                
+                if (high >= asiaSessionHigh && close < (asiaSessionHigh - tolerance/2) && currentVolume >= sessionReversalVolumeThreshold)
+                {
+                    this.Log($"✅ ASIA HIGH REVERSAL CONFIRMED! Volume: {currentVolume} - Entering SHORT", StrategyLoggingLevel.Trading);
+                    PlaceShortTrade(close);
+                    return;
+                }
+            }
+            
+            // Asia Session Low Reversal (Long)
+            if (!asiaLowTested && asiaSessionLow < double.MaxValue && low <= (asiaSessionLow + tolerance))
+            {
+                asiaLowTested = true;
+                this.Log($"🎯 ASIA LOW TESTED at {asiaSessionLow:F2} - Watching for REVERSAL LONG", StrategyLoggingLevel.Trading);
+                
+                if (low <= asiaSessionLow && close > (asiaSessionLow + tolerance/2) && currentVolume >= sessionReversalVolumeThreshold)
+                {
+                    this.Log($"✅ ASIA LOW REVERSAL CONFIRMED! Volume: {currentVolume} - Entering LONG", StrategyLoggingLevel.Trading);
+                    PlaceLongTrade(close);
+                    return;
+                }
+            }
+            
+            // London Session High Reversal (Short)
+            if (!londonHighTested && londonSessionHigh > double.MinValue && high >= (londonSessionHigh - tolerance))
+            {
+                londonHighTested = true;
+                this.Log($"🎯 LONDON HIGH TESTED at {londonSessionHigh:F2} - Watching for REVERSAL SHORT", StrategyLoggingLevel.Trading);
+                
+                if (high >= londonSessionHigh && close < (londonSessionHigh - tolerance/2) && currentVolume >= sessionReversalVolumeThreshold)
+                {
+                    this.Log($"✅ LONDON HIGH REVERSAL CONFIRMED! Volume: {currentVolume} - Entering SHORT", StrategyLoggingLevel.Trading);
+                    PlaceShortTrade(close);
+                    return;
+                }
+            }
+            
+            // London Session Low Reversal (Long)
+            if (!londonLowTested && londonSessionLow < double.MaxValue && low <= (londonSessionLow + tolerance))
+            {
+                londonLowTested = true;
+                this.Log($"🎯 LONDON LOW TESTED at {londonSessionLow:F2} - Watching for REVERSAL LONG", StrategyLoggingLevel.Trading);
+                
+                if (low <= londonSessionLow && close > (londonSessionLow + tolerance/2) && currentVolume >= sessionReversalVolumeThreshold)
+                {
+                    this.Log($"✅ LONDON LOW REVERSAL CONFIRMED! Volume: {currentVolume} - Entering LONG", StrategyLoggingLevel.Trading);
+                    PlaceLongTrade(close);
+                    return;
+                }
+            }
+            
+            // NY Session High Reversal (Short)
+            if (!nyHighTested && nySessionHigh > double.MinValue && high >= (nySessionHigh - tolerance))
+            {
+                nyHighTested = true;
+                this.Log($"🎯 NY HIGH TESTED at {nySessionHigh:F2} - Watching for REVERSAL SHORT", StrategyLoggingLevel.Trading);
+                
+                if (high >= nySessionHigh && close < (nySessionHigh - tolerance/2) && currentVolume >= sessionReversalVolumeThreshold)
+                {
+                    this.Log($"✅ NY HIGH REVERSAL CONFIRMED! Volume: {currentVolume} - Entering SHORT", StrategyLoggingLevel.Trading);
+                    PlaceShortTrade(close);
+                    return;
+                }
+            }
+            
+            // NY Session Low Reversal (Long)
+            if (!nyLowTested && nySessionLow < double.MaxValue && low <= (nySessionLow + tolerance))
+            {
+                nyLowTested = true;
+                this.Log($"🎯 NY LOW TESTED at {nySessionLow:F2} - Watching for REVERSAL LONG", StrategyLoggingLevel.Trading);
+                
+                if (low <= nySessionLow && close > (nySessionLow + tolerance/2) && currentVolume >= sessionReversalVolumeThreshold)
+                {
+                    this.Log($"✅ NY LOW REVERSAL CONFIRMED! Volume: {currentVolume} - Entering LONG", StrategyLoggingLevel.Trading);
+                    PlaceLongTrade(close);
+                    return;
+                }
+            }
         }
 
         private void HandleImmediateBreakout(bool bullishBreakout, bool bearishBreakout, double close)
@@ -494,6 +760,7 @@ namespace esOrbStrategy
             double orbMidpoint = (orbHigh + orbLow) / 2.0;
             double tolerance = this.CurrentSymbol.TickSize * 2;
             double currentVolume = HistoricalDataExtensions.Volume(this.hdm, 0);
+            DateTime currentTime = HistoricalDataExtensions.Time(this.hdm, 0);
             
             // Check for any new breakout (can change direction)
             if (bullishBreakout || bearishBreakout)
@@ -501,6 +768,14 @@ namespace esOrbStrategy
                 if (bullishBreakout)
                 {
                     this.Log($"🔥 BULLISH BREAKOUT above {orbHigh:F2} at {close:F2} - Volume: {currentVolume}", StrategyLoggingLevel.Trading);
+                    
+                    // Check for immediate entry on strong volume
+                    if (enableImmediateStrongVolumeEntry && currentVolume >= strongVolumeThreshold)
+                    {
+                        this.Log($"⚡ STRONG VOLUME ({currentVolume} >= {strongVolumeThreshold}) - IMMEDIATE LONG ENTRY!", StrategyLoggingLevel.Trading);
+                        PlaceLongTrade(close);
+                        return;
+                    }
                     
                     // If we were waiting for a short retest, this invalidates it
                     if (waitingForRetest && lastTradeDirection == "WaitingShort")
@@ -515,11 +790,20 @@ namespace esOrbStrategy
                     waitingForRetest = true;
                     retestLevel = orbHigh;
                     lastTradeDirection = "WaitingLong";
-                    this.Log($"📊 Now monitoring for potential RETEST of ORB HIGH ({orbHigh:F2}) as support", StrategyLoggingLevel.Trading);
+                    waitingForRetestStartTime = currentTime;
+                    this.Log($"📊 Moderate volume ({currentVolume}) - Waiting for RETEST of ORB HIGH ({orbHigh:F2}) as support", StrategyLoggingLevel.Trading);
                 }
                 else if (bearishBreakout)
                 {
                     this.Log($"🔥 BEARISH BREAKOUT below {orbLow:F2} at {close:F2} - Volume: {currentVolume}", StrategyLoggingLevel.Trading);
+                    
+                    // Check for immediate entry on strong volume
+                    if (enableImmediateStrongVolumeEntry && currentVolume >= strongVolumeThreshold)
+                    {
+                        this.Log($"⚡ STRONG VOLUME ({currentVolume} >= {strongVolumeThreshold}) - IMMEDIATE SHORT ENTRY!", StrategyLoggingLevel.Trading);
+                        PlaceShortTrade(close);
+                        return;
+                    }
                     
                     // If we were waiting for a long retest, this invalidates it
                     if (waitingForRetest && lastTradeDirection == "WaitingLong")
@@ -534,9 +818,32 @@ namespace esOrbStrategy
                     waitingForRetest = true;
                     retestLevel = orbLow;
                     lastTradeDirection = "WaitingShort";
-                    this.Log($"📊 Now monitoring for potential RETEST of ORB LOW ({orbLow:F2}) as resistance", StrategyLoggingLevel.Trading);
+                    waitingForRetestStartTime = currentTime;
+                    this.Log($"📊 Moderate volume ({currentVolume}) - Waiting for RETEST of ORB LOW ({orbLow:F2}) as resistance", StrategyLoggingLevel.Trading);
                 }
                 return;
+            }
+            
+            // Check for retest timeout
+            if (waitingForRetest && waitingForRetestStartTime != DateTime.MinValue)
+            {
+                double minutesWaiting = (currentTime - waitingForRetestStartTime).TotalMinutes;
+                if (minutesWaiting >= retestTimeoutMinutes)
+                {
+                    this.Log($"⏰ RETEST TIMEOUT after {minutesWaiting:F1} minutes - Entering {lastTradeDirection.Replace("Waiting", "").ToUpper()} position anyway!", StrategyLoggingLevel.Trading);
+                    
+                    if (lastTradeDirection == "WaitingLong")
+                    {
+                        PlaceLongTrade(close);
+                    }
+                    else if (lastTradeDirection == "WaitingShort")
+                    {
+                        PlaceShortTrade(close);
+                    }
+                    
+                    waitingForRetest = false;
+                    return;
+                }
             }
             
             // Monitor for retests of key levels
@@ -646,6 +953,7 @@ namespace esOrbStrategy
             retestRespected = false;
             retestInvalidated = false;
             lastTradeDirection = "";
+            waitingForRetestStartTime = DateTime.MinValue;
             this.Log($"🔄 RETEST STATE RESET - Ready for new setup", StrategyLoggingLevel.Trading);
         }
 
