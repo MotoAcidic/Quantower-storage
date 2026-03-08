@@ -49,19 +49,13 @@ namespace goldOrbStrategy
         [InputParameter("Start point", 6)]
         public DateTime StartPoint { get; set; }
 
-        [InputParameter("ORB Start Time - Hour (24hr)", 7)]
-        public int orbStartHour = 20; // 8 PM EST
+        // Hard-coded ORB time frame: 8:00-8:05 PM EST (5 minute window)
+        private readonly int orbStartHour = 20; // 8 PM EST
+        private readonly int orbStartMinute = 0; // :00
+        private readonly int orbEndHour = 20; // 8 PM EST  
+        private readonly int orbEndMinute = 5; // :05 (5 minute ORB window)
 
-        [InputParameter("ORB Start Time - Minute", 8)]
-        public int orbStartMinute = 0; // :00
-
-        [InputParameter("ORB End Time - Hour (24hr)", 9)]
-        public int orbEndHour = 24; // 12 AM EST (Midnight)
-
-        [InputParameter("ORB End Time - Minute", 10)]
-        public int orbEndMinute = 0; // :00 (8:00 PM - 12:00 AM = 4 hour window)
-
-        [InputParameter("Breakout Entry Mode", 11, variants: new object[]
+        [InputParameter("Breakout Entry Mode", 7, variants: new object[]
         {
             "First Breakout", BreakoutMode.FirstBreakout,
             "Retest High", BreakoutMode.RetestHigh,
@@ -70,37 +64,37 @@ namespace goldOrbStrategy
         })]
         public BreakoutMode entryMode = BreakoutMode.FirstBreakout;
 
-        [InputParameter("Confirmation Wait Time (minutes)", 12)]
+        [InputParameter("Confirmation Wait Time (minutes)", 8)]
         public int confirmationMinutes = 1;
 
-        [InputParameter("Risk:Reward Ratio", 13)]
+        [InputParameter("Risk:Reward Ratio", 9)]
         public double riskRewardRatio = 2.0;
 
-        [InputParameter("ORB Buffer Distance (ticks)", 14)]
+        [InputParameter("ORB Buffer Distance (ticks)", 10)]
         public int orbBufferTicks = 0;
 
-        [InputParameter("Enable Trailing Stop", 15)]
+        [InputParameter("Enable Trailing Stop", 11)]
         public bool enableTrailingStop = true;
 
-        [InputParameter("Trailing Stop Distance (points)", 16)]
+        [InputParameter("Trailing Stop Distance (points)", 12)]
         public double trailingStopDistance = 2.0;
 
-        [InputParameter("Max Daily Trades", 17)]
+        [InputParameter("Max Daily Trades", 13)]
         public int maxTrades = 10;
 
-        [InputParameter("Daily Profit Target", 18)]
+        [InputParameter("Daily Profit Target", 14)]
         public int maxProfit = 1000;
 
-        [InputParameter("Daily Loss Limit", 19)]
+        [InputParameter("Daily Loss Limit", 15)]
         public int maxLoss = 500;
 
-        [InputParameter("Use Stop Orders (vs Market)", 20)]
+        [InputParameter("Use Stop Orders (vs Market)", 16)]
         public bool useStopOrders = true;
 
-        [InputParameter("EST Timezone Offset (hours)", 21)]
+        [InputParameter("EST Timezone Offset (hours)", 17)]
         public double estTimezoneOffset = -5.0; // EST is UTC-5 (change to -4 for EDT)
 
-        [InputParameter("Stop Loss Mode", 22, variants: new object[]
+        [InputParameter("Stop Loss Mode", 18, variants: new object[]
         {
             "Full ORB Range", StopLossMode.FullOrbRange,
             "50% ORB Range", StopLossMode.FiftyPercentOrb,
@@ -109,10 +103,10 @@ namespace goldOrbStrategy
         })]
         public StopLossMode stopLossMode = StopLossMode.FullOrbRange;
 
-        [InputParameter("Fixed Stop Loss (Price Distance)", 23)]
+        [InputParameter("Fixed Stop Loss (Price Distance)", 19)]
         public double fixedStopLossDollar = 5.0;
 
-        [InputParameter("Fixed Stop Loss (Ticks)", 24)]
+        [InputParameter("Fixed Stop Loss (Ticks)", 20)]
         public int fixedStopLossTicks = 20;
 
         public override string[] MonitoringConnectionsIds => new string[] { this.CurrentSymbol?.ConnectionId, this.CurrentAccount?.ConnectionId };
@@ -164,7 +158,7 @@ namespace goldOrbStrategy
             : base()
         {
             this.Name = "Gold ORB Strategy";
-            this.Description = "Gold Opening Range Breakout Strategy with confirmation candles";
+            this.Description = "Gold Opening Range Breakout Strategy - 8:00-8:05 PM EST (5 min window)";
 
             this.Period = Period.SECOND30;
             this.StartPoint = Core.TimeUtils.DateTimeUtcNow.AddDays(-1);
@@ -372,15 +366,11 @@ namespace goldOrbStrategy
                 this.Log($"New trading day detected: {currentDate:yyyy-MM-dd}");
             }
 
-            // Fix hour 24 issue - convert to hour 0 of next day
-            int actualEndHour = this.orbEndHour == 24 ? 0 : this.orbEndHour;
-            
-            // Calculate ORB session times for current day in EST
+            // Calculate ORB session times for current day in EST (8:00-8:05 PM)
             this.orbSessionStart = currentDate.AddHours(this.orbStartHour).AddMinutes(this.orbStartMinute);
-            DateTime endDate = this.orbEndHour == 24 ? currentDate.AddDays(1) : currentDate;
-            this.orbSessionEnd = endDate.AddHours(actualEndHour).AddMinutes(this.orbEndMinute);
+            this.orbSessionEnd = currentDate.AddHours(this.orbEndHour).AddMinutes(this.orbEndMinute);
 
-            this.Log($"ORB Session Window: {this.orbSessionStart:HH:mm} to {this.orbSessionEnd:HH:mm} EST");
+            this.Log($"ORB Session Window: {this.orbSessionStart:HH:mm} to {this.orbSessionEnd:HH:mm} EST (5 minute window)");
             
             // Check if we're in ORB session
             bool previousInSession = this.inOrbSession;
@@ -390,11 +380,11 @@ namespace goldOrbStrategy
             {
                 if (this.inOrbSession)
                 {
-                    this.Log($"ORB SESSION STARTED at {estTime:HH:mm:ss} EST");
+                    this.Log($"🟢 ORB SESSION STARTED at {estTime:HH:mm:ss} EST - Capturing 5-minute range...", StrategyLoggingLevel.Trading);
                 }
                 else
                 {
-                    this.Log($"ORB SESSION ENDED at {estTime:HH:mm:ss} EST - Range: {this.orbHigh} to {this.orbLow}");
+                    this.Log($"🔴 ORB SESSION ENDED at {estTime:HH:mm:ss} EST - CAPTURED RANGE: High: {this.orbHigh}, Low: {this.orbLow}, Size: {this.orbHigh - this.orbLow:F2}", StrategyLoggingLevel.Trading);
                 }
             }
 
@@ -404,7 +394,7 @@ namespace goldOrbStrategy
                 {
                     this.orbComplete = true;
                     this.rangeSize = this.orbHigh - this.orbLow;
-                    this.Log($"ORB COMPLETE - High: {this.orbHigh}, Low: {this.orbLow}, Range: {this.rangeSize}");
+                    this.Log($"✅ ORB RANGE READY FOR TRADING - High: {this.orbHigh}, Low: {this.orbLow}, Range: {this.rangeSize:F2} points", StrategyLoggingLevel.Trading);
                 }
             }
         }
@@ -429,9 +419,17 @@ namespace goldOrbStrategy
             // Calculate opening range during session
             if (this.inOrbSession)
             {
+                double previousHigh = this.orbHigh;
+                double previousLow = this.orbLow;
+                
                 this.orbHigh = Math.Max(this.orbHigh, currentHigh);
                 this.orbLow = Math.Min(this.orbLow, currentLow);
-                this.Log($"ORB Session Active - Current Price: {currentClose}, High: {this.orbHigh}, Low: {this.orbLow}, Range: {this.orbHigh - this.orbLow}");
+                
+                // Log when range expands
+                if (this.orbHigh != previousHigh || this.orbLow != previousLow)
+                {
+                    this.Log($"📊 ORB RANGE EXPANDING - High: {this.orbHigh} (↑{this.orbHigh - previousHigh:F2}), Low: {this.orbLow} (↓{previousLow - this.orbLow:F2}), Size: {this.orbHigh - this.orbLow:F2}", StrategyLoggingLevel.Trading);
+                }
                 return;
             }
 

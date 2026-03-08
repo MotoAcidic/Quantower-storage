@@ -99,6 +99,9 @@ namespace esOrbStrategy
         [InputParameter("Profit Target (points)", 18)]
         public double profitTargetPoints = 15.0;
 
+        [InputParameter("EST Timezone Offset (hours)", 19)]
+        public double estTimezoneOffset = -5.0; // EST is UTC-5 (change to -4 for EDT)
+
         public override string[] MonitoringConnectionsIds => new string[] { this.CurrentSymbol?.ConnectionId, this.CurrentAccount?.ConnectionId };
 
         private HistoricalData hdm;
@@ -136,6 +139,11 @@ namespace esOrbStrategy
         private readonly int orbEndMinute = 15;
         private readonly int marketOpenHour = 9;
         private readonly int marketOpenMinute = 30;
+
+        // ORB session tracking
+        private DateTime orbSessionStart;
+        private DateTime orbSessionEnd;
+        private DateTime lastOrbDate = DateTime.MinValue;
 
         public esOrbStrategy()
             : base()
@@ -331,24 +339,52 @@ namespace esOrbStrategy
         private void CheckOrbSession()
         {
             DateTime currentTime = HistoricalDataExtensions.Time(this.hdm, 0);
-            var currentHour = currentTime.Hour;
-            var currentMinute = currentTime.Minute;
+            
+            // Convert to EST using configurable offset
+            DateTime estTime = currentTime.AddHours(this.estTimezoneOffset);
+            DateTime currentDate = estTime.Date;
+            
+            this.Log($"Current UTC Time: {currentTime:HH:mm:ss}, EST Time: {estTime:HH:mm:ss}");
 
-            // Check if we're in ORB session (8:00-8:15 AM EST)
-            bool inOrbWindow = (currentHour == orbStartHour && currentMinute >= orbStartMinute) &&
-                              (currentHour < orbEndHour || (currentHour == orbEndHour && currentMinute < orbEndMinute));
-
-            if (inOrbWindow && !orbSessionActive)
+            // Reset ORB on new day
+            if (this.lastOrbDate != currentDate)
             {
-                orbSessionActive = true;
-                orbCaptured = false;
-                orbHigh = HistoricalDataExtensions.High(this.hdm, 0);
-                orbLow = HistoricalDataExtensions.Low(this.hdm, 0);
-                this.Log($"ORB session started. Initial high: {orbHigh}, low: {orbLow}");
+                this.InitializeOrbSession();
+                this.lastOrbDate = currentDate;
+                this.Log($"New trading day detected: {currentDate:yyyy-MM-dd}");
             }
-            else if (inOrbWindow && orbSessionActive)
+
+            // Calculate ORB session times for current day in EST
+            this.orbSessionStart = currentDate.AddHours(this.orbStartHour).AddMinutes(this.orbStartMinute);
+            this.orbSessionEnd = currentDate.AddHours(this.orbEndHour).AddMinutes(this.orbEndMinute);
+
+            this.Log($"ORB Session Window: {this.orbSessionStart:HH:mm} to {this.orbSessionEnd:HH:mm} EST");
+            
+            // Check if we're in ORB session
+            bool previousInSession = this.orbSessionActive;
+            bool inOrbWindow = estTime >= this.orbSessionStart && estTime < this.orbSessionEnd;
+            orbSessionActive = inOrbWindow;
+            
+            if (orbSessionActive != previousInSession)
             {
-                // Update ORB levels during session
+                if (orbSessionActive)
+                {
+                    orbCaptured = false;
+                    orbHigh = HistoricalDataExtensions.High(this.hdm, 0);
+                    orbLow = HistoricalDataExtensions.Low(this.hdm, 0);
+                    this.Log($"ORB SESSION STARTED at {estTime:HH:mm:ss} EST - Initial high: {orbHigh}, low: {orbLow}");
+                }
+                else
+                {
+                    orbCaptured = true;
+                    orbMidpoint = (orbHigh + orbLow) / 2.0;
+                    this.Log($"ORB SESSION ENDED at {estTime:HH:mm:ss} EST - Final ORB: High: {orbHigh}, Low: {orbLow}, Range: {orbHigh - orbLow}");
+                }
+            }
+            
+            // Update ORB levels during active session
+            if (orbSessionActive)
+            {
                 var currentHigh = HistoricalDataExtensions.High(this.hdm, 0);
                 var currentLow = HistoricalDataExtensions.Low(this.hdm, 0);
 
@@ -356,14 +392,8 @@ namespace esOrbStrategy
                     orbHigh = currentHigh;
                 if (currentLow < orbLow)
                     orbLow = currentLow;
-            }
-            else if (!inOrbWindow && orbSessionActive)
-            {
-                // ORB session ended
-                orbSessionActive = false;
-                orbCaptured = true;
-                orbMidpoint = (orbHigh + orbLow) / 2.0;
-                this.Log($"ORB captured! High: {orbHigh}, Low: {orbLow}, Midpoint: {orbMidpoint}, Range: {orbHigh - orbLow}");
+                    
+                this.Log($"ORB Session Active - Current High: {orbHigh}, Low: {orbLow}, Range: {orbHigh - orbLow}");
             }
         }
 
