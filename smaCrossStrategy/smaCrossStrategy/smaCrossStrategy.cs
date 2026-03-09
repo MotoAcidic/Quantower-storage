@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.Metrics;
 using System.Linq;
@@ -63,6 +63,21 @@ namespace SimpleMACross
         [InputParameter("Profit Threshold")]
         public int profitThreshold = 40;
 
+        [InputParameter("Prop Firm Account (0=TopStep Eval, 1=TopStep Funded, 2=Lucid Eval, 3=Lucid Funded, 4=Live Account)", 19, 0, 4, 1, 0)]
+        public int propFirmAccountSelection = 0;
+
+        [InputParameter("Daily Profit Cap (for Eval accounts)", 20)]
+        public double dailyProfitCap = 1500.0;
+
+        [InputParameter("Enable Daily Profit Cap", 21)]
+        public bool enableDailyProfitCap = true;
+
+        [InputParameter("Enable Auto-Close at Cutoff", 22)]
+        public bool enableAutoClose = true;
+
+        [InputParameter("Respect Market Hours", 23)]
+        public bool respectMarketHours = true;
+
         public override string[] MonitoringConnectionsIds => new string[] { this.CurrentSymbol?.ConnectionId, this.CurrentAccount?.ConnectionId };
 
         private Indicator indicatorFastMA;
@@ -85,21 +100,40 @@ namespace SimpleMACross
         private double totalGrossPl;
         private double totalFee;
 
+        // Prop firm daily tracking
+        private double dailyNetPl = 0.0;
+        private DateTime currentTradingDate = DateTime.MinValue;
+        private bool dailyProfitCapReached = false;
+        private bool autoCloseTriggered = false;
+        private DateTime lastAutoCloseDate = DateTime.MinValue;
+        private DateTime capReachedDate = DateTime.MinValue;
+        private TimeSpan capReachedTime = TimeSpan.Zero;
+
+        // Bar time - updated from historical data so backtesting uses simulated time, not real clock
+        private DateTime currentBarTime = DateTime.MinValue;
+        private DateTime Now => currentBarTime != DateTime.MinValue ? currentBarTime : Now;
+
         public SimpleMACross()
             : base()
         {
-            this.Name = "SMA Cross Strategy";
-            this.Description = "Raw strategy without any additional function";
+            this.Name = "SMA Cross Strategy - Prop Firm Edition";
+            this.Description = "SMA Cross with prop firm daily profit management";
 
             this.FastMA = 10;
             this.SlowMA = 20;
             this.Period = Period.SECOND30;
             this.StartPoint = Core.TimeUtils.DateTimeUtcNow.AddDays(-100);
+            this.propFirmAccountSelection = 0; // Default to TopStep Eval
+            this.dailyProfitCap = 1500.0;
+            this.enableDailyProfitCap = true;
         }
 
         protected override void OnRun()
         {
             this.totalNetPl = 0D;
+            
+            // Initialize prop firm settings
+            InitializePropFirmSettings();
 
             // Restore symbol object from active connection
             if (this.CurrentSymbol != null && this.CurrentSymbol.State == BusinessObjectState.Fake)
@@ -183,6 +217,30 @@ namespace SimpleMACross
             meter.CreateObservableCounter("total-fee", () => this.totalFee, description: "Total fee");
         }
 
+        /// <summary>
+        /// Initialize prop firm settings and daily tracking
+        /// </summary>
+        private void InitializePropFirmSettings()
+        {
+            DateTime now = Now;
+            DateTime tradingDate = GetForexTradingDate();
+            
+            currentTradingDate = tradingDate;
+            dailyNetPl = 0.0;
+            dailyProfitCapReached = false;
+            autoCloseTriggered = false;
+            lastAutoCloseDate = DateTime.MinValue;
+            
+            string accountTypeText = GetAccountTypeDescription();
+            this.Log($"?? INITIALIZED - Trading Date: {tradingDate:yyyy-MM-dd}, Time: {now:HH:mm:ss} EST", StrategyLoggingLevel.Trading);
+            this.Log($"?? Account: {accountTypeText} (Selection: {propFirmAccountSelection}), Daily Cap: ${dailyProfitCap:F0}, Cap Enabled: {enableDailyProfitCap}", StrategyLoggingLevel.Trading);
+            
+            if (IsEvalAccount() && enableDailyProfitCap)
+            {
+                this.Log($"? Evaluation account - Daily profit cap active, resets at 6pm EST", StrategyLoggingLevel.Trading);
+            }
+        }
+
         private void Core_PositionAdded(Position obj)
         {
             var positions = Core.Instance.Positions.Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount).ToArray();
@@ -221,10 +279,11 @@ namespace SimpleMACross
 
         private void Core_OrdersHistoryAdded(OrderHistory obj)
         {
-            if (obj.Symbol == this.CurrentSymbol)
+            // Only process orders for our symbol and account
+            if (obj.Symbol != this.CurrentSymbol)
                 return;
 
-            if (obj.Account == this.CurrentAccount)
+            if (obj.Account != this.CurrentAccount)
                 return;
 
             if (obj.Status == OrderStatus.Refused)
@@ -233,8 +292,23 @@ namespace SimpleMACross
 
         private void Core_TradeAdded(Trade obj)
         {
+            // Only process trades for our symbol and account
+            if (obj.Symbol != this.CurrentSymbol)
+                return;
+                
+            if (obj.Account != this.CurrentAccount)
+                return;
+                
             if (obj.NetPnl != null)
+            {
                 this.totalNetPl += obj.NetPnl.Value;
+                
+                // Track daily P&L for prop firm management
+                UpdateDailyProfit(obj.NetPnl.Value);
+                
+                // Log every trade for debugging daily cap
+                this.Log($"?? TRADE: P&L: ${obj.NetPnl.Value:F2}, Daily Total: ${dailyNetPl:F2} / ${dailyProfitCap:F0}", StrategyLoggingLevel.Trading);
+            }
 
             if (obj.GrossPnl != null)
                 this.totalGrossPl += obj.GrossPnl.Value;
@@ -243,11 +317,48 @@ namespace SimpleMACross
                 this.totalFee += obj.Fee.Value;
         }
 
-        private void Hdm_HistoryItemUpdated(object sender, HistoryEventArgs e) => this.OnUpdate();
+        private void Hdm_HistoryItemUpdated(object sender, HistoryEventArgs e)
+        {
+            // Use the bar's own timestamp - works correctly during backtesting
+            // Now would return real machine time, not the simulated backtest time
+            this.currentBarTime = e.HistoryItem.TimeLeft.ToLocalTime();
+            this.OnUpdate();
+        }
 
 
         private void OnUpdate()
         {
+            // ULTRA AGGRESSIVE: Force check for 6pm EST reset multiple times
+            ForceCheckTradingDayReset();
+            
+            // Check daily profit status for prop firm accounts
+            CheckDailyProfitStatus();
+            
+            // DEBUG: Log current status every few minutes when cap is reached
+            DateTime now = Now;
+            if (dailyProfitCapReached && now.TimeOfDay.Minutes % 5 == 0 && now.TimeOfDay.Seconds < 10)
+            {
+                this.Log($"?? STATUS CHECK at {now:HH:mm:ss} EST - Cap: {dailyProfitCapReached}, Trading Date: {currentTradingDate:yyyy-MM-dd}, Current Date: {GetForexTradingDate():yyyy-MM-dd}", StrategyLoggingLevel.Trading);
+            }
+            
+            // Check market hours (5pm-6pm EST daily break + weekends)
+            if (IsMarketClosed())
+            {
+                return;
+            }
+            
+            // Check prop firm trading hours and auto-close if needed
+            if (CheckPropFirmTradingHours())
+            {
+                return;
+            }
+            
+            // Skip trading if daily profit cap reached (for Eval accounts)
+            if (ShouldStopTradingDueToProfit())
+            {
+                return;
+            }
+
             /// Previous Open and Close potential code
             //lookback= 1
             //historicaldata.GetPrice(PriceType.Close, lookback)
@@ -334,6 +445,45 @@ namespace SimpleMACross
 
             if (positions.Any())
             {
+                // CRITICAL: Check profit cap IMMEDIATELY when we have open positions
+                if (IsEvalAccount() && enableDailyProfitCap)
+                {
+                    double currentOpenProfit = positions.Sum(x => x.GrossPnLTicks * this.CurrentSymbol.TickSize);
+                    double totalDailyProfit = dailyNetPl + currentOpenProfit;
+                    
+                    // Only force close if we've actually exceeded the cap (not just approaching)
+                    if (totalDailyProfit > dailyProfitCap)
+                    {
+                        this.Log($"?? EMERGENCY CLOSE - Daily cap EXCEEDED with open positions: ${totalDailyProfit:F2} > ${dailyProfitCap:F0}", StrategyLoggingLevel.Trading);
+                        this.Log($"?? Breakdown - Closed: ${dailyNetPl:F2}, Open: ${currentOpenProfit:F2}, Total: ${totalDailyProfit:F2}", StrategyLoggingLevel.Trading);
+                        
+                        dailyProfitCapReached = true;
+                        capReachedDate = Now.Date;
+                        capReachedTime = Now.TimeOfDay;
+                        this.waitClosePositions = true;
+                        
+                        foreach (var emergency_close_position in positions)
+                        {
+                            var result = emergency_close_position.Close();
+                            if (result.Status == TradingOperationResultStatus.Success)
+                            {
+                                this.Log($"? Emergency position closed - cap exceeded", StrategyLoggingLevel.Trading);
+                            }
+                            else
+                            {
+                                this.Log($"? Emergency close failed: {result.Message}", StrategyLoggingLevel.Error);
+                            }
+                        }
+                        return; // Exit immediately after emergency close
+                    }
+                    
+                    // Log warning when approaching cap but allow position to continue
+                    else if (totalDailyProfit >= (dailyProfitCap * 0.95)) // 95% threshold
+                    {
+                        this.Log($"?? Position approaching cap: ${totalDailyProfit:F2} (${dailyProfitCap - totalDailyProfit:F0} remaining)", StrategyLoggingLevel.Trading);
+                    }
+                }
+                
                 //this.Log("Open Positions");
                 //return;
                 //var pnl = currentPosition.GrossPnLTicks;
@@ -460,6 +610,45 @@ namespace SimpleMACross
 
                 if (diff_0 > diff_avg * multiplicative && this.inPosition == false && prevSide == "none")
                 {
+                    // TRIPLE CHECK: Profit cap enforcement before any new trades
+                    if (IsEvalAccount() && enableDailyProfitCap)
+                    {
+                        double totalCurrentProfit = GetTotalDailyProfit();
+                        if (totalCurrentProfit >= dailyProfitCap)
+                        {
+                            this.Log($"?? BLOCKING NEW TRADE - Already at cap: ${totalCurrentProfit:F2} >= ${dailyProfitCap:F0}", StrategyLoggingLevel.Trading);
+                            dailyProfitCapReached = true;
+                            capReachedDate = Now.Date;
+                            capReachedTime = Now.TimeOfDay;
+                            return;
+                        }
+                        
+                        // Allow trading closer to cap for eval accounts (only warn at $10 remaining)
+                        if (totalCurrentProfit >= (dailyProfitCap - 10))
+                        {
+                            this.Log($"?? CLOSE TO CAP - Proceed with caution: ${totalCurrentProfit:F2} (${dailyProfitCap - totalCurrentProfit:F0} remaining)", StrategyLoggingLevel.Trading);
+                        }
+                    }
+                    
+                    // Additional safety checks before opening positions
+                    if (IsMarketClosed())
+                    {
+                        this.Log("?? Skipping trade signal - market is closed", StrategyLoggingLevel.Trading);
+                        return;
+                    }
+                    
+                    if (ShouldStopTradingDueToProfit())
+                    {
+                        this.Log("?? Skipping trade signal - daily profit cap reached", StrategyLoggingLevel.Trading);
+                        return;
+                    }
+                    
+                    if (CheckPropFirmTradingHours())
+                    {
+                        this.Log("?? Skipping trade signal - past trading cutoff time", StrategyLoggingLevel.Trading);
+                        return;
+                    }
+                    
                     //this.Log("Arrow Signal");
                     //if (this.indicatorFastMA.GetValue(2) < this.indicatorSlowMA.GetValue(2) && this.indicatorFastMA.GetValue(1) > this.indicatorSlowMA.GetValue(1))
                     if (sma_10 > sma_20)
@@ -522,6 +711,452 @@ namespace SimpleMACross
                 }
             }
         }
+
+        #region Prop Firm Daily Profit Management
+        
+        private bool IsEvalAccount()
+        {
+            // 0=TopStep Eval, 2=Lucid Eval (both are eval accounts with daily caps)
+            return propFirmAccountSelection == 0 || propFirmAccountSelection == 2;
+        }
+        
+        private bool IsTopStepX()
+        {
+            // 0=TopStep Eval, 1=TopStep Funded (both use TopStep rules)
+            return propFirmAccountSelection == 0 || propFirmAccountSelection == 1;
+        }
+        
+        private bool IsLucidTrading()
+        {
+            // 2=Lucid Eval, 3=Lucid Funded (both use Lucid rules)
+            return propFirmAccountSelection == 2 || propFirmAccountSelection == 3;
+        }
+        
+        /// <summary>
+        /// Aggressive check for trading day reset - called every update to catch 6pm EST transitions
+        /// </summary>
+        private void ForceCheckTradingDayReset()
+        {
+            if (!dailyProfitCapReached || !IsEvalAccount() || !enableDailyProfitCap)
+                return;
+
+            DateTime now = Now;
+            TimeSpan currentTime = now.TimeOfDay;
+
+            // The reset happens at 6pm EST each day.
+            // We track which calendar date the cap was hit on.
+            // Only reset when a NEW 6pm crosses AFTER the cap was reached.
+            // i.e. the current date:time has passed 6pm on a date AFTER capReachedDate.
+            DateTime resetMoment = capReachedDate.AddDays(1).Date + new TimeSpan(18, 0, 0);
+            // If cap was reached before 6pm today, resetMoment is today at 6pm
+            if (capReachedTime < new TimeSpan(18, 0, 0))
+                resetMoment = capReachedDate.Date + new TimeSpan(18, 0, 0);
+
+            if (now >= resetMoment)
+            {
+                double oldNetPl = dailyNetPl;
+                dailyNetPl = 0.0;
+                dailyProfitCapReached = false;
+                autoCloseTriggered = false;
+                capReachedDate = DateTime.MinValue;
+                capReachedTime = TimeSpan.Zero;
+                this.Log($"? 6PM EST RESET - Trading resumed. Previous daily P&L: ${oldNetPl:F2}", StrategyLoggingLevel.Trading);
+            }
+        }
+        
+        /// <summary>
+        /// Perform actual daily reset with comprehensive logging
+        /// </summary>
+        private void PerformDailyReset(DateTime now, DateTime newTradingDate)
+        {
+            bool wasCapReached = dailyProfitCapReached;
+            double oldNetPl = dailyNetPl;
+            
+            currentTradingDate = newTradingDate;
+            dailyNetPl = 0.0;
+            dailyProfitCapReached = false;
+            autoCloseTriggered = false;
+            
+            string accountTypeText = GetAccountTypeDescription();
+            this.Log($"?? NEW FOREX TRADING DAY at {now:HH:mm:ss} EST - Trading Date: {newTradingDate:yyyy-MM-dd} - Account: {accountTypeText}", StrategyLoggingLevel.Trading);
+            
+            if (wasCapReached)
+            {
+                this.Log($"?? PROFIT CAP RESET! Previous P&L: ${oldNetPl:F2} - New limit: ${dailyProfitCap:F0}", StrategyLoggingLevel.Trading);
+                this.Log($"? TRADING RESUMED - Fresh daily cap for new Forex session", StrategyLoggingLevel.Trading);
+            }
+            
+            if (IsEvalAccount() && enableDailyProfitCap)
+            {
+                this.Log($"?? Daily Profit Cap: ${dailyProfitCap:F0} (Eval Account) - Resets at 6pm EST", StrategyLoggingLevel.Trading);
+            }
+            else
+            {
+                this.Log($"?? No Daily Profit Cap ({accountTypeText}) - Cap Enabled: {enableDailyProfitCap}", StrategyLoggingLevel.Trading);
+            }
+        }
+
+        /// <summary>
+        /// Get the current Forex trading date (changes at 6pm EST, not midnight)
+        /// Forex trading days: Sunday 6pm-Monday 6pm = "Tuesday trading day"
+        /// </summary>
+        private DateTime GetForexTradingDate()
+        {
+            DateTime now = Now;
+            DateTime today = now.Date;
+            TimeSpan cutoffTime = new TimeSpan(18, 0, 0); // 6:00 PM EST
+            
+            // Simplified logic: the trading day "label" advances at 6pm
+            DateTime tradingDay;
+            if (now.TimeOfDay >= cutoffTime)
+            {
+                // After 6pm = next day's trading session
+                tradingDay = today.AddDays(1);
+            }
+            else
+            {
+                // Before 6pm = current day's trading session
+                tradingDay = today;
+            }
+            
+            // ENHANCED DEBUG: Log detailed date calculation during evening hours
+            if (now.TimeOfDay.Hours >= 18 && now.TimeOfDay.Hours <= 23)
+            {
+                this.Log($"??? DATE CALC DEBUG - Now: {now:yyyy-MM-dd HH:mm:ss}, Today: {today:yyyy-MM-dd}, TimeOfDay: {now.TimeOfDay}, >= 18:00? {now.TimeOfDay >= cutoffTime}, Result: {tradingDay:yyyy-MM-dd}", StrategyLoggingLevel.Trading);
+            }
+            
+            return tradingDay;
+        }
+        
+        private void CheckDailyProfitStatus()
+        {
+            DateTime forexTradingDate = GetForexTradingDate();
+            DateTime now = Now;
+            
+            // This method now mainly handles the initial setup
+            // The actual reset logic is handled by ForceCheckTradingDayReset()
+            if (currentTradingDate == DateTime.MinValue)
+            {
+                // First time initialization
+                PerformDailyReset(now, forexTradingDate);
+            }
+            
+            // Continuous monitoring of profit cap INCLUDING open positions
+            if (IsEvalAccount() && enableDailyProfitCap && !dailyProfitCapReached)
+            {
+                double totalDailyProfit = GetTotalDailyProfit();
+                
+                // Check if we've exceeded the cap with open positions
+                if (totalDailyProfit >= dailyProfitCap)
+                {
+                    dailyProfitCapReached = true;
+                    capReachedDate = Now.Date;
+                    capReachedTime = Now.TimeOfDay;
+                    this.Log($"?? PROFIT CAP TRIGGERED by open positions: ${totalDailyProfit:F2} >= ${dailyProfitCap:F0}", StrategyLoggingLevel.Trading);
+                    this.Log($"?? Breakdown - Closed trades: ${dailyNetPl:F2}, Open positions: ${totalDailyProfit - dailyNetPl:F2}", StrategyLoggingLevel.Trading);
+                    CloseAllPositionsForProfitCap();
+                }
+            }
+        }
+        
+        private void UpdateDailyProfit(double tradeProfit)
+        {
+            dailyNetPl += tradeProfit;
+            
+            string accountTypeText = GetAccountTypeDescription();
+            
+            // Check if daily profit cap reached for Eval accounts
+            if (IsEvalAccount() && enableDailyProfitCap)
+            {
+                this.Log($"?? Updated Daily P&L: ${dailyNetPl:F2} (+${tradeProfit:F2}) - Cap: ${dailyProfitCap:F0} ({accountTypeText})", StrategyLoggingLevel.Trading);
+                
+                if (dailyNetPl >= dailyProfitCap && !dailyProfitCapReached)
+                {
+                    dailyProfitCapReached = true;
+                    capReachedDate = Now.Date;
+                    capReachedTime = Now.TimeOfDay;
+                    this.Log($"?? DAILY PROFIT CAP REACHED: ${dailyNetPl:F2} >= ${dailyProfitCap:F0} ({accountTypeText})", StrategyLoggingLevel.Trading);
+                    this.Log($"? Trading STOPPED until 6pm EST (next Forex trading day)", StrategyLoggingLevel.Trading);
+                    this.Log($"?? Cap reached at: {Now:HH:mm:ss} EST - Will reset at next 6pm EST", StrategyLoggingLevel.Trading);
+                }
+                else if (dailyNetPl > (dailyProfitCap * 0.8)) // 80% warning
+                {
+                    this.Log($"?? Daily profit at ${dailyNetPl:F2} (${(dailyProfitCap - dailyNetPl):F0} until cap) - {accountTypeText}", StrategyLoggingLevel.Trading);
+                }
+            }
+            else
+            {
+                this.Log($"?? Daily P&L: ${dailyNetPl:F2} (+${tradeProfit:F2}) (No Cap - {accountTypeText}) - Cap Enabled: {enableDailyProfitCap}", StrategyLoggingLevel.Trading);
+            }
+        }
+        
+        private double GetTotalDailyProfit()
+        {
+            // Start with closed trades profit
+            double totalDaily = dailyNetPl;
+            
+            // Add current open positions profit
+            var positions = Core.Instance.Positions.Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount).ToArray();
+            double openPositionsProfit = positions.Sum(x => x.GrossPnLTicks * this.CurrentSymbol.TickSize);
+            
+            return totalDaily + openPositionsProfit;
+        }
+
+        private bool ShouldStopTradingDueToProfit()
+        {
+            DateTime now = Now;
+            TimeSpan currentTime = now.TimeOfDay;
+            
+            // DO NOT reset based on time when cap is reached - let ForceCheckTradingDayReset handle proper 6pm boundary
+            // The cap should stay in effect until the actual trading day changes at 6pm EST
+            
+            // Only apply daily profit cap to Eval accounts
+            if (IsEvalAccount() && enableDailyProfitCap)
+            {
+                // Calculate total daily profit including open positions
+                double totalDailyProfit = GetTotalDailyProfit();
+                
+                if (dailyProfitCapReached)
+                {
+                    // Log current status for debugging every 10 minutes
+                    if (currentTime.Minutes % 10 == 0)
+                    {
+                        this.Log($"?? Trading blocked - Profit cap reached. Total: ${totalDailyProfit:F2}, Cap: ${dailyProfitCap:F0}, Time: {now:HH:mm:ss}", StrategyLoggingLevel.Trading);
+                        this.Log($"? Cap will reset at 6pm EST (next Forex trading day boundary)", StrategyLoggingLevel.Trading);
+                    }
+                    // Close any open positions when profit cap is reached
+                    CloseAllPositionsForProfitCap();
+                    return true;
+                }
+                
+                // Check if we're about to exceed the cap (including open positions)
+                if (totalDailyProfit >= dailyProfitCap)
+                {
+                    dailyProfitCapReached = true;
+                    capReachedDate = Now.Date;
+                    capReachedTime = Now.TimeOfDay;
+                    this.Log($"?? Daily profit cap reached: ${totalDailyProfit:F2} >= ${dailyProfitCap:F0} - Trading stopped until 6pm EST!", StrategyLoggingLevel.Trading);
+                    this.Log($"?? Breakdown - Closed trades: ${dailyNetPl:F2}, Open positions: ${totalDailyProfit - dailyNetPl:F2}", StrategyLoggingLevel.Trading);
+                    CloseAllPositionsForProfitCap();
+                    return true;
+                }
+                
+                // Warning when approaching cap (80% threshold)
+                if (totalDailyProfit > (dailyProfitCap * 0.8))
+                {
+                    this.Log($"?? Approaching daily cap: ${totalDailyProfit:F2} (${(dailyProfitCap - totalDailyProfit):F0} remaining)", StrategyLoggingLevel.Trading);
+                }
+            }
+            
+            // Express Funded and Live accounts have no daily profit cap
+            return false;
+        }
+        
+        private bool CheckPropFirmTradingHours()
+        {
+            if (!enableAutoClose)
+                return false;
+            
+            DateTime now = Now;
+            DateTime forexTradingDate = GetForexTradingDate();
+            TimeSpan currentTime = now.TimeOfDay;
+            
+            // Reset auto-close trigger for new Forex trading day (6pm EST reset)
+            if (lastAutoCloseDate != forexTradingDate)
+            {
+                autoCloseTriggered = false;
+                lastAutoCloseDate = forexTradingDate;
+            }
+            
+            TimeSpan cutoffTime;
+            string firmName;
+            
+            if (IsTopStepX())
+            {
+                cutoffTime = new TimeSpan(16, 10, 0); // 4:10 PM EST
+                firmName = "TopStepX";
+            }
+            else if (IsLucidTrading())
+            {
+                cutoffTime = new TimeSpan(16, 45, 0); // 4:45 PM EST
+                firmName = "LucidTrading";
+            }
+            else
+            {
+                // No auto-close for other firms
+                return false;
+            }
+            
+            // Check if we've reached the cutoff time and haven't closed today
+            if (currentTime >= cutoffTime && !autoCloseTriggered)
+            {
+                autoCloseTriggered = true;
+                this.Log($"?? {firmName} AUTO-CLOSE triggered at {now:HH:mm:ss} EST", StrategyLoggingLevel.Trading);
+                CloseAllPositionsForAutoClose(firmName);
+                // Don't block further trading, just close positions once
+            }
+            
+            // Return false to allow trading to continue (auto-close only closes positions once)
+            return false;
+        }
+        
+        private void CloseAllPositionsForProfitCap()
+        {
+            var positions = Core.Instance.Positions.Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount).ToArray();
+            
+            if (positions.Any())
+            {
+                this.Log($"?? Closing {positions.Length} position(s) due to daily profit cap", StrategyLoggingLevel.Trading);
+                
+                foreach (var position in positions)
+                {
+                    var result = position.Close();
+                    if (result.Status == TradingOperationResultStatus.Success)
+                    {
+                        this.Log($"? Position closed successfully due to profit cap", StrategyLoggingLevel.Trading);
+                    }
+                    else
+                    {
+                        this.Log($"? Failed to close position: {result.Message}", StrategyLoggingLevel.Error);
+                    }
+                }
+                
+                // Cancel any pending orders
+                CancelAllPendingOrders("profit cap reached");
+            }
+        }
+        
+        private void CloseAllPositionsForAutoClose(string firmName)
+        {
+            var positions = Core.Instance.Positions.Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount).ToArray();
+            
+            if (positions.Any())
+            {
+                this.Log($"?? Closing {positions.Length} position(s) for {firmName} daily cutoff", StrategyLoggingLevel.Trading);
+                
+                foreach (var position in positions)
+                {
+                    var result = position.Close();
+                    if (result.Status == TradingOperationResultStatus.Success)
+                    {
+                        this.Log($"? Position closed for daily cutoff", StrategyLoggingLevel.Trading);
+                    }
+                    else
+                    {
+                        this.Log($"? Failed to close position: {result.Message}", StrategyLoggingLevel.Error);
+                    }
+                }
+                
+                // Cancel any pending orders
+                CancelAllPendingOrders($"{firmName} daily cutoff");
+            }
+        }
+        
+        private void CancelAllPendingOrders(string reason)
+        {
+            var orders = Core.Instance.Orders.Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount).ToArray();
+            
+            foreach (var order in orders)
+            {
+                var cancelResult = order.Cancel();
+                if (cancelResult.Status == TradingOperationResultStatus.Success)
+                {
+                    this.Log($"?? Cancelled order due to {reason}", StrategyLoggingLevel.Trading);
+                }
+            }
+        }
+        
+        private bool IsMarketClosed()
+        {
+            if (!respectMarketHours)
+                return false;
+                
+            DateTime now = Now;
+            DayOfWeek dayOfWeek = now.DayOfWeek;
+            TimeSpan currentTime = now.TimeOfDay;
+            
+            // Market hours: Sunday 6pm EST - Friday 5pm EST
+            // Daily break: 5pm - 6pm EST (Monday-Thursday)
+            
+            // Weekend closure (Friday 5pm - Sunday 6pm)
+            if (dayOfWeek == DayOfWeek.Friday)
+            {
+                TimeSpan fridayClose = new TimeSpan(17, 0, 0); // 5:00 PM EST
+                if (currentTime >= fridayClose)
+                {
+                    // Only log once per hour to avoid spam
+                    if (currentTime.Minutes < 5)
+                    {
+                        this.Log("?? Market closed for weekend (Friday 5pm+)", StrategyLoggingLevel.Trading);
+                    }
+                    return true;
+                }
+            }
+            
+            if (dayOfWeek == DayOfWeek.Saturday)
+            {
+                // Only log once per hour to avoid spam
+                if (currentTime.Hours % 4 == 0 && currentTime.Minutes < 5)
+                {
+                    this.Log("?? Market closed (Saturday)", StrategyLoggingLevel.Trading);
+                }
+                return true;
+            }
+            
+            if (dayOfWeek == DayOfWeek.Sunday)
+            {
+                TimeSpan sundayOpen = new TimeSpan(18, 0, 0); // 6:00 PM EST
+                if (currentTime < sundayOpen)
+                {
+                    // Only log once per hour to avoid spam
+                    if (currentTime.Minutes < 5)
+                    {
+                        this.Log("?? Market closed (Sunday before 6pm)", StrategyLoggingLevel.Trading);
+                    }
+                    return true;
+                }
+            }
+            
+            // Daily session break (5pm - 6pm EST, Monday-Thursday)
+            if (dayOfWeek >= DayOfWeek.Monday && dayOfWeek <= DayOfWeek.Thursday)
+            {
+                TimeSpan dailyClose = new TimeSpan(17, 0, 0); // 5:00 PM EST
+                TimeSpan dailyOpen = new TimeSpan(18, 0, 0);  // 6:00 PM EST
+                
+                if (currentTime >= dailyClose && currentTime < dailyOpen)
+                {
+                    // Only log once during the break to avoid spam
+                    if (currentTime.Minutes < 5)
+                    {
+                        this.Log($"?? Market closed for daily break (5pm-6pm EST on {dayOfWeek})", StrategyLoggingLevel.Trading);
+                    }
+                    return true;
+                }
+            }
+            
+            return false;
+        }
+        
+        private string GetAccountTypeDescription()
+        {
+            switch (propFirmAccountSelection)
+            {
+                case 0:
+                    return "TopStep Evaluation";
+                case 1:
+                    return "TopStep Funded";
+                case 2:
+                    return "Lucid Evaluation";
+                case 3:
+                    return "Lucid Funded";
+                case 4:
+                    return "Live Account";
+                default:
+                    return "Unknown";
+            }
+        }
+        
+        #endregion
 
         private void ProcessTradingRefuse()
         {
