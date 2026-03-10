@@ -73,12 +73,25 @@ namespace emaCrossStrategy
         [InputParameter("Trailing Stop (ticks from peak, 0 = disabled)", 11)]
         public int TrailingStopTicks { get; set; }
 
-        // ── Impulse candle filter ─────────────────────────────────────────────
+        // ── Exit mode ────────────────────────────────────────────────────────
+        // Controls which exit mechanism fires while in a position.
+        // 0 = Weakness Bars only  |  1 = Trailing Stop only  |  2 = Both
+        // Reverse-cross exit always fires regardless of this setting.
+        [InputParameter("Exit Mode (0=WeaknessBars, 1=TrailingStop, 2=Both)", 12, minimum: 0, maximum: 2, increment: 1, decimalPlaces: 0)]
+        public int ExitMode { get; set; }
         // When a cross fires on a candle whose body exceeds this threshold, entry
         // is deferred one bar. The next bar must still hold the same EMA alignment
         // before the position opens. Set 0 to disable (enter on every cross).
-        [InputParameter("Impulse Filter (min candle body ticks to defer entry, 0 = off)", 12, minimum: 0, maximum: 500, increment: 1, decimalPlaces: 0)]
+        [InputParameter("Impulse Filter (min candle body ticks to defer entry, 0 = off)", 13, minimum: 0, maximum: 500, increment: 1, decimalPlaces: 0)]
         public int ImpulseFilterTicks { get; set; }
+
+        // ── Higher-timeframe 29 EMA touch re-entry ────────────────────────────
+        // After exiting a position (non-reverse), watch for price to pull back
+        // and touch the Mid EMA on the higher timeframe, then bounce back in
+        // the original trend direction. The HTF is auto-selected based on the
+        // cross period: 1m→3m, 3m→5m, 5m→15m, 15m→1hr. Set HtfTouchTicks to 0 to disable.
+        [InputParameter("HTF Mid EMA Touch (ticks from HTF EMA to arm, 0 = off)", 14, minimum: 0, maximum: 200, increment: 1, decimalPlaces: 0)]
+        public int HtfTouchTicks { get; set; }
         // ─────────────────────────────────────────────────────────────────────────
 
         public override string[] MonitoringConnectionsIds => new[]
@@ -91,6 +104,11 @@ namespace emaCrossStrategy
         private Indicator midEma;
         private HistoricalData hdm;
         private string orderTypeId;
+
+        // Higher-timeframe feed for Mid EMA touch re-entry
+        private Indicator      htfMidEma;
+        private HistoricalData htfHdm;
+        private Period         htfPeriod;  // auto-derived from cross Period
 
         private int longPositionsCount;
         private int shortPositionsCount;
@@ -106,6 +124,12 @@ namespace emaCrossStrategy
         // When an impulse candle is detected on a cross, defer entry by one bar.
         // On the next bar close we verify the EMA alignment still holds.
         private Side? pendingConfirmSide;
+
+        // HTF Mid EMA touch re-entry tracking.
+        // lastExitSide : direction of the last non-reverse-cross exit.
+        // htfTouchArmed: set once price has come within HtfTouchTicks of the HTF Mid EMA after exit.
+        private Side? lastExitSide;
+        private bool  htfTouchArmed;
 
         // ── Smart trailing state ──────────────────────────────────────────────
         // Tracks whether the profit threshold has been hit and the best price seen.
@@ -135,7 +159,9 @@ namespace emaCrossStrategy
             this.TakeProfitTicks      = 0;   // disabled by default
             this.TrailActivationTicks = 30;  // start trailing after 30 ticks of profit
             this.TrailingStopTicks    = 15;  // trail 15 ticks behind the peak
+            this.ExitMode             = 2;  // 0=WeaknessBars 1=TrailingStop 2=Both
             this.ImpulseFilterTicks   = 20;  // skip entry if cross candle body > 20 ticks
+            this.HtfTouchTicks        = 5;   // arm re-entry when price within 5t of HTF 29 EMA
         }
 
         protected override void OnRun()
@@ -148,6 +174,8 @@ namespace emaCrossStrategy
             this.waitClosePositions   = false;
             this.pendingEntrySide     = null;
             this.pendingConfirmSide   = null;
+            this.lastExitSide         = null;
+            this.htfTouchArmed        = false;
             this.trailingActivated    = false;
             this.bestPrice            = 0;
 
@@ -198,6 +226,24 @@ namespace emaCrossStrategy
             this.hdm.AddIndicator(this.microEma);
             this.hdm.AddIndicator(this.midEma);
 
+            // HTF feed for Mid EMA touch re-entry
+            if (this.HtfTouchTicks > 0)
+            {
+                this.htfPeriod = this.DeriveHtfPeriod();
+                if (this.htfPeriod == default)
+                {
+                    this.Log($"No HTF mapping for cross period {this.Period} — HTF EMA touch re-entry disabled.", StrategyLoggingLevel.Trading);
+                }
+                else
+                {
+                    this.htfMidEma = Core.Instance.Indicators.BuiltIn.EMA(this.MidEmaLen, PriceType.Close);
+                    this.htfHdm    = this.CurrentSymbol.GetHistory(this.htfPeriod, this.CurrentSymbol.HistoryType, this.StartPoint);
+                    this.htfHdm.AddIndicator(this.htfMidEma);
+                    this.Log($"HTF EMA touch re-entry: cross={this.Period} → HTF={this.htfPeriod}  Mid EMA={this.MidEmaLen}  threshold={this.HtfTouchTicks}t",
+                             StrategyLoggingLevel.Trading);
+                }
+            }
+
             Core.PositionAdded      += this.Core_PositionAdded;
             Core.PositionRemoved    += this.Core_PositionRemoved;
             Core.OrdersHistoryAdded += this.Core_OrdersHistoryAdded;
@@ -226,6 +272,8 @@ namespace emaCrossStrategy
                 this.hdm.NewHistoryItem     -= this.Hdm_OnNewHistoryItem;
                 this.hdm.Dispose();
             }
+
+            this.htfHdm?.Dispose();
 
             base.OnStop();
         }
@@ -295,6 +343,13 @@ namespace emaCrossStrategy
                     this.pendingEntrySide = null;
                     this.PlaceEntry(side);
                 }
+                else
+                {
+                    // Non-reverse exit (weakness bar, SL, TP, trailing stop).
+                    // Record the direction so we can watch for the HTF EMA touch re-entry.
+                    this.lastExitSide  = this.currentSide;
+                    this.htfTouchArmed = false;
+                }
             }
         }
 
@@ -321,6 +376,10 @@ namespace emaCrossStrategy
         private void Hdm_HistoryItemUpdated(object sender, HistoryEventArgs e)
         {
             if (this.waitOpenPosition || this.waitClosePositions)
+                return;
+
+            // Trailing stop is only active in TrailingStop (1) or Both (2) modes
+            if (this.ExitMode == 0)
                 return;
 
             if (this.TrailingStopTicks <= 0 || this.TrailActivationTicks <= 0)
@@ -403,7 +462,8 @@ namespace emaCrossStrategy
             bool bearishCross = micro1 < mid1 && micro2 >= mid2;
 
             // Gap weakness — mirrors Pine's ta.falling(math.abs(emaFast - emaSlow), weakBars)
-            bool gapWeak = this.IsGapFalling(this.WeaknessBars);
+            // Only evaluated in WeaknessBars (0) or Both (2) modes.
+            bool gapWeak = this.ExitMode != 1 && this.IsGapFalling(this.WeaknessBars);
 
             var positions = Core.Instance.Positions
                 .Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount)
@@ -486,9 +546,62 @@ namespace emaCrossStrategy
                 }
 
                 if (!bullishCross && !bearishCross)
+                {
+                    // ── HTF Mid EMA touch re-entry ────────────────────────────────────
+                    // After a non-reverse exit, watch for price to touch the Mid EMA on
+                    // the higher timeframe, then close the next 1m bar moving away from
+                    // it in the original trend direction.
+                    if (this.HtfTouchTicks > 0 && this.htfMidEma != null && this.lastExitSide.HasValue)
+                    {
+                        Side   exitDir   = this.lastExitSide.Value;
+                        double close1    = HistoricalDataExtensions.Close(this.hdm, 1);
+                        double close2    = HistoricalDataExtensions.Close(this.hdm, 2);
+                        double htfEma    = this.htfMidEma.GetValue(0); // current HTF bar (updating)
+                        double distTicks = Math.Abs(close1 - htfEma) / this.CurrentSymbol.TickSize;
+
+                        // Abort if EMA alignment completely broke (actual cross on 1m)
+                        bool alignmentHolds = exitDir == Side.Buy ? micro1 > mid1 : micro1 < mid1;
+                        if (!alignmentHolds)
+                        {
+                            this.lastExitSide  = null;
+                            this.htfTouchArmed = false;
+                            return;
+                        }
+
+                        // Phase 1: arm once price is within threshold of the HTF EMA
+                        if (!this.htfTouchArmed && distTicks <= this.HtfTouchTicks)
+                        {
+                            this.htfTouchArmed = true;
+                            this.Log($"HTF EMA touch armed ({exitDir}) — price {close1:F2} within {distTicks:F1}t of {this.htfPeriod} Mid EMA {htfEma:F2}",
+                                     StrategyLoggingLevel.Trading);
+                        }
+
+                        // Phase 2: once armed, enter when price closes back away from the HTF EMA in trend direction
+                        if (this.htfTouchArmed)
+                        {
+                            double prevDistTicks = Math.Abs(close2 - htfEma) / this.CurrentSymbol.TickSize;
+                            bool bouncingAway = exitDir == Side.Buy
+                                ? close1 > htfEma && distTicks > prevDistTicks  // bouncing up
+                                : close1 < htfEma && distTicks > prevDistTicks; // bouncing down
+
+                            if (bouncingAway)
+                            {
+                                this.Log($"HTF EMA bounce re-entry ({exitDir}) — price {close1:F2} moving away from {this.htfPeriod} Mid EMA {htfEma:F2} ({prevDistTicks:F1}t → {distTicks:F1}t)",
+                                         StrategyLoggingLevel.Trading);
+                                this.lastExitSide  = null;
+                                this.htfTouchArmed = false;
+                                this.PlaceEntry(exitDir);
+                            }
+                        }
+                    }
                     return;
+                }
 
                 Side entrySide = bullishCross ? Side.Buy : Side.Sell;
+
+                // A fresh cross overrides any pending re-entry tracking
+                this.lastExitSide  = null;
+                this.htfTouchArmed = false;
 
                 // ── Impulse candle filter ─────────────────────────────────────
                 // If the cross bar's body is too large, wait one bar to confirm
@@ -551,6 +664,26 @@ namespace emaCrossStrategy
         }
 
         /// <summary>
+        /// Auto-selects the higher timeframe based on the cross period.
+        /// 1m → 3m | 3m → 5m | 5m → 15m | 15m → 1hr
+        /// Returns default(Period) if the cross period is not in the known map.
+        /// </summary>
+        private Period DeriveHtfPeriod()
+        {
+            if (this.Period == Period.MIN1)  return Period.MIN3;
+            if (this.Period == Period.MIN3)  return Period.MIN5;
+            if (this.Period == Period.MIN5)  return Period.MIN15;
+            if (this.Period == Period.HOUR1) return Period.HOUR4;
+            // Check for 15-minute by value since there may not be a Period.MIN15 constant
+            // Quantower Period equality works on type+value
+            if (this.Period.ToString() == "15 Min" ||
+                this.Period.ToString() == "MIN15"  ||
+                this.Period.ToString() == "15m")
+                return Period.HOUR1;
+            return default;
+        }
+
+        /// <summary>
         /// Mirrors Pine's <c>ta.falling(math.abs(emaFast - emaSlow), bars)</c>.
         /// Returns true when the EMA gap has been strictly decreasing for
         /// <paramref name="bars"/> consecutive closed bars.
@@ -574,6 +707,8 @@ namespace emaCrossStrategy
             this.waitClosePositions = false;
             this.pendingEntrySide   = null;
             this.pendingConfirmSide = null;
+            this.lastExitSide       = null;
+            this.htfTouchArmed      = false;
         }
     }
 }
