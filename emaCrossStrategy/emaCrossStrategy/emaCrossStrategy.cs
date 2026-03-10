@@ -72,6 +72,13 @@ namespace emaCrossStrategy
 
         [InputParameter("Trailing Stop (ticks from peak, 0 = disabled)", 11)]
         public int TrailingStopTicks { get; set; }
+
+        // ── Impulse candle filter ─────────────────────────────────────────────
+        // When a cross fires on a candle whose body exceeds this threshold, entry
+        // is deferred one bar. The next bar must still hold the same EMA alignment
+        // before the position opens. Set 0 to disable (enter on every cross).
+        [InputParameter("Impulse Filter (min candle body ticks to defer entry, 0 = off)", 12, minimum: 0, maximum: 500, increment: 1, decimalPlaces: 0)]
+        public int ImpulseFilterTicks { get; set; }
         // ─────────────────────────────────────────────────────────────────────────
 
         public override string[] MonitoringConnectionsIds => new[]
@@ -95,6 +102,10 @@ namespace emaCrossStrategy
         // When a reverse cross closes the current position, this queues the new direction
         // so it fires inside Core_PositionRemoved once the close confirms.
         private Side? pendingEntrySide;
+
+        // When an impulse candle is detected on a cross, defer entry by one bar.
+        // On the next bar close we verify the EMA alignment still holds.
+        private Side? pendingConfirmSide;
 
         // ── Smart trailing state ──────────────────────────────────────────────
         // Tracks whether the profit threshold has been hit and the best price seen.
@@ -121,9 +132,10 @@ namespace emaCrossStrategy
             this.StartPoint    = Core.TimeUtils.DateTimeUtcNow.AddDays(-30);
             this.Quantity      = 1;
             this.StopLossTicks = 100;
-            this.TakeProfitTicks     = 0;   // disabled by default
-            this.TrailActivationTicks = 30; // start trailing after 30 ticks of profit
-            this.TrailingStopTicks   = 15;  // trail 15 ticks behind the peak
+            this.TakeProfitTicks      = 0;   // disabled by default
+            this.TrailActivationTicks = 30;  // start trailing after 30 ticks of profit
+            this.TrailingStopTicks    = 15;  // trail 15 ticks behind the peak
+            this.ImpulseFilterTicks   = 20;  // skip entry if cross candle body > 20 ticks
         }
 
         protected override void OnRun()
@@ -135,6 +147,7 @@ namespace emaCrossStrategy
             this.waitOpenPosition     = false;
             this.waitClosePositions   = false;
             this.pendingEntrySide     = null;
+            this.pendingConfirmSide   = null;
             this.trailingActivated    = false;
             this.bestPrice            = 0;
 
@@ -436,10 +449,65 @@ namespace emaCrossStrategy
                 if (this.inPosition)
                     return;
 
+                // ── Impulse confirmation: previous bar was an impulse cross ───
+                // Check whether the EMA alignment still holds before entering.
+                if (this.pendingConfirmSide.HasValue)
+                {
+                    Side confirm = this.pendingConfirmSide.Value;
+                    this.pendingConfirmSide = null;
+
+                    bool crossStillHolds = confirm == Side.Buy
+                        ? micro1 > mid1
+                        : micro1 < mid1;
+
+                    if (crossStillHolds)
+                    {
+                        this.Log($"Impulse confirmed — {confirm} EMA alignment still holds, entering.", StrategyLoggingLevel.Trading);
+                        this.PlaceEntry(confirm);
+                    }
+                    else
+                    {
+                        // EMA reversed on the next bar — potential liquidity sweep.
+                        // If a clean cross occurred in the opposite direction, enter that reversal.
+                        Side reverseSide    = confirm == Side.Buy ? Side.Sell : Side.Buy;
+                        bool reverseCrossed = confirm == Side.Buy ? bearishCross : bullishCross;
+
+                        if (reverseCrossed)
+                        {
+                            this.Log($"Liquidity sweep \u2014 impulse {confirm} reversed to {reverseSide} cross, entering reversal.", StrategyLoggingLevel.Trading);
+                            this.PlaceEntry(reverseSide);
+                        }
+                        else
+                        {
+                            this.Log($"Impulse stalled \u2014 {confirm} EMA lost but no reverse cross, skipping.", StrategyLoggingLevel.Trading);
+                        }
+                    }
+                    return; // don't also process a fresh cross on this same bar
+                }
+
                 if (!bullishCross && !bearishCross)
                     return;
 
                 Side entrySide = bullishCross ? Side.Buy : Side.Sell;
+
+                // ── Impulse candle filter ─────────────────────────────────────
+                // If the cross bar's body is too large, wait one bar to confirm
+                // direction before entering — avoids chasing spike reversals.
+                if (this.ImpulseFilterTicks > 0)
+                {
+                    double open1     = HistoricalDataExtensions.Open(this.hdm, 1);
+                    double close1    = HistoricalDataExtensions.Close(this.hdm, 1);
+                    double bodyTicks = Math.Abs(close1 - open1) / this.CurrentSymbol.TickSize;
+
+                    if (bodyTicks >= this.ImpulseFilterTicks)
+                    {
+                        this.pendingConfirmSide = entrySide;
+                        this.Log($"Impulse candle on {entrySide} cross ({bodyTicks:F1}t body >= {ImpulseFilterTicks}t threshold) — waiting one bar to confirm.",
+                                 StrategyLoggingLevel.Trading);
+                        return;
+                    }
+                }
+
                 this.PlaceEntry(entrySide);
             }
         }
@@ -505,6 +573,7 @@ namespace emaCrossStrategy
             this.waitOpenPosition   = false;
             this.waitClosePositions = false;
             this.pendingEntrySide   = null;
+            this.pendingConfirmSide = null;
         }
     }
 }
