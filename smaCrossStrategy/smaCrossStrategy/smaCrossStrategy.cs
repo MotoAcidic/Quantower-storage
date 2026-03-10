@@ -54,14 +54,21 @@ namespace SimpleMACross
         [InputParameter("Multiplicative")]
         public double multiplicative = 2.0;
 
-        [InputParameter("Stoploss")]
+        // ── Exit Settings ────────────────────────────────────────────────────
+        // 0 = Bar Push: close when price ticks past the previous bar's low/high.
+        // 1 = SL/TP + Trailing: bracket orders manage the exit; bar-push logic is skipped.
+        [InputParameter("Exit Mode (0=Bar Push, 1=SL/TP+Trailing)", 10, 0, 1, 1, 0)]
+        public int exitMode = 0;
+
+        [InputParameter("Stop Loss (ticks, both modes)", 11)]
         public int stoploss = 100;
 
-        [InputParameter("Trailing Stoploss")]
+        [InputParameter("Trailing Stop (ticks, Exit Mode 1 only)", 12)]
         public int trailingStop = 30;
 
-        [InputParameter("Profit Threshold")]
-        public int profitThreshold = 40;
+        [InputParameter("Take Profit (ticks, Exit Mode 1 only)", 13)]
+        public int takeProfit = 50;
+        // ─────────────────────────────────────────────────────────────────────
 
         [InputParameter("Prop Firm Account (0=TopStep Eval, 1=TopStep Funded, 2=Lucid Eval, 3=Lucid Funded, 4=Live Account)", 19, 0, 4, 1, 0)]
         public int propFirmAccountSelection = 0;
@@ -111,7 +118,10 @@ namespace SimpleMACross
 
         // Bar time - updated from historical data so backtesting uses simulated time, not real clock
         private DateTime currentBarTime = DateTime.MinValue;
-        private DateTime Now => currentBarTime != DateTime.MinValue ? currentBarTime : Now;
+        private DateTime Now => currentBarTime != DateTime.MinValue ? currentBarTime : DateTime.Now;
+
+        // Set true on every new completed bar; entry logic consumes and resets it
+        private bool newBar = false;
 
         public SimpleMACross()
             : base()
@@ -182,6 +192,7 @@ namespace SimpleMACross
             Core.TradeAdded += this.Core_TradeAdded;
 
             this.hdm.HistoryItemUpdated += this.Hdm_HistoryItemUpdated;
+            this.hdm.NewHistoryItem += this.Hdm_OnNewHistoryItem;
 
             this.hdm.AddIndicator(this.indicatorFastMA);
             this.hdm.AddIndicator(this.indicatorSlowMA);
@@ -199,6 +210,7 @@ namespace SimpleMACross
             if (this.hdm != null)
             {
                 this.hdm.HistoryItemUpdated -= this.Hdm_HistoryItemUpdated;
+                this.hdm.NewHistoryItem -= this.Hdm_OnNewHistoryItem;
                 this.hdm.Dispose();
             }
 
@@ -320,8 +332,15 @@ namespace SimpleMACross
         private void Hdm_HistoryItemUpdated(object sender, HistoryEventArgs e)
         {
             // Use the bar's own timestamp - works correctly during backtesting
-            // Now would return real machine time, not the simulated backtest time
+            // DateTime.Now returns real machine time, not the simulated backtest time
             this.currentBarTime = e.HistoryItem.TimeLeft.ToLocalTime();
+            this.OnUpdate();
+        }
+
+        private void Hdm_OnNewHistoryItem(object sender, HistoryEventArgs args)
+        {
+            // A bar just completed. Signal the entry logic to evaluate this bar.
+            this.newBar = true;
             this.OnUpdate();
         }
 
@@ -395,9 +414,6 @@ namespace SimpleMACross
             //this.Log($"{sma_10_3}");
             //this.Log($"{this.indicatorFastMA}");
             //this.Log($"{prevSide}");
-
-            this.Log($"Previous Side: {prevSide}");
-            this.Log($"In Position: {inPosition}");
 
             /////////////// SMA Spread Variables \\\\\\\\\\\\\\\
 
@@ -509,87 +525,90 @@ namespace SimpleMACross
                 //    }
                 //}
 
-                double price_x = HistoricalDataExtensions.Close(this.hdm, 0);
-                double lastLow_x = HistoricalDataExtensions.Low(this.hdm, 1);
-                double lastHigh_x = HistoricalDataExtensions.High(this.hdm, 1);
-
-
-                // if (pnlTicks >= profitThreshold && tsInit == false)
-                // {
-                //   Cancel any previous stoploss orders
-                //   Create new trailing stop with trailingStop
-                //   Perhaps also add bool to indicate trailing stop has been initiated [tsInit]
-                // }
-
-
-                if (sma_10_x > sma_20_x)
+                // Mode 0: exit when per-tick price breaks past the previous completed bar's extreme.
+                // Mode 1: SL/TP/trailing orders placed at entry handle the exit - nothing to do here.
+                if (exitMode == 0)
                 {
-                    if (price_x < lastLow_x)
+                    double price_x = HistoricalDataExtensions.Close(this.hdm, 0);
+                    double lastLow_x = HistoricalDataExtensions.Low(this.hdm, 1);
+                    double lastHigh_x = HistoricalDataExtensions.High(this.hdm, 1);
+
+                    if (sma_10_x > sma_20_x)
                     {
-                        this.waitClosePositions = true;
-                        this.Log($"Start close positions - Exit signal triggered ({positions.Length})");
-
-                        foreach (var item in positions)
+                        if (price_x < lastLow_x)
                         {
-                            var result = item.Close();
+                            this.waitClosePositions = true;
+                            this.Log($"Start close positions - Bar Push exit triggered ({positions.Length})");
 
-                            if (result.Status == TradingOperationResultStatus.Failure)
+                            foreach (var item in positions)
                             {
-                                this.Log($"Close positions refuse: {(string.IsNullOrEmpty(result.Message) ? result.Status : result.Message)}", StrategyLoggingLevel.Trading);
-                                this.ProcessTradingRefuse();
+                                var result = item.Close();
+
+                                if (result.Status == TradingOperationResultStatus.Failure)
+                                {
+                                    this.Log($"Close positions refuse: {(string.IsNullOrEmpty(result.Message) ? result.Status : result.Message)}", StrategyLoggingLevel.Trading);
+                                    this.ProcessTradingRefuse();
+                                }
+                                else
+                                {
+                                    this.Log($"Position was close: {result.Status}", StrategyLoggingLevel.Trading);
+                                    this.inPosition = false;
+                                }
                             }
-                            else
-                            {
-                                this.Log($"Position was close: {result.Status}", StrategyLoggingLevel.Trading);
-                                this.inPosition = false;
-                            }   
                         }
                     }
-                }
-                else if (sma_10_x < sma_20_x)
-                {
-                    if (price_x > lastHigh_x)
+                    else if (sma_10_x < sma_20_x)
                     {
-                        this.waitClosePositions = true;
-                        this.Log($"Start close positions - Exit signal triggered ({positions.Length})");
-
-                        foreach (var item in positions)
+                        if (price_x > lastHigh_x)
                         {
-                            var result = item.Close();
-                            
+                            this.waitClosePositions = true;
+                            this.Log($"Start close positions - Bar Push exit triggered ({positions.Length})");
 
-                            if (result.Status == TradingOperationResultStatus.Failure)
+                            foreach (var item in positions)
                             {
-                                this.Log($"Close positions refuse: {(string.IsNullOrEmpty(result.Message) ? result.Status : result.Message)}", StrategyLoggingLevel.Trading);
-                                this.ProcessTradingRefuse();
+                                var result = item.Close();
+
+                                if (result.Status == TradingOperationResultStatus.Failure)
+                                {
+                                    this.Log($"Close positions refuse: {(string.IsNullOrEmpty(result.Message) ? result.Status : result.Message)}", StrategyLoggingLevel.Trading);
+                                    this.ProcessTradingRefuse();
+                                }
+                                else
+                                {
+                                    this.Log($"Position was close: {result.Status}", StrategyLoggingLevel.Trading);
+                                    this.inPosition = false;
+                                }
                             }
-                            else
-                            {
-                                this.Log($"Position was close: {result.Status}", StrategyLoggingLevel.Trading);
-                                this.inPosition = false;
-                            }  
                         }
                     }
                 }
             }
             else // Opening New Positions
             {
-                double testSMA = this.indicatorFastMA.GetValue(2);
+                // Only act on completed bars to match backtesting behaviour.
+                // newBar is set by Hdm_OnNewHistoryItem when a bar closes.
+                if (!this.newBar)
+                    return;
+                this.newBar = false;
 
-                double sma_10 = this.indicatorFastMA.GetValue(0);
-                double sma_20 = this.indicatorSlowMA.GetValue(0);
+                double testSMA = this.indicatorFastMA.GetValue(3); // index 1 = just-completed bar; 3 = 2 bars before that
+
+                // GetValue(1) = the bar that just completed (was GetValue(0) = forming bar)
+                double sma_10 = this.indicatorFastMA.GetValue(1);
+                double sma_20 = this.indicatorSlowMA.GetValue(1);
                 double diff_0 = Math.Abs(sma_10 - sma_20);
 
-                double sma_10_3 = this.indicatorFastMA.GetValue(3);
-                double sma_20_3 = this.indicatorSlowMA.GetValue(3);
-                double sma_10_4 = this.indicatorFastMA.GetValue(4);
-                double sma_20_4 = this.indicatorSlowMA.GetValue(4);
-                double sma_10_5 = this.indicatorFastMA.GetValue(5);
-                double sma_20_5 = this.indicatorSlowMA.GetValue(5);
-                double sma_10_6 = this.indicatorFastMA.GetValue(6);
-                double sma_20_6 = this.indicatorSlowMA.GetValue(6);
-                double sma_10_7 = this.indicatorFastMA.GetValue(7);
-                double sma_20_7 = this.indicatorSlowMA.GetValue(7);
+                // Lookback bars shifted +1 to stay relative to the just-completed bar
+                double sma_10_3 = this.indicatorFastMA.GetValue(4);
+                double sma_20_3 = this.indicatorSlowMA.GetValue(4);
+                double sma_10_4 = this.indicatorFastMA.GetValue(5);
+                double sma_20_4 = this.indicatorSlowMA.GetValue(5);
+                double sma_10_5 = this.indicatorFastMA.GetValue(6);
+                double sma_20_5 = this.indicatorSlowMA.GetValue(6);
+                double sma_10_6 = this.indicatorFastMA.GetValue(7);
+                double sma_20_6 = this.indicatorSlowMA.GetValue(7);
+                double sma_10_7 = this.indicatorFastMA.GetValue(8);
+                double sma_20_7 = this.indicatorSlowMA.GetValue(8);
 
                 double diff_3 = Math.Abs(sma_10_3 - sma_20_3);
                 double diff_4 = Math.Abs(sma_10_4 - sma_20_4);
@@ -654,14 +673,21 @@ namespace SimpleMACross
                     if (sma_10 > sma_20)
                     {
                         this.waitOpenPosition = true;
-                        this.Log("Start open buy position");
+                        this.Log($"Start open buy position (Exit Mode: {(exitMode == 0 ? "Bar Push" : "SL/TP+Trailing")})");
+                        if (exitMode == 0)
+                            this.Log($"  SL: {stoploss} ticks (fixed)", StrategyLoggingLevel.Trading);
+                        else
+                            this.Log($"  Trailing SL: {trailingStop} ticks | TP: {takeProfit} ticks", StrategyLoggingLevel.Trading);
                         var result = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters()
                         {
                             Account = this.CurrentAccount,
                             Symbol = this.CurrentSymbol,
-                            //TakeProfit = SlTpHolder.CreateTP(30, PriceMeasurement.Offset), // Added
-                            StopLoss = SlTpHolder.CreateSL(stoploss, PriceMeasurement.Offset), // Added
-                            //StopLoss = SlTpHolder.CreateSL(trailingStop, PriceMeasurement.Offset, true),
+                            StopLoss = exitMode == 0
+                                ? SlTpHolder.CreateSL(stoploss, PriceMeasurement.Offset)          // fixed SL
+                                : SlTpHolder.CreateSL(trailingStop, PriceMeasurement.Offset, true), // trailing SL
+                            TakeProfit = exitMode == 1
+                                ? SlTpHolder.CreateTP(takeProfit, PriceMeasurement.Offset)
+                                : null,
                             OrderTypeId = this.orderTypeId,
                             Quantity = this.Quantity,
                             Side = Side.Buy,
@@ -683,14 +709,21 @@ namespace SimpleMACross
                     else if (sma_10 < sma_20)
                     {
                         this.waitOpenPosition = true;
-                        this.Log("Start open sell position");
+                        this.Log($"Start open sell position (Exit Mode: {(exitMode == 0 ? "Bar Push" : "SL/TP+Trailing")})");
+                        if (exitMode == 0)
+                            this.Log($"  SL: {stoploss} ticks (fixed)", StrategyLoggingLevel.Trading);
+                        else
+                            this.Log($"  Trailing SL: {trailingStop} ticks | TP: {takeProfit} ticks", StrategyLoggingLevel.Trading);
                         var result = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters()
                         {
                             Account = this.CurrentAccount,
                             Symbol = this.CurrentSymbol,
-                            //TakeProfit = SlTpHolder.CreateTP(30, PriceMeasurement.Offset), // Added
-                            StopLoss = SlTpHolder.CreateSL(stoploss, PriceMeasurement.Offset), // Added
-                            //StopLoss = SlTpHolder.CreateSL(trailingStop, PriceMeasurement.Offset, true),
+                            StopLoss = exitMode == 0
+                                ? SlTpHolder.CreateSL(stoploss, PriceMeasurement.Offset)          // fixed SL
+                                : SlTpHolder.CreateSL(trailingStop, PriceMeasurement.Offset, true), // trailing SL
+                            TakeProfit = exitMode == 1
+                                ? SlTpHolder.CreateTP(takeProfit, PriceMeasurement.Offset)
+                                : null,
                             OrderTypeId = this.orderTypeId,
                             Quantity = this.Quantity,
                             Side = Side.Sell,

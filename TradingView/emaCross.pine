@@ -1,0 +1,233 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © JohannCoffee – mod by Travis Finch (May 2025, “Fees edition”)
+
+//@version=5
+indicator("3 Fib EMAs – XO edition (fees)", shorttitle = "Fib EMAs XO + Fees", overlay = true)
+
+// ═══════════════════════════ INPUTS ════════════════════════════
+grpEMA   = "Choose Your EMA"
+emaFastLen  = input.int(21,  "Micro EMA",  group = grpEMA)
+emaSlowLen  = input.int(55,  "Mid  EMA",   group = grpEMA)
+emaMacroLen = input.int(233, "Macro EMA",  group = grpEMA)
+weakBars    = input.int(2,   "Weakness Bars", tooltip = "How many bars in a row the EMA gap must shrink before flagging weakness", minval = 1)
+
+grpPos   = "Position / Leverage"
+investAmt  = input.float(100, "Investment amount",  group = grpPos, tooltip = "Collateral you post per trade (quote currency)", minval = 0)
+leverage   = input.int(10,    "Leverage (×)",       group = grpPos, tooltip = "1 – 20× (Jupiter)",          minval = 1, maxval = 20)
+
+// ── NEW: explicit venue-fee controls ───────────────────────────
+grpFees = "Fees & Costs"
+openFeePct      = input.float(0.06,      "Open Fee (%)",       group = grpFees, minval = 0, step = 0.001)
+priceImpactPct  = input.float(0.01,      "Price Impact (%)",   group = grpFees, minval = 0, step = 0.001)
+borrowFeePct    = input.float(0.0,       "Borrow Fee (%)",     group = grpFees, minval = 0, step = 0.001,tooltip = "If your DEX/venue charges a borrow fee upfront" )
+txFeeSOL        = input.float(0.000712164, "Transaction Fee (SOL)", group = grpFees, minval = 0, step = 0.0000001)
+acctRentSOL     = input.float(0.00203928,  "Account Rent (SOL)",    group = grpFees, minval = 0, step = 0.0000001)
+useLiveSOL      = input.bool(true, "Use live SOL-USD price?",        group = grpFees,
+                              tooltip = "Pulls daily SOL price from Binance; disable for fixed conversion.")
+manualSOLPrice  = input.float(160, "Manual SOL-USD (if above = off)", group = grpFees, minval = 0)
+
+// live SOL price – daily close keeps API calls inexpensive
+solUsd = useLiveSOL ? request.security("BINANCE:SOLUSDT", "D", close) : manualSOLPrice
+
+grpDisp     = "Display"
+histSize    = input.int(10,  "Stored trade-history rows", group = grpDisp, minval = 1, maxval = 50)
+showHistory = input.bool(true,"Show trade-history table", group = grpDisp)
+
+grpClose          = "Closeness Marker"
+emaClosenessPct   = input.float(0.05, "Micro/Mid EMA closeness (%)", minval = 0.0, step = 0.01, group = grpClose, tooltip = "Yellow diamond when EMAs are within this % of price. Set to 0 to disable.")
+
+// ═════════════════════ CORE CALCULATIONS ═══════════════════════
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+emaMacro = ta.ema(close, emaMacroLen)
+
+longEntry  = ta.crossover(emaFast, emaSlow)
+shortEntry = ta.crossunder(emaFast, emaSlow)
+
+var bool inLong  = false
+var bool inShort = false
+if longEntry
+    inLong  := true
+    inShort := false
+if shortEntry
+    inShort := true
+    inLong  := false
+
+emaGap          = math.abs(emaFast - emaSlow)
+gapGettingTight = ta.falling(emaGap, weakBars)
+
+exitLong  = inLong  and (gapGettingTight or shortEntry)
+exitShort = inShort and (gapGettingTight or longEntry)
+
+// ═════════════ CLOSE-EMA GAP MARKER ════════════════════════════
+showEmaClose = emaClosenessPct > 0
+emaCloseVal  = close * emaClosenessPct / 100
+emaClose     = math.abs(emaFast - emaSlow) <= emaCloseVal and showEmaClose
+plotshape(emaClose, "EMA Closeness Marker", style = shape.diamond, location = location.abovebar,
+          color = color.yellow, size = size.small)
+
+// ════════════════ PLOTS & ENTRY/EXIT SHAPES ════════════════════
+colFast = inLong ? color.lime : inShort ? color.red : #f7fff7
+plot(emaFast,  "Micro EMA", color = colFast, linewidth = 2)
+plot(emaSlow,  "Mid EMA",   color = #4ecdc4, linewidth = 2)
+plot(emaMacro, "Macro EMA", color = #1a535c)
+
+plotshape(longEntry,  "Long Entry",  style = shape.diamond, location = location.belowbar, color = color.lime, size = size.small)
+plotshape(shortEntry, "Short Entry", style = shape.diamond, location = location.abovebar, color = color.red,  size = size.small)
+plotshape(exitLong,   "Long Exit",   style = shape.xcross,  location = location.abovebar, color = color.lime, size = size.tiny)
+plotshape(exitShort,  "Short Exit",  style = shape.xcross,  location = location.belowbar, color = color.red,  size = size.tiny)
+
+// ═════════════════════ INFO TABLE (original) ═══════════════════
+var table info = table.new(position.bottom_right, 5, 5,
+                           frame_color = color.new(color.gray, 50), frame_width = 1, bgcolor = color.new(color.black, 90))
+if barstate.isfirst
+    table.cell(info, 0,0,"Field",          text_color = color.white, bgcolor = color.gray)
+    table.cell(info, 1,0,"Description",    text_color = color.white, bgcolor = color.gray)
+    table.cell(info, 2,0,"Optimal",        text_color = color.white, bgcolor = color.gray)
+    table.cell(info, 3,0,"Custom",         text_color = color.white, bgcolor = color.gray)
+    table.cell(info, 4,0,"Spot On",        text_color = color.white, bgcolor = color.gray)
+
+    table.cell(info, 0,1,"Micro EMA",      text_color = color.green)
+    table.cell(info, 1,1,"Fast trend filter")
+    table.cell(info, 2,1,"21", text_color = color.blue)
+    table.cell(info, 3,1,"3",  text_color = color.blue)
+    table.cell(info, 4,1,"5",  text_color = color.blue)
+
+    table.cell(info, 0,2,"Mid EMA",        text_color = color.teal)
+    table.cell(info, 1,2,"Medium trend filter")
+    table.cell(info, 2,2,"55", text_color = color.blue)
+    table.cell(info, 3,2,"7",  text_color = color.blue)
+    table.cell(info, 4,2,"29", text_color = color.blue)
+
+    table.cell(info, 0,3,"Macro EMA",      text_color = color.rgb(22,87,25))
+    table.cell(info, 1,3,"Long-term trend filter")
+    table.cell(info, 2,3,"233", text_color = color.blue)
+    table.cell(info, 3,3,"233", text_color = color.blue)
+    table.cell(info, 4,3,"233", text_color = color.blue)
+
+    table.cell(info, 0,4,"Weakness Bars")
+    table.cell(info, 1,4,"Consecutive gap-shrink bars")
+    table.cell(info, 2,4,"2", text_color = color.blue)
+    table.cell(info, 3,4,"2", text_color = color.blue)
+    table.cell(info, 4,4,"2", text_color = color.blue)
+
+// ═════ CURRENT-TRADE STATE & TABLE (unchanged logic) ════════
+var float lastLongEntryPrice  = na
+var float lastLongExitPrice   = na
+var float lastShortEntryPrice = na
+var float lastShortExitPrice  = na
+
+if longEntry
+    lastLongEntryPrice  := close
+    lastLongExitPrice   := na
+if exitLong
+    lastLongExitPrice   := close
+
+if shortEntry
+    lastShortEntryPrice := close
+    lastShortExitPrice  := na
+if exitShort
+    lastShortExitPrice  := close
+
+var table trades = table.new(position.top_right, 3, 3,
+                             frame_color = color.new(color.gray, 50), frame_width = 1, bgcolor = color.new(color.black, 85))
+if barstate.isfirst
+    table.cell(trades, 0,0,"Trade", text_color = color.white, bgcolor = color.gray)
+    table.cell(trades, 1,0,"Enter", text_color = color.white, bgcolor = color.gray)
+    table.cell(trades, 2,0,"Close", text_color = color.white, bgcolor = color.gray)
+
+fFmt(p) => na(p) ? "—" : str.tostring(p, format.mintick)
+string emptyT = ""
+color  hideC  = color.new(color.white, 100)
+bool   showLongRow  = inLong
+bool   showShortRow = inShort
+
+table.cell(trades, 0,1, showLongRow  ? "LONG"  : emptyT, text_color = showLongRow  ? color.lime : hideC)
+table.cell(trades, 1,1, showLongRow  ? fFmt(lastLongEntryPrice)  : emptyT, text_color = showLongRow ? color.lime : hideC)
+table.cell(trades, 2,1, showLongRow  ? fFmt(lastLongExitPrice)   : emptyT, text_color = showLongRow ? color.lime : hideC)
+
+table.cell(trades, 0,2, showShortRow ? "SHORT" : emptyT, text_color = showShortRow ? color.red : hideC)
+table.cell(trades, 1,2, showShortRow ? fFmt(lastShortEntryPrice) : emptyT, text_color = showShortRow ? color.red : hideC)
+table.cell(trades, 2,2, showShortRow ? fFmt(lastShortExitPrice)  : emptyT, text_color = showShortRow ? color.red : hideC)
+
+// ═══════ HELPERS ═══════
+fNum(n) => str.tostring(n, "0.00")   // 2-dp fixed for money
+
+// ═════════════ HISTORY BUFFERS (extended) ════════════════════
+var array<string> histSide  = array.new_string()
+var array<float>  histEntry = array.new_float()
+var array<float>  histExit  = array.new_float()
+var array<float>  histPct   = array.new_float()
+var array<float>  histFee   = array.new_float()   // NEW
+var array<float>  histPL    = array.new_float()   // NET P/L
+
+if longEntry or shortEntry
+    array.clear(histSide), array.clear(histEntry), array.clear(histExit),
+    array.clear(histPct),  array.clear(histFee),  array.clear(histPL)
+
+if exitLong or exitShort
+    bool  isLong  = exitLong
+    float entryP  = isLong ? lastLongEntryPrice  : lastShortEntryPrice
+    float exitP   = close
+    float pctGain = isLong ? (exitP - entryP) / entryP : (entryP - exitP) / entryP
+    float grossPL = pctGain * investAmt * leverage
+
+    // ── fee math ────────────────────────────────────────────
+    float pctFeesUSD = investAmt * leverage * ((openFeePct + priceImpactPct + borrowFeePct) / 100)
+    float solFeesUSD = (txFeeSOL + acctRentSOL) * solUsd
+    float feesUSD    = pctFeesUSD + solFeesUSD
+
+    float netPL = grossPL - feesUSD
+
+    string sideT = isLong ? "LONG" : "SHORT"
+    array.push(histSide,  sideT)
+    array.push(histEntry, entryP)
+    array.push(histExit,  exitP)
+    array.push(histPct,   pctGain)
+    array.push(histFee,   feesUSD)
+    array.push(histPL,    netPL)
+
+    while array.size(histSide) > histSize
+        array.shift(histSide), array.shift(histEntry), array.shift(histExit),
+        array.shift(histPct),  array.shift(histFee),  array.shift(histPL)
+
+// ═════════════ HISTORY TABLE (now 6 columns) ══════════════════
+var table hist = na
+if showHistory and barstate.isfirst
+    hist := table.new(position.middle_right, 6, histSize + 1,
+                      frame_color = color.new(color.gray, 50), frame_width = 1, bgcolor = color.new(color.black, 85))
+    table.cell(hist, 0,0,"Side",  text_color = color.white, bgcolor = color.gray)
+    table.cell(hist, 1,0,"Entry", text_color = color.white, bgcolor = color.gray)
+    table.cell(hist, 2,0,"Exit",  text_color = color.white, bgcolor = color.gray)
+    table.cell(hist, 3,0,"%",     text_color = color.white, bgcolor = color.gray)
+    table.cell(hist, 4,0,"Fees",  text_color = color.white, bgcolor = color.gray)
+    table.cell(hist, 5,0,"P/L",   text_color = color.white, bgcolor = color.gray)  // NET
+
+if showHistory and not na(hist)
+    for i = 0 to histSize - 1
+        int row = i + 1
+        if i < array.size(histSide)
+            int   idx = array.size(histSide) - 1 - i
+            string sd = array.get(histSide,  idx)
+            float  en = array.get(histEntry, idx)
+            float  ex = array.get(histExit,  idx)
+            float  pr = array.get(histPct,   idx)
+            float  fe = array.get(histFee,   idx)
+            float  pl = array.get(histPL,    idx)
+            color  clr = sd == "LONG" ? color.lime : color.red
+            table.cell(hist, 0,row, sd,                     text_color = clr)
+            table.cell(hist, 1,row, fFmt(en),               text_color = clr)
+            table.cell(hist, 2,row, fFmt(ex),               text_color = clr)
+            table.cell(hist, 3,row, str.tostring(pr, format.percent), text_color = clr)
+            table.cell(hist, 4,row, fNum(fe),               text_color = clr)
+            table.cell(hist, 5,row, fNum(pl),               text_color = clr)
+        else
+            for c = 0 to 5
+                table.cell(hist, c, row, "")
+
+// ═══════════════════════ ALERTS ═══════════════════════════════
+alertcondition(longEntry,  "Long Entry",  "Green Diamond: open LONG (15 min).")
+alertcondition(exitLong,   "Long Exit",   "Green X: weakness – consider closing LONG (15 min).")
+alertcondition(shortEntry, "Short Entry", "Red Diamond: open SHORT (15 min).")
+alertcondition(exitShort,  "Short Exit",  "Red X: weakness – consider closing SHORT (15 min).")
+alertcondition(emaClose,   "EMA Close",   "Yellow Diamond – EMAs are very close and can shift quickly (Careful area!).")
