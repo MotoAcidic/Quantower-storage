@@ -67,11 +67,44 @@ namespace emaCrossStrategy
         // Smart trailing: activates only once profit >= TrailActivationTicks.
         // Tracks the best price reached and closes if price pulls back more than
         // TrailingStopTicks from that peak. Set either to 0 to disable trailing.
-        [InputParameter("Trail Activation (ticks profit to start trailing, 0 = disabled)", 10)]
+        // These are used ONLY when the current EST time is outside both the Asia
+        // and NY session windows (i.e. the dead zone between sessions).
+        [InputParameter("Off-Hours Trail Activation (ticks, used outside Asia + NY windows)", 10)]
         public int TrailActivationTicks { get; set; }
 
-        [InputParameter("Trailing Stop (ticks from peak, 0 = disabled)", 11)]
+        [InputParameter("Off-Hours Trailing Stop (ticks from peak, used outside Asia + NY windows)", 11)]
         public int TrailingStopTicks { get; set; }
+
+        // ── Session-aware trailing ──────────────────────────────────────────
+        // Asia is typically lower volume / tighter ranges — use a tighter trail.
+        // NY is higher volume / wider swings — give it more room.
+        // Hours are Eastern Time (EST/EDT). DST is handled automatically.
+        // Set both Asia tick values to 0 to disable Asia override.
+        // Set both NY tick values to 0 to disable NY override.
+        // If no session override applies, the default Trail values above are used.
+        [InputParameter("Asia Session Start (EST hour, e.g. 19 = 7 PM)", 16, minimum: 0, maximum: 23, increment: 1, decimalPlaces: 0)]
+        public int AsiaStartHour { get; set; }
+
+        [InputParameter("Asia Session End (EST hour, e.g. 3 = 3 AM)", 17, minimum: 0, maximum: 23, increment: 1, decimalPlaces: 0)]
+        public int AsiaEndHour { get; set; }
+
+        [InputParameter("Asia Trail Activation (ticks, 0 = use default)", 18, minimum: 0, maximum: 500, increment: 5, decimalPlaces: 0)]
+        public int AsiaTrailActivationTicks { get; set; }
+
+        [InputParameter("Asia Trailing Stop (ticks, 0 = use default)", 19, minimum: 0, maximum: 500, increment: 5, decimalPlaces: 0)]
+        public int AsiaTrailingStopTicks { get; set; }
+
+        [InputParameter("NY Session Start (EST hour, e.g. 8 = 8 AM)", 20, minimum: 0, maximum: 23, increment: 1, decimalPlaces: 0)]
+        public int NyStartHour { get; set; }
+
+        [InputParameter("NY Session End (EST hour, e.g. 16 = 4 PM)", 21, minimum: 0, maximum: 23, increment: 1, decimalPlaces: 0)]
+        public int NyEndHour { get; set; }
+
+        [InputParameter("NY Trail Activation (ticks, 0 = use default)", 22, minimum: 0, maximum: 500, increment: 5, decimalPlaces: 0)]
+        public int NyTrailActivationTicks { get; set; }
+
+        [InputParameter("NY Trailing Stop (ticks, 0 = use default)", 23, minimum: 0, maximum: 500, increment: 5, decimalPlaces: 0)]
+        public int NyTrailingStopTicks { get; set; }
 
         // ── Exit mode ────────────────────────────────────────────────────────
         // Controls which exit mechanism fires while in a position.
@@ -85,6 +118,15 @@ namespace emaCrossStrategy
         [InputParameter("Impulse Filter (min candle body ticks to defer entry, 0 = off)", 13, minimum: 0, maximum: 500, increment: 1, decimalPlaces: 0)]
         public int ImpulseFilterTicks { get; set; }
 
+        // ── Mid EMA retracement entry ─────────────────────────────────────────
+        // When an impulse cross fires (body >= ImpulseFilterTicks) AND this is > 0,
+        // instead of waiting one bar we wait for price to retrace to within this many
+        // ticks of the base-TF Mid EMA (29), then enter on the first bar that bounces
+        // away from it in the original trend direction.
+        // Set to 0 to fall back to the original 1-bar confirmation behaviour.
+        [InputParameter("Retrace Touch (ticks from 29 EMA to arm post-impulse entry, 0 = 1-bar confirm)", 24, minimum: 0, maximum: 500, increment: 1, decimalPlaces: 0)]
+        public int RetraceTouchTicks { get; set; }
+
         // ── Higher-timeframe 29 EMA touch re-entry ────────────────────────────
         // After exiting a position (non-reverse), watch for price to pull back
         // and touch the Mid EMA on the higher timeframe, then bounce back in
@@ -92,6 +134,13 @@ namespace emaCrossStrategy
         // cross period: 1m→3m, 3m→5m, 5m→15m, 15m→1hr. Set HtfTouchTicks to 0 to disable.
         [InputParameter("HTF Mid EMA Touch (ticks from HTF EMA to arm, 0 = off)", 14, minimum: 0, maximum: 200, increment: 1, decimalPlaces: 0)]
         public int HtfTouchTicks { get; set; }
+
+        // ── Weakness bar partial close ──────────────────────────────────────────
+        // On a weakness bar signal, close this % of the position to bank profit
+        // while keeping the rest running with the trend.
+        // 0 or 100 = close the full position (original behaviour).
+        [InputParameter("Weakness Close % (0 or 100 = close all)", 15, minimum: 0, maximum: 100, increment: 5, decimalPlaces: 0)]
+        public int WeaknessClosePercent { get; set; }
         // ─────────────────────────────────────────────────────────────────────────
 
         public override string[] MonitoringConnectionsIds => new[]
@@ -131,6 +180,19 @@ namespace emaCrossStrategy
         private Side? lastExitSide;
         private bool  htfTouchArmed;
 
+        // Mid EMA retracement entry (triggered when an impulse cross fires).
+        // Instead of the 1-bar confirm, we wait for price to pull back to the
+        // base-timeframe 29 EMA and bounce away in the original direction.
+        private Side? retraceWatchSide;
+        private bool  retraceTouchArmed;
+
+        // Set after a weakness-bar partial close fires so it doesn't repeat on consecutive bars.
+        // Resets when the position fully closes or a new cross entry opens.
+        private bool   weaknessPartialDone;
+        // Price at which the partial was taken — becomes the SL for the remaining position.
+        // Monitored tick-by-tick; 0 = not active.
+        private double weaknessPartialPrice;
+
         // ── Smart trailing state ──────────────────────────────────────────────
         // Tracks whether the profit threshold has been hit and the best price seen.
         private bool   trailingActivated;
@@ -157,11 +219,23 @@ namespace emaCrossStrategy
             this.Quantity      = 1;
             this.StopLossTicks = 100;
             this.TakeProfitTicks      = 0;   // disabled by default
-            this.TrailActivationTicks = 30;  // start trailing after 30 ticks of profit
-            this.TrailingStopTicks    = 15;  // trail 15 ticks behind the peak
+            this.TrailActivationTicks = 30;
+            this.TrailingStopTicks    = 15;
+            // Asia session defaults (7 PM – 3 AM EST) — tighter trail for lower volume
+            this.AsiaStartHour            = 19;  // 7:00 PM EST
+            this.AsiaEndHour              = 3;   // 3:00 AM EST (wraps midnight)
+            this.AsiaTrailActivationTicks = 20;
+            this.AsiaTrailingStopTicks    = 10;
+            // NY session defaults (8 AM – 4 PM EST) — wider trail for high volume
+            this.NyStartHour            = 8;   // 8:00 AM EST
+            this.NyEndHour              = 16;  // 4:00 PM EST
+            this.NyTrailActivationTicks = 50;
+            this.NyTrailingStopTicks    = 25;
             this.ExitMode             = 2;  // 0=WeaknessBars 1=TrailingStop 2=Both
             this.ImpulseFilterTicks   = 20;  // skip entry if cross candle body > 20 ticks
+            this.RetraceTouchTicks    = 5;   // arm retracement entry when price within 5t of 29 EMA
             this.HtfTouchTicks        = 5;   // arm re-entry when price within 5t of HTF 29 EMA
+            this.WeaknessClosePercent  = 50;  // close 50% of position on weakness bar signal
         }
 
         protected override void OnRun()
@@ -176,6 +250,10 @@ namespace emaCrossStrategy
             this.pendingConfirmSide   = null;
             this.lastExitSide         = null;
             this.htfTouchArmed        = false;
+            this.retraceWatchSide     = null;
+            this.retraceTouchArmed    = false;
+            this.weaknessPartialDone  = false;
+            this.weaknessPartialPrice  = 0;
             this.trailingActivated    = false;
             this.bestPrice            = 0;
 
@@ -333,8 +411,12 @@ namespace emaCrossStrategy
                 }
 
                 // Reset trailing state for the next position
-                this.trailingActivated = false;
-                this.bestPrice         = 0;
+                this.trailingActivated   = false;
+                this.bestPrice           = 0;
+                this.weaknessPartialDone  = false;
+                this.weaknessPartialPrice = 0;
+                this.retraceWatchSide    = null;
+                this.retraceTouchArmed   = false;
 
                 // Reverse-cross flip: immediately enter the new direction
                 if (this.pendingEntrySide.HasValue)
@@ -372,17 +454,10 @@ namespace emaCrossStrategy
             if (obj.Fee      != null) this.totalFee      += obj.Fee.Value;
         }
 
-        // Fires every price tick — manages the smart trailing stop.
+        // Fires every price tick — manages the partial-TP stop and smart trailing stop.
         private void Hdm_HistoryItemUpdated(object sender, HistoryEventArgs e)
         {
             if (this.waitOpenPosition || this.waitClosePositions)
-                return;
-
-            // Trailing stop is only active in TrailingStop (1) or Both (2) modes
-            if (this.ExitMode == 0)
-                return;
-
-            if (this.TrailingStopTicks <= 0 || this.TrailActivationTicks <= 0)
                 return;
 
             var positions = Core.Instance.Positions
@@ -392,15 +467,56 @@ namespace emaCrossStrategy
             if (!positions.Any())
                 return;
 
-            double pnlTicks = positions.Sum(x => x.GrossPnLTicks);
             double currentPrice = HistoricalDataExtensions.Close(this.hdm, 0);
 
+            // ── Partial TP level stop ────────────────────────────────────────────────
+            // After a partial weakness close, if price returns to that level the
+            // remainder exits immediately — trend reversal confirmation.
+            if (this.weaknessPartialPrice > 0)
+            {
+                bool partialSlHit = this.currentSide == Side.Buy
+                    ? currentPrice <= this.weaknessPartialPrice
+                    : currentPrice >= this.weaknessPartialPrice;
+
+                if (partialSlHit)
+                {
+                    this.Log($"Partial TP SL hit — price {currentPrice:F4} returned to partial level {this.weaknessPartialPrice:F4}, closing remainder.",
+                             StrategyLoggingLevel.Trading);
+                    this.weaknessPartialPrice = 0;
+                    this.waitClosePositions   = true;
+                    foreach (var pos in positions)
+                    {
+                        var r = pos.Close();
+                        if (r.Status == TradingOperationResultStatus.Failure)
+                        {
+                            this.Log($"Partial TP SL close failed: {r.Message}", StrategyLoggingLevel.Error);
+                            this.ProcessTradingRefuse();
+                        }
+                    }
+                    return;
+                }
+            }
+
+            // ── Smart trailing stop ───────────────────────────────────────────────
+            // Trailing stop is only active in TrailingStop (1) or Both (2) modes
+            if (this.ExitMode == 0)
+                return;
+
+            // Pick session-aware trail values
+            (int activation, int trail) = this.GetActiveTrailSettings();
+
+            if (trail <= 0 || activation <= 0)
+                return;
+
+            double pnlTicks = positions.Sum(x => x.GrossPnLTicks);
+
             // Step 1: activate trailing once profit threshold is reached
-            if (!this.trailingActivated && pnlTicks >= this.TrailActivationTicks)
+            if (!this.trailingActivated && pnlTicks >= activation)
             {
                 this.trailingActivated = true;
                 this.bestPrice         = currentPrice;
-                this.Log($"Trail activated at {pnlTicks:F1} ticks profit. Best price set to {currentPrice:F4}", StrategyLoggingLevel.Trading);
+                this.Log($"Trail activated at {pnlTicks:F1} ticks profit (session activation={activation}t trail={trail}t). Best price set to {currentPrice:F4}",
+                         StrategyLoggingLevel.Trading);
             }
 
             if (!this.trailingActivated)
@@ -413,8 +529,8 @@ namespace emaCrossStrategy
                 this.bestPrice = Math.Min(this.bestPrice, currentPrice);
 
             // Step 3: compute trail level and check if price breached it
-            double tickSize   = this.CurrentSymbol.TickSize;
-            double trailDist  = this.TrailingStopTicks * tickSize;
+            double tickSize  = this.CurrentSymbol.TickSize;
+            double trailDist = trail * tickSize;
 
             bool trailHit = this.currentSide == Side.Buy
                 ? currentPrice <= this.bestPrice - trailDist
@@ -422,7 +538,7 @@ namespace emaCrossStrategy
 
             if (trailHit)
             {
-                this.Log($"Trail stop hit — best:{this.bestPrice:F4}  current:{currentPrice:F4}  dist:{TrailingStopTicks}t", StrategyLoggingLevel.Trading);
+                this.Log($"Trail stop hit — best:{this.bestPrice:F4}  current:{currentPrice:F4}  dist:{trail}t", StrategyLoggingLevel.Trading);
                 this.waitClosePositions = true;
                 foreach (var pos in positions)
                 {
@@ -480,24 +596,79 @@ namespace emaCrossStrategy
 
                 if (exitLong || exitShort)
                 {
-                    string reason = gapWeak ? $"gap weakness ({WeaknessBars} bars)" : "reverse cross";
-                    this.Log($"Exit {(exitLong ? "LONG" : "SHORT")} — {reason}", StrategyLoggingLevel.Trading);
+                    bool isReverseCross = (inLong && bearishCross) || (inShort && bullishCross);
 
-                    // Reverse cross → queue flip into new direction once close confirms
-                    if (!gapWeak)
+                    if (isReverseCross)
                     {
+                        // ── Full exit + flip direction ───────────────────────────────
                         Side newSide = bullishCross ? Side.Buy : Side.Sell;
                         this.pendingEntrySide = newSide;
-                    }
+                        this.Log($"Exit {(exitLong ? "LONG" : "SHORT")} — reverse cross, flipping to {newSide}", StrategyLoggingLevel.Trading);
 
-                    this.waitClosePositions = true;
-                    foreach (var pos in positions)
-                    {
-                        var r = pos.Close();
-                        if (r.Status == TradingOperationResultStatus.Failure)
+                        this.waitClosePositions = true;
+                        foreach (var pos in positions)
                         {
-                            this.Log($"Close failed: {r.Message}", StrategyLoggingLevel.Error);
-                            this.ProcessTradingRefuse();
+                            var r = pos.Close();
+                            if (r.Status == TradingOperationResultStatus.Failure)
+                            {
+                                this.Log($"Close failed: {r.Message}", StrategyLoggingLevel.Error);
+                                this.ProcessTradingRefuse();
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // ── Weakness bar exit ───────────────────────────────────
+                        bool doPartial = this.WeaknessClosePercent > 0 &&
+                                         this.WeaknessClosePercent < 100 &&
+                                         !this.weaknessPartialDone;
+
+                        if (doPartial)
+                        {
+                            // Partial close: place an opposite market order for the configured %
+                            double totalQty  = positions.Sum(x => x.Quantity);
+                            int    closeQty  = Math.Max(1, (int)Math.Round(totalQty * this.WeaknessClosePercent / 100.0));
+                            // Don't try to close more than we actually hold
+                            closeQty = (int)Math.Min(closeQty, totalQty);
+
+                            Side closeSide = inLong ? Side.Sell : Side.Buy;
+                            this.Log($"Weakness partial close ({WeaknessClosePercent}%) — closing {closeQty} of {totalQty} {(inLong ? "LONG" : "SHORT")}, SL moves to {HistoricalDataExtensions.Close(this.hdm, 1):F4}",
+                                     StrategyLoggingLevel.Trading);
+
+                            this.weaknessPartialDone  = true;
+                            this.weaknessPartialPrice = HistoricalDataExtensions.Close(this.hdm, 1);
+
+                            var pr = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters()
+                            {
+                                Account     = this.CurrentAccount,
+                                Symbol      = this.CurrentSymbol,
+                                OrderTypeId = this.orderTypeId,
+                                Quantity    = closeQty,
+                                Side        = closeSide,
+                            });
+
+                            if (pr.Status == TradingOperationResultStatus.Failure)
+                            {
+                                this.Log($"Partial close failed: {pr.Message}", StrategyLoggingLevel.Error);
+                                this.weaknessPartialDone  = false;
+                                this.weaknessPartialPrice = 0;
+                            }
+                        }
+                        else if (!this.weaknessPartialDone)
+                        {
+                            // Full close on weakness (0% or 100% configured, or no partial setting)
+                            this.Log($"Exit {(exitLong ? "LONG" : "SHORT")} — gap weakness ({WeaknessBars} bars)", StrategyLoggingLevel.Trading);
+
+                            this.waitClosePositions = true;
+                            foreach (var pos in positions)
+                            {
+                                var r = pos.Close();
+                                if (r.Status == TradingOperationResultStatus.Failure)
+                                {
+                                    this.Log($"Close failed: {r.Message}", StrategyLoggingLevel.Error);
+                                    this.ProcessTradingRefuse();
+                                }
+                            }
                         }
                     }
                     return; // don't evaluate entries on the same bar as an exit
@@ -547,6 +718,47 @@ namespace emaCrossStrategy
 
                 if (!bullishCross && !bearishCross)
                 {
+                    // ── Mid EMA retracement watch ─────────────────────────────────────
+                    // Activated when an impulse cross fires with RetraceTouchTicks > 0.
+                    // We wait for price to pull back to the base-TF 29 EMA, then enter
+                    // on the first bar that closes back away from it in trend direction.
+                    if (this.retraceWatchSide.HasValue)
+                    {
+                        Side   watchSide     = this.retraceWatchSide.Value;
+                        double close1r       = HistoricalDataExtensions.Close(this.hdm, 1);
+                        double close2r       = HistoricalDataExtensions.Close(this.hdm, 2);
+                        double midEmaVal     = this.midEma.GetValue(1);
+                        double distTicksR    = Math.Abs(close1r - midEmaVal) / this.CurrentSymbol.TickSize;
+
+                        // Phase 1: arm once price retraces within threshold of mid EMA
+                        if (!this.retraceTouchArmed && distTicksR <= this.RetraceTouchTicks)
+                        {
+                            this.retraceTouchArmed = true;
+                            this.Log($"Retracement armed ({watchSide}) — price {close1r:F2} within {distTicksR:F1}t of Mid EMA {midEmaVal:F2}",
+                                     StrategyLoggingLevel.Trading);
+                        }
+
+                        // Phase 2: once armed, enter when price bounces away in trend direction
+                        if (this.retraceTouchArmed)
+                        {
+                            double prevDistR = Math.Abs(close2r - midEmaVal) / this.CurrentSymbol.TickSize;
+                            bool bouncing = watchSide == Side.Buy
+                                ? close1r > midEmaVal && distTicksR > prevDistR   // price above EMA and moving away up
+                                : close1r < midEmaVal && distTicksR > prevDistR;  // price below EMA and moving away down
+
+                            if (bouncing)
+                            {
+                                this.Log($"Mid EMA retracement entry ({watchSide}) — price {close1r:F2} bounced from Mid EMA {midEmaVal:F2} ({prevDistR:F1}t → {distTicksR:F1}t)",
+                                         StrategyLoggingLevel.Trading);
+                                this.retraceWatchSide  = null;
+                                this.retraceTouchArmed = false;
+                                this.PlaceEntry(watchSide);
+                                return;
+                            }
+                        }
+                        return; // still watching
+                    }
+
                     // ── HTF Mid EMA touch re-entry ────────────────────────────────────
                     // After a non-reverse exit, watch for price to touch the Mid EMA on
                     // the higher timeframe, then close the next 1m bar moving away from
@@ -559,12 +771,15 @@ namespace emaCrossStrategy
                         double htfEma    = this.htfMidEma.GetValue(0); // current HTF bar (updating)
                         double distTicks = Math.Abs(close1 - htfEma) / this.CurrentSymbol.TickSize;
 
-                        // Abort if EMA alignment completely broke (actual cross on 1m)
+                        // If the cross EMAs briefly look misaligned (e.g. during the pullback
+                        // that brought price to the HTF EMA), skip this bar but keep tracking.
+                        // Only a genuine opposite cross clears lastExitSide (handled above in the
+                        // fresh-cross path). Do NOT null out lastExitSide here.
                         bool alignmentHolds = exitDir == Side.Buy ? micro1 > mid1 : micro1 < mid1;
                         if (!alignmentHolds)
                         {
-                            this.lastExitSide  = null;
-                            this.htfTouchArmed = false;
+                            this.Log($"HTF re-entry: alignment temporarily lost ({exitDir}), watching — will resume when EMAs recover.",
+                                     StrategyLoggingLevel.Trading);
                             return;
                         }
 
@@ -600,8 +815,12 @@ namespace emaCrossStrategy
                 Side entrySide = bullishCross ? Side.Buy : Side.Sell;
 
                 // A fresh cross overrides any pending re-entry tracking
-                this.lastExitSide  = null;
-                this.htfTouchArmed = false;
+                this.lastExitSide        = null;
+                this.htfTouchArmed       = false;
+                this.retraceWatchSide    = null;
+                this.retraceTouchArmed   = false;
+                this.weaknessPartialDone  = false;
+                this.weaknessPartialPrice = 0;
 
                 // ── Impulse candle filter ─────────────────────────────────────
                 // If the cross bar's body is too large, wait one bar to confirm
@@ -614,9 +833,22 @@ namespace emaCrossStrategy
 
                     if (bodyTicks >= this.ImpulseFilterTicks)
                     {
-                        this.pendingConfirmSide = entrySide;
-                        this.Log($"Impulse candle on {entrySide} cross ({bodyTicks:F1}t body >= {ImpulseFilterTicks}t threshold) — waiting one bar to confirm.",
-                                 StrategyLoggingLevel.Trading);
+                        if (this.RetraceTouchTicks > 0)
+                        {
+                            // Retracement mode: wait for price to pull back to the 29 EMA
+                            // and bounce away before entering, rather than entering after 1 bar.
+                            this.retraceWatchSide  = entrySide;
+                            this.retraceTouchArmed = false;
+                            this.Log($"Impulse candle on {entrySide} cross ({bodyTicks:F1}t body ≥ {ImpulseFilterTicks}t) — watching for Mid EMA ({this.MidEmaLen}) retracement.",
+                                     StrategyLoggingLevel.Trading);
+                        }
+                        else
+                        {
+                            // Fallback: defer exactly 1 bar and check EMA alignment.
+                            this.pendingConfirmSide = entrySide;
+                            this.Log($"Impulse candle on {entrySide} cross ({bodyTicks:F1}t body >= {ImpulseFilterTicks}t threshold) — waiting one bar to confirm.",
+                                     StrategyLoggingLevel.Trading);
+                        }
                         return;
                     }
                 }
@@ -664,22 +896,64 @@ namespace emaCrossStrategy
         }
 
         /// <summary>
+        /// Returns the (TrailActivation, TrailingStop) tick values appropriate for
+        /// the current Eastern time hour. Checks Asia then NY; falls back to the
+        /// default parameters if the current time is outside both configured windows,
+        /// or if a session's tick values are 0 (disabled).
+        /// DST is handled automatically via TimeZoneInfo.
+        /// </summary>
+        private (int activation, int trail) GetActiveTrailSettings()
+        {
+            // Convert current UTC time to Eastern (handles EST/EDT automatically)
+            var easternZone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+            int estHour = TimeZoneInfo.ConvertTimeFromUtc(Core.TimeUtils.DateTimeUtcNow, easternZone).Hour;
+
+            bool inAsia = this.AsiaTrailActivationTicks > 0 && this.AsiaTrailingStopTicks > 0
+                       && IsInSessionWindow(estHour, this.AsiaStartHour, this.AsiaEndHour);
+
+            bool inNy   = this.NyTrailActivationTicks > 0 && this.NyTrailingStopTicks > 0
+                       && IsInSessionWindow(estHour, this.NyStartHour, this.NyEndHour);
+
+            if (inAsia) return (this.AsiaTrailActivationTicks, this.AsiaTrailingStopTicks);
+            if (inNy)   return (this.NyTrailActivationTicks,   this.NyTrailingStopTicks);
+            return (this.TrailActivationTicks, this.TrailingStopTicks);
+        }
+
+        /// <summary>
+        /// Checks whether <paramref name="estHour"/> falls within [startHour, endHour).
+        /// Handles sessions that wrap midnight (e.g. Asia: start=19, end=3).
+        /// </summary>
+        private static bool IsInSessionWindow(int estHour, int startHour, int endHour)
+        {
+            if (startHour < endHour)
+                return estHour >= startHour && estHour < endHour;
+            // Wraps midnight (e.g. 19 → 3)
+            return estHour >= startHour || estHour < endHour;
+        }
+
+        /// <summary>
         /// Auto-selects the higher timeframe based on the cross period.
         /// 1m → 3m | 3m → 5m | 5m → 15m | 15m → 1hr
         /// Returns default(Period) if the cross period is not in the known map.
         /// </summary>
         private Period DeriveHtfPeriod()
         {
-            if (this.Period == Period.MIN1)  return Period.MIN3;
-            if (this.Period == Period.MIN3)  return Period.MIN5;
-            if (this.Period == Period.MIN5)  return Period.MIN15;
-            if (this.Period == Period.HOUR1) return Period.HOUR4;
-            // Check for 15-minute by value since there may not be a Period.MIN15 constant
-            // Quantower Period equality works on type+value
-            if (this.Period.ToString() == "15 Min" ||
-                this.Period.ToString() == "MIN15"  ||
-                this.Period.ToString() == "15m")
-                return Period.HOUR1;
+            // Use both constant equality and string fallbacks for all periods,
+            // because non-standard periods (3m, 5m) may not match static constants
+            // depending on how Quantower constructs them from the UI picker.
+            string p = this.Period.ToString();
+
+            bool is1m  = this.Period == Period.MIN1  || p == "1 Min"  || p == "MIN1"  || p == "1m";
+            bool is3m  = this.Period == Period.MIN3  || p == "3 Min"  || p == "MIN3"  || p == "3m";
+            bool is5m  = this.Period == Period.MIN5  || p == "5 Min"  || p == "MIN5"  || p == "5m";
+            bool is15m = this.Period == Period.MIN15 || p == "15 Min" || p == "MIN15" || p == "15m";
+            bool is1h  = this.Period == Period.HOUR1 || p == "1 Hour" || p == "HOUR1" || p == "1h" || p == "60 Min" || p == "60m";
+
+            if (is1m)  return Period.MIN3;
+            if (is3m)  return Period.MIN5;
+            if (is5m)  return Period.MIN15;
+            if (is15m) return Period.HOUR1;
+            if (is1h)  return Period.HOUR4;
             return default;
         }
 
@@ -709,6 +983,7 @@ namespace emaCrossStrategy
             this.pendingConfirmSide = null;
             this.lastExitSide       = null;
             this.htfTouchArmed      = false;
+            this.weaknessPartialPrice = 0;
         }
     }
 }
