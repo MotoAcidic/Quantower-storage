@@ -74,6 +74,7 @@ This document provides technical context and logic documentation for all trading
 | 22 | NY Trail Activation (ticks) | 50 | 0 = disable NY override |
 | 23 | NY Trailing Stop (ticks) | 25 | 0 = disable NY override |
 | 24 | Retrace Touch (ticks) | 5 | Proximity to Mid EMA to arm post-impulse entry; 0=1-bar confirm |
+| 25 | Micro EMA Pullback Touch (ticks) | 0 | Proximity to Micro EMA to arm re-entry on normal crosses; 0=off |
 
 #### API / Platform Notes
 - `[InputParameter]` only renders `int`, `double`, `bool`, `string`, `Period`, `Symbol`, `Account`, `DateTime` in Quantower UI — enums are invisible; use `int` with comment

@@ -127,6 +127,17 @@ namespace emaCrossStrategy
         [InputParameter("Retrace Touch (ticks from 29 EMA to arm post-impulse entry, 0 = 1-bar confirm)", 24, minimum: 0, maximum: 500, increment: 1, decimalPlaces: 0)]
         public int RetraceTouchTicks { get; set; }
 
+        // ── Micro EMA pullback entry ───────────────────────────────────────────
+        // When enabled, a fresh cross does NOT enter immediately. Instead the
+        // strategy waits for price to pull back within MicroRetraceTicks of the
+        // Micro EMA (5), then enters on the first bar that closes back away from
+        // it in the cross direction. Gives a tighter entry after a normal push.
+        // Impulse candles (body >= ImpulseFilterTicks) bypass this and use their
+        // own deferral path (RetraceTouchTicks / pendingConfirmSide).
+        // Set to 0 to enter immediately on every cross bar close (original behaviour).
+        [InputParameter("Micro EMA Pullback Touch (ticks from 5 EMA to arm re-entry, 0 = off)", 25, minimum: 0, maximum: 500, increment: 1, decimalPlaces: 0)]
+        public int MicroRetraceTicks { get; set; }
+
         // ── Higher-timeframe 29 EMA touch re-entry ────────────────────────────
         // After exiting a position (non-reverse), watch for price to pull back
         // and touch the Mid EMA on the higher timeframe, then bounce back in
@@ -186,6 +197,11 @@ namespace emaCrossStrategy
         private Side? retraceWatchSide;
         private bool  retraceTouchArmed;
 
+        // Micro EMA pullback entry (triggered on ANY fresh cross when enabled).
+        // Instead of entering immediately on the cross bar, we wait for any tick
+        // where price comes within MicroRetraceTicks of the Micro EMA, then enter.
+        private Side? microRetraceWatchSide;
+
         // Set after a weakness-bar partial close fires so it doesn't repeat on consecutive bars.
         // Resets when the position fully closes or a new cross entry opens.
         private bool   weaknessPartialDone;
@@ -234,6 +250,7 @@ namespace emaCrossStrategy
             this.ExitMode             = 2;  // 0=WeaknessBars 1=TrailingStop 2=Both
             this.ImpulseFilterTicks   = 20;  // skip entry if cross candle body > 20 ticks
             this.RetraceTouchTicks    = 5;   // arm retracement entry when price within 5t of 29 EMA
+            this.MicroRetraceTicks    = 0;   // off by default; set > 0 to wait for 5 EMA pullback
             this.HtfTouchTicks        = 5;   // arm re-entry when price within 5t of HTF 29 EMA
             this.WeaknessClosePercent  = 50;  // close 50% of position on weakness bar signal
         }
@@ -252,6 +269,7 @@ namespace emaCrossStrategy
             this.htfTouchArmed        = false;
             this.retraceWatchSide     = null;
             this.retraceTouchArmed    = false;
+            this.microRetraceWatchSide  = null;
             this.weaknessPartialDone  = false;
             this.weaknessPartialPrice  = 0;
             this.trailingActivated    = false;
@@ -415,8 +433,9 @@ namespace emaCrossStrategy
                 this.bestPrice           = 0;
                 this.weaknessPartialDone  = false;
                 this.weaknessPartialPrice = 0;
-                this.retraceWatchSide    = null;
-                this.retraceTouchArmed   = false;
+                this.retraceWatchSide      = null;
+                this.retraceTouchArmed     = false;
+                this.microRetraceWatchSide  = null;
 
                 // Reverse-cross flip: immediately enter the new direction
                 if (this.pendingEntrySide.HasValue)
@@ -454,20 +473,40 @@ namespace emaCrossStrategy
             if (obj.Fee      != null) this.totalFee      += obj.Fee.Value;
         }
 
-        // Fires every price tick — manages the partial-TP stop and smart trailing stop.
+        // Fires every price tick — manages tick-level entry watches and exit logic.
         private void Hdm_HistoryItemUpdated(object sender, HistoryEventArgs e)
         {
             if (this.waitOpenPosition || this.waitClosePositions)
                 return;
 
+            double currentPrice = HistoricalDataExtensions.Close(this.hdm, 0);
+
             var positions = Core.Instance.Positions
                 .Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount)
                 .ToArray();
 
+            // ── Tick-level Micro EMA pullback entry ───────────────────────────────
+            // Fires when no position is open and we're watching for a Micro EMA touch.
+            // As soon as the live price gets within MicroRetraceTicks of the Micro EMA
+            // we enter immediately — no need to wait for the 5-minute bar to close.
+            if (!positions.Any() && !this.inPosition && this.microRetraceWatchSide.HasValue)
+            {
+                Side   mSide    = this.microRetraceWatchSide.Value;
+                double microVal = this.microEma.GetValue(0); // forming bar EMA (updates every tick)
+                double mDist    = Math.Abs(currentPrice - microVal) / this.CurrentSymbol.TickSize;
+
+                if (mDist <= this.MicroRetraceTicks)
+                {
+                    this.Log($"Micro EMA touch entry ({mSide}) — price {currentPrice:F4} within {mDist:F1}t of {this.MicroEmaLen} EMA {microVal:F4}, entering now.",
+                             StrategyLoggingLevel.Trading);
+                    this.microRetraceWatchSide  = null;
+
+                }
+                return; // either entered or still watching — don't run exit logic
+            }
+
             if (!positions.Any())
                 return;
-
-            double currentPrice = HistoricalDataExtensions.Close(this.hdm, 0);
 
             // ── Partial TP level stop ────────────────────────────────────────────────
             // After a partial weakness close, if price returns to that level the
@@ -539,15 +578,24 @@ namespace emaCrossStrategy
             if (!this.trailingActivated)
                 return;
 
-            // Step 2: update the best price seen since activation
-            if (this.currentSide == Side.Buy)
-                this.bestPrice = Math.Max(this.bestPrice, currentPrice);
-            else
-                this.bestPrice = Math.Min(this.bestPrice, currentPrice);
-
-            // Step 3: compute trail level and check if price breached it
+            // Step 2: update the best price seen since activation; log every time it advances
             double tickSize  = this.CurrentSymbol.TickSize;
             double trailDist = trail * tickSize;
+
+            if (this.currentSide == Side.Buy && currentPrice > this.bestPrice)
+            {
+                this.bestPrice = currentPrice;
+                this.Log($"Trail moved — new best:{this.bestPrice:F4}  stop now at:{this.bestPrice - trailDist:F4}  ({trail}t)",
+                         StrategyLoggingLevel.Trading);
+            }
+            else if (this.currentSide == Side.Sell && currentPrice < this.bestPrice)
+            {
+                this.bestPrice = currentPrice;
+                this.Log($"Trail moved — new best:{this.bestPrice:F4}  stop now at:{this.bestPrice + trailDist:F4}  ({trail}t)",
+                         StrategyLoggingLevel.Trading);
+            }
+
+            // Step 3: compute trail level and check if price breached it
 
             bool trailHit = this.currentSide == Side.Buy
                 ? currentPrice <= this.bestPrice - trailDist
@@ -776,6 +824,14 @@ namespace emaCrossStrategy
                         return; // still watching
                     }
 
+                    // ── Micro EMA pullback watch ──────────────────────────────────────
+                    // NOTE: Firing is handled tick-by-tick in Hdm_HistoryItemUpdated.
+                    // The bar-close path here only handles the case where a new cross
+                    // fires while we are already watching (clearing the old watch and
+                    // setting a new one is done in the fresh-cross clear block above).
+                    if (this.microRetraceWatchSide.HasValue)
+                        return; // still watching — tick handler will fire the entry
+
                     // ── HTF Mid EMA touch re-entry ────────────────────────────────────
                     // After a non-reverse exit, watch for price to touch the Mid EMA on
                     // the higher timeframe, then close the next 1m bar moving away from
@@ -832,12 +888,13 @@ namespace emaCrossStrategy
                 Side entrySide = bullishCross ? Side.Buy : Side.Sell;
 
                 // A fresh cross overrides any pending re-entry tracking
-                this.lastExitSide        = null;
-                this.htfTouchArmed       = false;
-                this.retraceWatchSide    = null;
-                this.retraceTouchArmed   = false;
-                this.weaknessPartialDone  = false;
-                this.weaknessPartialPrice = 0;
+                this.lastExitSide           = null;
+                this.htfTouchArmed          = false;
+                this.retraceWatchSide       = null;
+                this.retraceTouchArmed      = false;
+                this.microRetraceWatchSide  = null;
+                this.weaknessPartialDone    = false;
+                this.weaknessPartialPrice   = 0;
 
                 // ── Impulse candle filter ─────────────────────────────────────
                 // If the cross bar's body is too large, wait one bar to confirm
@@ -868,6 +925,18 @@ namespace emaCrossStrategy
                         }
                         return;
                     }
+                }
+
+                // ── Micro EMA pullback: defer non-impulse entries ─────────────────
+                // If MicroRetraceTicks > 0 and the cross wasn't already caught by the
+                // impulse filter above, watch for price to pull back and touch the
+                // Micro EMA (5) before entering.
+                if (this.MicroRetraceTicks > 0)
+                {
+                    this.microRetraceWatchSide  = null;
+                    this.Log($"Micro EMA pullback watch set ({entrySide}) — waiting for price to touch {this.MicroEmaLen} EMA within {this.MicroRetraceTicks}t.",
+                             StrategyLoggingLevel.Trading);
+                    return;
                 }
 
                 this.PlaceEntry(entrySide);
