@@ -482,16 +482,33 @@ namespace emaCrossStrategy
                 {
                     this.Log($"Partial TP SL hit — price {currentPrice:F4} returned to partial level {this.weaknessPartialPrice:F4}, closing remainder.",
                              StrategyLoggingLevel.Trading);
-                    this.weaknessPartialPrice = 0;
-                    this.waitClosePositions   = true;
-                    foreach (var pos in positions)
+
+                    // Use PlaceOrder with explicit quantity rather than pos.Close().
+                    // After a partial close the original position object is stale in
+                    // Quantower (it gets a new ID when size changes), so pos.Close()
+                    // returns error [5] (position not found). PlaceOrder is always safe.
+                    double remainderQty = positions.Sum(x => x.Quantity);
+                    Side   closeSide    = this.currentSide == Side.Buy ? Side.Sell : Side.Buy;
+
+                    var r = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters()
                     {
-                        var r = pos.Close();
-                        if (r.Status == TradingOperationResultStatus.Failure)
-                        {
-                            this.Log($"Partial TP SL close failed: {r.Message}", StrategyLoggingLevel.Error);
-                            this.ProcessTradingRefuse();
-                        }
+                        Account     = this.CurrentAccount,
+                        Symbol      = this.CurrentSymbol,
+                        OrderTypeId = this.orderTypeId,
+                        Quantity    = remainderQty,
+                        Side        = closeSide,
+                    });
+
+                    if (r.Status == TradingOperationResultStatus.Failure)
+                    {
+                        // Keep weaknessPartialPrice active so we retry on the very next tick.
+                        this.Log($"Partial TP SL close failed (will retry): {r.Message}", StrategyLoggingLevel.Error);
+                    }
+                    else
+                    {
+                        // Only disarm the guard once the close order is accepted.
+                        this.weaknessPartialPrice = 0;
+                        this.waitClosePositions   = true;
                     }
                     return;
                 }
