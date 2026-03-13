@@ -134,18 +134,6 @@ namespace emaCrossStrategy
         [InputParameter("Mid EMA Touch (ticks from Mid EMA to arm re-entry, 0 = off)", 14, minimum: 0, maximum: 200, increment: 1, decimalPlaces: 0)]
         public int HtfTouchTicks { get; set; }
 
-        // ── Confirmation filters ──────────────────────────────────────────────
-        // Trend EMA: only take long crosses when close > TrendEma; shorts when close < TrendEma.
-        // Removes counter-trend entries. Set 0 to disable.
-        [InputParameter("Trend EMA Period (0 = disabled, e.g. 200)", 25, minimum: 0, maximum: 1000, increment: 1, decimalPlaces: 0)]
-        public int TrendEmaLen { get; set; }
-
-        // Min EMA gap: require at least this many ticks of 5/29 EMA separation at entry.
-        // Eliminates hair-trigger crosses where the EMAs are barely touching.
-        // Set 0 to disable.
-        [InputParameter("Min EMA Gap at entry (ticks, 0 = off)", 26, minimum: 0, maximum: 100, increment: 1, decimalPlaces: 0)]
-        public int MinEmaGapTicks { get; set; }
-
         // ── Weakness bar partial close ──────────────────────────────────────────
         // On a weakness bar signal, close this % of the position to bank profit
         // while keeping the rest running with the trend.
@@ -162,7 +150,6 @@ namespace emaCrossStrategy
 
         private Indicator microEma;
         private Indicator midEma;
-        private Indicator trendEma;  // optional macro-trend filter EMA (e.g. 200 period)
         private HistoricalData hdm;
         private string orderTypeId;
 
@@ -250,9 +237,6 @@ namespace emaCrossStrategy
             this.RetraceTouchTicks    = 5;   // arm retracement entry when price within 5t of 29 EMA
             this.HtfTouchTicks        = 5;   // arm re-entry when price within 5t of Mid EMA
             this.WeaknessClosePercent  = 50;  // close 50% of position on weakness bar signal
-            // Confirmation filters
-            this.TrendEmaLen    = 200; // only trade in direction of 200 EMA; 0 = disabled
-            this.MinEmaGapTicks = 4;   // require at least 4t of EMA separation; 0 = disabled
         }
 
         protected override void OnRun()
@@ -317,14 +301,10 @@ namespace emaCrossStrategy
 
             this.microEma = Core.Instance.Indicators.BuiltIn.EMA(this.MicroEmaLen, PriceType.Close);
             this.midEma   = Core.Instance.Indicators.BuiltIn.EMA(this.MidEmaLen,   PriceType.Close);
-            this.trendEma = this.TrendEmaLen > 0
-                ? Core.Instance.Indicators.BuiltIn.EMA(this.TrendEmaLen, PriceType.Close)
-                : null;
 
             this.hdm = this.CurrentSymbol.GetHistory(this.Period, this.CurrentSymbol.HistoryType, this.StartPoint);
             this.hdm.AddIndicator(this.microEma);
             this.hdm.AddIndicator(this.midEma);
-            if (this.trendEma != null) this.hdm.AddIndicator(this.trendEma);
 
 
             Core.PositionAdded      += this.Core_PositionAdded;
@@ -339,9 +319,7 @@ namespace emaCrossStrategy
                      $"WeaknessBars:{WeaknessBars}  SL:{StopLossTicks}t  " +
                      $"TP:{(TakeProfitTicks > 0 ? $"{TakeProfitTicks}t" : "off")}  " +
                      $"Trail:{(TrailingStopTicks > 0 ? $"activate@{TrailActivationTicks}t trail@{TrailingStopTicks}t" : "off")}  " +
-                     $"Qty:{Quantity}  " +
-                     $"Trend:{(TrendEmaLen > 0 ? $"{TrendEmaLen} EMA" : "off")}  " +
-                     $"MinGap:{(MinEmaGapTicks > 0 ? $"{MinEmaGapTicks}t" : "off")}",
+                     $"Qty:{Quantity}",
                      StrategyLoggingLevel.Trading);
         }
 
@@ -961,10 +939,6 @@ namespace emaCrossStrategy
                 return;
             }
 
-            // Confirmation filters: trend EMA, RSI, min EMA gap
-            if (!this.IsEntryConfirmed(side))
-                return;
-
             this.Log($"Signal: {side} | Micro:{this.microEma.GetValue(1):F4}  Mid:{this.midEma.GetValue(1):F4}  " +
                      $"Qty:{this.Quantity}  SL:{StopLossTicks}t" +
                      (TakeProfitTicks > 0 ? $"  TP:{TakeProfitTicks}t" : "") +
@@ -1058,50 +1032,6 @@ namespace emaCrossStrategy
                 if (gapRecent >= gapOlder)
                     return false;
             }
-            return true;
-        }
-
-        /// <summary>
-        /// Checks all three confirmation filters before allowing an entry.
-        /// Returns false (and logs the reason) if any filter blocks the trade.
-        /// All filters are independently configurable and can be disabled via their parameters.
-        /// </summary>
-        private bool IsEntryConfirmed(Side side)
-        {
-            double close1 = HistoricalDataExtensions.Close(this.hdm, 1);
-
-            // 1. Trend EMA filter — price must be on the correct side of the long-period EMA.
-            //    Long signals only when price > TrendEma (uptrend).
-            //    Short signals only when price < TrendEma (downtrend).
-            //    This is the single highest-value filter for a trend-following strategy.
-            if (this.TrendEmaLen > 0 && this.trendEma != null)
-            {
-                double trendVal = this.trendEma.GetValue(1);
-                bool   trendOk  = side == Side.Buy ? close1 > trendVal : close1 < trendVal;
-                if (!trendOk)
-                {
-                    this.Log($"Entry blocked ({side}) — price {close1:F2} on wrong side of {TrendEmaLen} EMA {trendVal:F2}.",
-                             StrategyLoggingLevel.Trading);
-                    return false;
-                }
-            }
-
-            // 2. Minimum EMA gap filter — require meaningful EMA separation at entry.
-            //    Hair-trigger crosses in a ranging market produce 10+ signals per session
-            //    with <4 ticks of separation. These trades have very poor risk/reward
-            //    because the EMAs are likely to immediately re-cross.
-            if (this.MinEmaGapTicks > 0)
-            {
-                double gapTicks = Math.Abs(this.microEma.GetValue(1) - this.midEma.GetValue(1))
-                                  / this.CurrentSymbol.TickSize;
-                if (gapTicks < this.MinEmaGapTicks)
-                {
-                    this.Log($"Entry blocked ({side}) — EMA gap {gapTicks:F1}t < minimum {MinEmaGapTicks}t.",
-                             StrategyLoggingLevel.Trading);
-                    return false;
-                }
-            }
-
             return true;
         }
 

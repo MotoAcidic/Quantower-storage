@@ -154,18 +154,6 @@ When an impulse cross fires (body ≥ Impulse Filter) this controls how close to
 
 ---
 
-## 25. Trend EMA Period (0 = disabled)
-**Recommended:** `200`  
-A long-period EMA used as a macro-trend filter. When enabled, the strategy will **only take long entries when the last closed bar close is above this EMA** and only short entries when price is below it. This eliminates counter-trend entries that cross against the dominant daily direction. On 5m MES, a 200-period EMA covers roughly 16+ hours of price history — a meaningful trend anchor. Set to `0` to disable this filter entirely and trade all crosses regardless of price location.
-
----
-
-## 26. Min EMA Gap at Entry (ticks, 0 = off)
-**Recommended:** `4`  
-Requires the gap between the Micro EMA (5) and Mid EMA (29) to be at least this many ticks wide at the moment of entry. This filters out "hair-trigger" crosses where the two EMAs are essentially on top of each other — those crosses are low-confidence and often reverse immediately. 4 ticks = 1 index point on MES. Under 4 ticks of separation means the EMAs are still intertwined; it is better to wait. Set to `0` to disable this filter.
-
----
-
 ## Summary — Recommended Settings for 5m MES
 
 | # | Setting | Value | Changed from 3m? |
@@ -194,9 +182,7 @@ Requires the gap between the Micro EMA (5) and Mid EMA (29) to be at least this 
 | 22 | NY Trail Activation | `80` | ✅ was `60` |
 | 23 | NY Trailing Stop | `40` | ✅ was `30` |
 | 24 | Retrace Touch (ticks) | `5` | — |
-| 25 | Trend EMA Period | `200` | ✅ new |
-| 26 | Min EMA Gap (ticks) | `4` | ✅ new |
 
 ---
 
-*Last updated: March 12, 2026 — added confirmation filters (#25–26): Trend EMA and Min EMA gap. RSI removed (fights trend-following logic).*
+*Last updated: March 12, 2026 — updated from 3m to 5m for prop firm use*
