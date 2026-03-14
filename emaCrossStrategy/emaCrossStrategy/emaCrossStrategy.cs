@@ -146,6 +146,28 @@ namespace emaCrossStrategy
         [InputParameter("Min EMA Gap at entry (ticks, 0 = off)", 26, minimum: 0, maximum: 100, increment: 1, decimalPlaces: 0)]
         public int MinEmaGapTicks { get; set; }
 
+        // ── Lower-timeframe confirmation ───────────────────────────────────────
+        // When an impulse cross fires on the main TF, instead of waiting a full bar
+        // for confirmation or for price to retrace, drop to a 1m chart and enter on
+        // the first 1m bar where the same EMAs confirm the cross direction.
+        // Set to 0 to use the legacy retrace/1-bar-confirm behaviour.
+        [InputParameter("LTF Confirm Bars (max 1m bars to wait after impulse cross, 0 = legacy)", 27, minimum: 0, maximum: 30, increment: 1, decimalPlaces: 0)]
+        public int LtfConfirmBars { get; set; }
+
+        // ── Swing structure trailing stop ─────────────────────────────────
+        // After each bar close, sets the stop at the highest high (shorts) or
+        // lowest low (longs) of the last N bars. Gives structural breathing room
+        // rather than a fixed tick distance. Monitored per-tick for immediate exit.
+        // Set lookback to 0 to disable swing trail entirely.
+        [InputParameter("Swing Trail Lookback Bars (0 = off, e.g. 2)", 28, minimum: 0, maximum: 20, increment: 1, decimalPlaces: 0)]
+        public int SwingTrailLookback { get; set; }
+
+        // Minimum profit in ticks before the swing trail arms.
+        // Prevents a very early wick from stopping out a fresh position.
+        // Set to 0 to arm from the very first bar after entry.
+        [InputParameter("Swing Trail Activation (ticks profit to arm, 0 = immediate)", 29, minimum: 0, maximum: 500, increment: 5, decimalPlaces: 0)]
+        public int SwingTrailActivationTicks { get; set; }
+
         // ── Weakness bar partial close ──────────────────────────────────────────
         // On a weakness bar signal, close this % of the position to bank profit
         // while keeping the rest running with the trend.
@@ -195,6 +217,14 @@ namespace emaCrossStrategy
         private Side? retraceWatchSide;
         private bool  retraceTouchArmed;
 
+        // Lower-timeframe (1m) confirmation — used instead of retrace/1-bar wait
+        // when LtfConfirmBars > 0.  Fires on each 1m bar close.
+        private HistoricalData ltfHdm;
+        private Indicator      ltfMicroEma;
+        private Indicator      ltfMidEma;
+        private Side?          ltfConfirmSide;   // direction waiting for 1m EMA confirmation
+        private int            ltfBarsRemaining; // bars left before the signal expires
+
         // Set after a weakness-bar partial close fires so it doesn't repeat on consecutive bars.
         // Resets when the position fully closes or a new cross entry opens.
         private bool   weaknessPartialDone;
@@ -207,6 +237,13 @@ namespace emaCrossStrategy
         private bool   trailingActivated;
         private double bestPrice;          // peak price for longs, trough for shorts
         private Side   currentSide;        // direction of the open position
+
+        // ── Swing-structure trail state ───────────────────────────────────────
+        // Stop level updated on each bar close to the highest high (shorts) or
+        // lowest low (longs) of the last SwingTrailLookback bars.  Checked per
+        // tick; 0 = not yet armed.
+        private double swingStopPrice;
+        private bool   swingTrailArmed;
 
         // True once the first real-time bar close fires after history replay finishes.
         // All entry/exit signal logic is suppressed during replay to prevent false
@@ -251,8 +288,11 @@ namespace emaCrossStrategy
             this.HtfTouchTicks        = 5;   // arm re-entry when price within 5t of Mid EMA
             this.WeaknessClosePercent  = 50;  // close 50% of position on weakness bar signal
             // Confirmation filters
-            this.TrendEmaLen    = 200; // only trade in direction of 200 EMA; 0 = disabled
-            this.MinEmaGapTicks = 4;   // require at least 4t of EMA separation; 0 = disabled
+            this.TrendEmaLen    = 0;   // only trade in direction of this EMA; 0 = disabled
+            this.MinEmaGapTicks = 0;   // require at least N ticks of EMA separation; 0 = disabled
+            this.LtfConfirmBars = 5;   // wait up to 5 x 1m bars for impulse cross confirmation; 0 = legacy
+            this.SwingTrailLookback        = 2;  // trail SL = highest high / lowest low of last 2 bars
+            this.SwingTrailActivationTicks = 20; // arm swing trail once 20 ticks in profit
         }
 
         protected override void OnRun()
@@ -270,6 +310,10 @@ namespace emaCrossStrategy
             this.midBounceDetected    = false;
             this.retraceWatchSide     = null;
             this.retraceTouchArmed    = false;
+            this.ltfConfirmSide       = null;
+            this.ltfBarsRemaining     = 0;
+            this.swingStopPrice       = 0;
+            this.swingTrailArmed      = false;
             this.weaknessPartialDone  = false;
             this.weaknessPartialPrice  = 0;
             this.trailingActivated    = false;
@@ -326,6 +370,18 @@ namespace emaCrossStrategy
             this.hdm.AddIndicator(this.midEma);
             if (this.trendEma != null) this.hdm.AddIndicator(this.trendEma);
 
+            // LTF feed for faster impulse-cross confirmation
+            var ltfPeriod = this.DeriveLtfPeriod();
+            if (ltfPeriod != default(Period) && this.LtfConfirmBars > 0)
+            {
+                this.ltfMicroEma = Core.Instance.Indicators.BuiltIn.EMA(this.MicroEmaLen, PriceType.Close);
+                this.ltfMidEma   = Core.Instance.Indicators.BuiltIn.EMA(this.MidEmaLen,   PriceType.Close);
+                this.ltfHdm      = this.CurrentSymbol.GetHistory(ltfPeriod, this.CurrentSymbol.HistoryType, this.StartPoint);
+                this.ltfHdm.AddIndicator(this.ltfMicroEma);
+                this.ltfHdm.AddIndicator(this.ltfMidEma);
+                this.ltfHdm.NewHistoryItem += this.Ltf_OnNewHistoryItem;
+            }
+
 
             Core.PositionAdded      += this.Core_PositionAdded;
             Core.PositionRemoved    += this.Core_PositionRemoved;
@@ -341,7 +397,8 @@ namespace emaCrossStrategy
                      $"Trail:{(TrailingStopTicks > 0 ? $"activate@{TrailActivationTicks}t trail@{TrailingStopTicks}t" : "off")}  " +
                      $"Qty:{Quantity}  " +
                      $"Trend:{(TrendEmaLen > 0 ? $"{TrendEmaLen} EMA" : "off")}  " +
-                     $"MinGap:{(MinEmaGapTicks > 0 ? $"{MinEmaGapTicks}t" : "off")}",
+                     $"MinGap:{(MinEmaGapTicks > 0 ? $"{MinEmaGapTicks}t" : "off")}  " +
+                     $"LTF:{(ltfHdm != null ? $"enabled (up to {LtfConfirmBars} x 1m bars)" : "off")}",
                      StrategyLoggingLevel.Trading);
         }
 
@@ -357,6 +414,13 @@ namespace emaCrossStrategy
                 this.hdm.HistoryItemUpdated -= this.Hdm_HistoryItemUpdated;
                 this.hdm.NewHistoryItem     -= this.Hdm_OnNewHistoryItem;
                 this.hdm.Dispose();
+            }
+
+            if (this.ltfHdm != null)
+            {
+                this.ltfHdm.NewHistoryItem -= this.Ltf_OnNewHistoryItem;
+                this.ltfHdm.Dispose();
+                this.ltfHdm = null;
             }
 
             base.OnStop();
@@ -423,6 +487,10 @@ namespace emaCrossStrategy
                 this.weaknessPartialPrice = 0;
                 this.retraceWatchSide    = null;
                 this.retraceTouchArmed   = false;
+                this.ltfConfirmSide      = null;
+                this.ltfBarsRemaining    = 0;
+                this.swingStopPrice      = 0;
+                this.swingTrailArmed     = false;
 
                 // Reverse-cross flip: immediately enter the new direction
                 if (this.pendingEntrySide.HasValue)
@@ -516,6 +584,34 @@ namespace emaCrossStrategy
                         // Only disarm the guard once the close order is accepted.
                         this.weaknessPartialPrice = 0;
                         this.waitClosePositions   = true;
+                    }
+                    return;
+                }
+            }
+
+            // ── Swing trail stop check (per tick) ────────────────────────────────
+            // The stop level is set on bar close; here we just check if price has
+            // crossed through it and fire a market close if so.
+            if (this.swingStopPrice > 0 && this.swingTrailArmed)
+            {
+                bool swingHit = this.currentSide == Side.Buy
+                    ? currentPrice <= this.swingStopPrice
+                    : currentPrice >= this.swingStopPrice;
+
+                if (swingHit)
+                {
+                    this.Log($"Swing stop hit — stop:{this.swingStopPrice:F4}  current:{currentPrice:F4}", StrategyLoggingLevel.Trading);
+                    this.swingStopPrice  = 0;
+                    this.swingTrailArmed = false;
+                    this.waitClosePositions = true;
+                    foreach (var pos in positions)
+                    {
+                        var r = pos.Close();
+                        if (r.Status == TradingOperationResultStatus.Failure)
+                        {
+                            this.Log($"Swing stop close failed: {r.Message}", StrategyLoggingLevel.Error);
+                            this.ProcessTradingRefuse();
+                        }
                     }
                     return;
                 }
@@ -653,6 +749,54 @@ namespace emaCrossStrategy
 
             if (positions.Any())
             {
+                // ── Swing trail stop update (bar close) ───────────────────────
+                // On every bar close with an open position, recalculate the swing
+                // stop level from the last SwingTrailLookback bars' wick highs/lows.
+                // Only arms once profit >= SwingTrailActivationTicks.
+                if (this.SwingTrailLookback > 0)
+                {
+                    double pnlTicksNow = positions.Sum(x => x.GrossPnLTicks);
+                    if (!this.swingTrailArmed && pnlTicksNow >= this.SwingTrailActivationTicks)
+                    {
+                        this.swingTrailArmed = true;
+                        this.Log($"Swing trail armed at {pnlTicksNow:F1}t profit.", StrategyLoggingLevel.Trading);
+                    }
+
+                    if (this.swingTrailArmed)
+                    {
+                        bool inLongNow = positions.Any(p => p.Side == Side.Buy);
+                        double newSwingStop;
+                        if (inLongNow)
+                        {
+                            // Long: stop = lowest low of last N bars (below candle wicks)
+                            double lowest = double.MaxValue;
+                            for (int i = 1; i <= this.SwingTrailLookback; i++)
+                                lowest = Math.Min(lowest, HistoricalDataExtensions.Low(this.hdm, i));
+                            newSwingStop = lowest;
+                        }
+                        else
+                        {
+                            // Short: stop = highest high of last N bars (above candle wicks)
+                            double highest = double.MinValue;
+                            for (int i = 1; i <= this.SwingTrailLookback; i++)
+                                highest = Math.Max(highest, HistoricalDataExtensions.High(this.hdm, i));
+                            newSwingStop = highest;
+                        }
+
+                        // Ratchet: only move stop in the direction of the trade
+                        bool improved = inLongNow
+                            ? newSwingStop > this.swingStopPrice
+                            : newSwingStop < this.swingStopPrice || this.swingStopPrice == 0;
+
+                        if (improved)
+                        {
+                            this.Log($"Swing stop moved to {newSwingStop:F4} (was {this.swingStopPrice:F4}) — {SwingTrailLookback}-bar {(inLongNow ? "low" : "high")}.",
+                                     StrategyLoggingLevel.Trading);
+                            this.swingStopPrice = newSwingStop;
+                        }
+                    }
+                }
+
                 // ── Exit logic (mirrors Pine exitLong / exitShort) ─────────────
                 bool inLong  = positions.Any(p => p.Side == Side.Buy);
                 bool inShort = positions.Any(p => p.Side == Side.Sell);
@@ -908,6 +1052,8 @@ namespace emaCrossStrategy
                 this.midBounceDetected   = false;
                 this.retraceWatchSide    = null;
                 this.retraceTouchArmed   = false;
+                this.ltfConfirmSide      = null;
+                this.ltfBarsRemaining    = 0;
                 this.weaknessPartialDone  = false;
                 this.weaknessPartialPrice = 0;
 
@@ -1105,6 +1251,67 @@ namespace emaCrossStrategy
             return true;
         }
 
+        // Fires on every 1m bar close while an impulse cross is waiting for LTF confirmation.
+        // Enters on the first 1m bar where the 5/29 EMA alignment matches the cross direction.
+        // Gives up after LtfConfirmBars bars with no alignment (signal is stale/reversed).
+        private void Ltf_OnNewHistoryItem(object sender, HistoryEventArgs args)
+        {
+            if (!this.isLive) return;
+            if (!this.ltfConfirmSide.HasValue) return;
+            if (this.waitOpenPosition || this.waitClosePositions) return;
+            if (this.inPosition) { this.ltfConfirmSide = null; return; }
+
+            Side   side       = this.ltfConfirmSide.Value;
+            double ltfMicro1  = this.ltfMicroEma.GetValue(1);
+            double ltfMid1    = this.ltfMidEma.GetValue(1);
+            bool   aligned    = side == Side.Buy ? ltfMicro1 > ltfMid1 : ltfMicro1 < ltfMid1;
+
+            this.ltfBarsRemaining--;
+
+            if (aligned)
+            {
+                this.Log($"LTF confirmed {side} \u2014 1m micro:{ltfMicro1:F2} mid:{ltfMid1:F2}, entering.",
+                         StrategyLoggingLevel.Trading);
+                this.ltfConfirmSide   = null;
+                this.ltfBarsRemaining = 0;
+                this.PlaceEntry(side);
+            }
+            else if (this.ltfBarsRemaining <= 0)
+            {
+                this.Log($"LTF timeout \u2014 {side} signal expired after {LtfConfirmBars} 1m bars with no EMA alignment, skipping.",
+                         StrategyLoggingLevel.Trading);
+                this.ltfConfirmSide = null;
+            }
+            // else: still waiting
+        }
+
+        /// <summary>
+        /// Returns the 1m (or 3m for 15m charts) Period to use for LTF confirmation.
+        /// Uses both constant comparison and string fallbacks for Quantower compatibility.
+        /// Returns default(Period) when no lower TF is applicable (e.g. main TF is already 1m).
+        /// </summary>
+        private Period DeriveLtfPeriod()
+        {
+            // Constant equality (reliable when Period set programmatically)
+            if (this.Period == Period.MIN5  || this.Period == Period.MIN3) return Period.MIN1;
+            if (this.Period == Period.MIN15) return Period.MIN3;
+            if (this.Period == Period.MIN30) return Period.MIN5;
+            if (this.Period == Period.HOUR1) return Period.MIN15;
+            if (this.Period == Period.MIN1)  return default;
+
+            // String fallbacks — Quantower sometimes builds Period with non-standard strings
+            string s = this.Period.ToString();
+            if (s == "5 Min" || s == "MIN5" || s == "5m" ||
+                s == "3 Min" || s == "MIN3" || s == "3m")  return Period.MIN1;
+            if (s == "15 Min" || s == "MIN15" || s == "15m") return Period.MIN3;
+            if (s == "30 Min" || s == "MIN30" || s == "30m") return Period.MIN5;
+            if (s == "1 Hour" || s == "HOUR1" || s == "1h" ||
+                s == "60 Min" || s == "MIN60")               return Period.MIN15;
+            if (s == "1 Min"  || s == "MIN1"  || s == "1m")  return default;
+
+            return default; // unknown period — disable LTF
+        }
+
         private void ProcessTradingRefuse()
         {
             this.waitOpenPosition   = false;
@@ -1114,6 +1321,10 @@ namespace emaCrossStrategy
             this.lastExitSide       = null;
             this.midTouchArmed      = false;
             this.midBounceDetected  = false;
+            this.ltfConfirmSide     = null;
+            this.ltfBarsRemaining   = 0;
+            this.swingStopPrice     = 0;
+            this.swingTrailArmed    = false;
             this.weaknessPartialPrice = 0;
         }
     }

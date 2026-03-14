@@ -150,19 +150,62 @@ Once activated, a 40-tick pullback from peak closes the position. 40 ticks = 10 
 
 ## 24. Retrace Touch (ticks from Micro EMA, 0 = 1-bar confirm)
 **Recommended:** `5`  
-When an impulse cross fires (body ≥ Impulse Filter) this controls how close to the **Micro EMA (5)** price must pull back before arming the retracement re-entry. At 5 ticks, any bar that closes within 1.25 pts of the 5 EMA arms the watch. The strategy then enters when price bounces back in trend direction. Setting to 0 falls back to the original 1-bar defer: enter on the next bar if EMA alignment still holds, without waiting for a pullback. The retrace mode generally gives a better entry price.
+**Note: this only applies when LTF Confirm Bars (setting #27) is set to 0.** When LTF mode is active, impulse crosses are confirmed on the 1m chart instead and this setting is bypassed.
+
+When LTF is disabled and an impulse cross fires (body ≥ Impulse Filter), this controls how close to the **Micro EMA (5)** price must pull back before arming the retracement re-entry. At 5 ticks, any bar that closes within 1.25 pts of the 5 EMA arms the watch. Set to 0 for the legacy 1-bar defer (enter on next bar if EMA alignment holds).
 
 ---
 
 ## 25. Trend EMA Period (0 = disabled)
-**Recommended:** `200`  
-A long-period EMA used as a macro-trend filter. When enabled, the strategy will **only take long entries when the last closed bar close is above this EMA** and only short entries when price is below it. This eliminates counter-trend entries that cross against the dominant daily direction. On 5m MES, a 200-period EMA covers roughly 16+ hours of price history — a meaningful trend anchor. Set to `0` to disable this filter entirely and trade all crosses regardless of price location.
+**Recommended:** `0` (disabled)  
+When non-zero, only long entries are allowed when price is above this EMA, and only shorts when below it. A valid concept but problematic on 5m MES — a 200-period EMA spans 16+ hours and price oscillates around it constantly, blocking both sides in alternation. Only experiment with shorter values like `50` (4 hours) and only in clearly one-directional sessions. Leave at `0` for normal trading.
 
 ---
 
 ## 26. Min EMA Gap at Entry (ticks, 0 = off)
-**Recommended:** `4`  
-Requires the gap between the Micro EMA (5) and Mid EMA (29) to be at least this many ticks wide at the moment of entry. This filters out "hair-trigger" crosses where the two EMAs are essentially on top of each other — those crosses are low-confidence and often reverse immediately. 4 ticks = 1 index point on MES. Under 4 ticks of separation means the EMAs are still intertwined; it is better to wait. Set to `0` to disable this filter.
+**Recommended:** `0` (disabled)  
+Requires at least this many ticks of separation between the 5 and 29 EMAs at entry, filtering out near-miss crosses where the EMAs are barely touching. Disabled by default — the LTF confirm (setting #27) already serves as a quality filter for impulse crosses, and the Min Gap risks blocking valid early trend crosses. Enable only if you're seeing many hair-trigger reversal signals on flat days.
+
+---
+
+## 27. LTF Confirm Bars (max 1m bars to wait after impulse cross, 0 = legacy)
+**Recommended:** `5`  
+This is the key entry timing improvement. When an **impulse cross** fires (cross bar body ≥ Impulse Filter), instead of waiting a full 5m bar or a retracement back to the EMA, the strategy drops to a **1m chart** and uses the same 5/29 EMAs there to confirm direction. It enters on the first 1m bar where the 1m EMAs are aligned with the cross — typically within 1–3 minutes rather than waiting up to 10 minutes.
+
+If no 1m bar confirms within this many bars (5 minutes), the signal is considered stale and dropped. This prevents entering after the whole spike has already reversed.
+
+Set to `0` to revert to the legacy behaviour (retrace watch or 1-bar confirm from setting #24).
+
+**5m → 1m mapping is automatic.** For other timeframes: 15m uses 3m confirmation, 30m uses 5m, 1h uses 15m.
+
+---
+
+## 28. Swing Trail Lookback Bars (0 = off, e.g. 2)
+**Recommended:** `2`  
+Enables a **swing-structure trailing stop** that locks in profits at structurally meaningful levels — wick highs/lows — rather than a generic tick distance from peak price.
+
+**How it works:**
+- On every **bar close** while a position is open and `SwingTrailActivationTicks` profit has been reached, the strategy looks back this many bars and finds:
+  - **Long:** the *lowest low* of the last N bars → becomes the new stop level
+  - **Short:** the *highest high* of the last N bars → becomes the new stop level
+- The stop **only ratchets in the trade direction** — it never moves against you (a rising stop on longs never pulls back down).
+- The stop is **checked per tick** in real time. When price breaches it, the position is closed immediately via market order, then the swing fields reset.
+
+**Setting to 2** means the stop sits below the lowest wick of the most recent 2 closed bars on a long — giving the trade room to breathe through normal one-bar retracements while still capturing the structure of the move. Setting to 1 is tighter (just the previous bar's low), setting to 3 or 4 gives more room on choppier moves.
+
+**Coexistence with tick trail:** Both the swing trail and the existing tick-based sessions trail (settings #10–#23) can run simultaneously. Whichever fires first closes the position. On 5m MES with NY trail activation at 80 ticks, the swing trail (activation 20 ticks) will typically become the primary exit; the tick trail acts as a wider safety net for very large runners.
+
+Set to `0` to disable swing trail entirely and rely solely on the session tick trail.
+
+---
+
+## 29. Swing Trail Activation (ticks profit to arm, 0 = immediate)
+**Recommended:** `20`  
+The swing stop doesn't arm until the position is this many ticks in profit. This prevents a very early wick (on the first 1–2 bars) from closing a good trade at a loss because the swing structure level happens to be below the entry at the start.
+
+Once the profit threshold is exceeded for the first time, the swing trail arms immediately on the next bar close and stays armed for the life of the trade.
+
+Set to `0` to arm from the very first bar close (use only if your entries are already well into profit quickly, e.g. after a strong impulse).
 
 ---
 
@@ -194,9 +237,12 @@ Requires the gap between the Micro EMA (5) and Mid EMA (29) to be at least this 
 | 22 | NY Trail Activation | `80` | ✅ was `60` |
 | 23 | NY Trailing Stop | `40` | ✅ was `30` |
 | 24 | Retrace Touch (ticks) | `5` | — |
-| 25 | Trend EMA Period | `200` | ✅ new |
-| 26 | Min EMA Gap (ticks) | `4` | ✅ new |
+| 25 | Trend EMA Period | `0` (disabled) | ✅ new |
+| 26 | Min EMA Gap (ticks) | `0` (disabled) | ✅ new |
+| 27 | LTF Confirm Bars | `5` | ✅ new |
+| 28 | Swing Trail Lookback Bars | `2` | ✅ new |
+| 29 | Swing Trail Activation (ticks) | `20` | ✅ new |
 
 ---
 
-*Last updated: March 12, 2026 — added confirmation filters (#25–26): Trend EMA and Min EMA gap. RSI removed (fights trend-following logic).*
+*Last updated: March 13, 2026 — added swing-structure trailing stop (#28, #29): stop trails at wick high/low of last N bars, arms after 20-tick profit, replaces tick-trail as primary exit; added LTF 1m confirmation for impulse crosses (#27); Trend EMA and Min Gap filters kept at 0 (disabled); Retrace Touch now acts as legacy fallback only when LTF is off.*
