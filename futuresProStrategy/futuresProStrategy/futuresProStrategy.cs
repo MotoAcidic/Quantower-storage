@@ -110,7 +110,10 @@ namespace futuresProStrategy
         // Maximum loss in dollars per trading day (resets at 6 PM EST). 0 = disabled.
         [InputParameter("Max Daily Loss ($ amount, 0 = disabled)", 22, minimum: 0, maximum: 100000, increment: 50, decimalPlaces: 0)]
         public int MaxDailyLoss { get; set; }
-
+        // Maximum total drawdown in dollars before strategy shuts down completely.
+        // For prop firms: typically $2000. 0 = disabled.
+        [InputParameter("Max Drawdown ($ total, 0 = disabled)", 23, minimum: 0, maximum: 100000, increment: 50, decimalPlaces: 0)]
+        public int MaxDrawdown { get; set; }
         // ─────────────────────────────────────────────────────────────────────
         public override string[] MonitoringConnectionsIds => new[]
         {
@@ -147,6 +150,11 @@ namespace futuresProStrategy
         private double dailyPnl;
         private int    lastResetDay; // day-of-year of last daily reset
         private bool   dailyLimitHit;
+
+        // Total drawdown tracking
+        private double totalRealizedPnl;  // cumulative realized P&L since strategy start
+        private double peakEquity;        // highest total equity seen (realized + unrealized)
+        private bool   drawdownLimitHit;  // true once max drawdown is breached
 
         private double totalNetPl;
         private double totalGrossPl;
@@ -190,6 +198,7 @@ namespace futuresProStrategy
             this.RthEndHour   = 16;
 
             this.MaxDailyLoss = 0; // disabled by default
+            this.MaxDrawdown  = 2000; // $2000 default for prop firm compliance
         }
 
         protected override void OnRun()
@@ -206,6 +215,9 @@ namespace futuresProStrategy
             this.dailyPnl           = 0;
             this.lastResetDay       = -1;
             this.dailyLimitHit      = false;
+            this.totalRealizedPnl   = 0;
+            this.peakEquity         = 0;
+            this.drawdownLimitHit   = false;
 
             if (this.CurrentSymbol != null && this.CurrentSymbol.State == BusinessObjectState.Fake)
                 this.CurrentSymbol = Core.Instance.GetSymbol(this.CurrentSymbol.CreateInfo());
@@ -338,6 +350,10 @@ namespace futuresProStrategy
                 this.waitClosePositions = false;
                 this.inPosition         = false;
 
+                // Update peak equity when flat (all unrealized is now realized)
+                if (this.totalRealizedPnl > this.peakEquity)
+                    this.peakEquity = this.totalRealizedPnl;
+
                 // Cancel any leftover bracket orders
                 var orders = Core.Instance.Orders
                     .Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount)
@@ -367,14 +383,15 @@ namespace futuresProStrategy
                     double close1 = HistoricalDataExtensions.Close(this.hdm, 1);
                     bool trendOk = side == Side.Buy ? close1 > trend1 : close1 < trend1;
 
-                    if (trendOk && !this.dailyLimitHit)
+                    if (trendOk && !this.dailyLimitHit && !this.drawdownLimitHit)
                     {
                         this.PlaceEntry(side);
                     }
                     else
                     {
                         this.Log($"Reverse flip to {side} blocked — " +
-                                 (!trendOk ? $"price {(side == Side.Buy ? "below" : "above")} Trend EMA" : "daily loss limit hit"),
+                                 (!trendOk ? $"price {(side == Side.Buy ? "below" : "above")} Trend EMA" :
+                                  this.drawdownLimitHit ? "max drawdown limit hit" : "daily loss limit hit"),
                                  StrategyLoggingLevel.Trading);
                     }
                 }
@@ -401,21 +418,69 @@ namespace futuresProStrategy
 
             // Track daily P&L in currency for the daily loss cutoff
             if (obj.GrossPnl != null)
+            {
                 this.dailyPnl += obj.GrossPnl.Value;
+                this.totalRealizedPnl += obj.GrossPnl.Value;
+            }
         }
 
-        // Fires every price tick — manages trailing stop
+        // Fires every price tick — manages trailing stop + drawdown monitoring
         private void Hdm_HistoryItemUpdated(object sender, HistoryEventArgs e)
         {
             if (this.waitOpenPosition || this.waitClosePositions)
                 return;
 
-            if (this.TrailActivationTicks <= 0 || this.TrailingStopTicks <= 0)
-                return;
-
             var positions = Core.Instance.Positions
                 .Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount)
                 .ToArray();
+
+            // ── Real-time drawdown + daily loss monitoring (includes unrealized P&L) ──
+            if (positions.Any())
+            {
+                double unrealizedPnlTicks = positions.Sum(x => x.GrossPnLTicks);
+                double tickValue = this.CurrentSymbol.TickSize > 0 ? this.CurrentSymbol.GetTickCost(1) : 0;
+                double unrealizedPnl = unrealizedPnlTicks * tickValue;
+
+                // Daily loss check including unrealized
+                if (this.MaxDailyLoss > 0 && !this.dailyLimitHit)
+                {
+                    double totalDailyPnl = this.dailyPnl + unrealizedPnl;
+                    if (totalDailyPnl <= -this.MaxDailyLoss)
+                    {
+                        this.dailyLimitHit = true;
+                        this.waitClosePositions = true;
+                        this.Log($"DAILY LOSS LIMIT HIT (real-time) — realized: ${this.dailyPnl:F2} + unrealized: ${unrealizedPnl:F2} = ${totalDailyPnl:F2} >= -${this.MaxDailyLoss} cutoff. CLOSING ALL.",
+                                 StrategyLoggingLevel.Trading);
+                        foreach (var pos in positions)
+                            pos.Close();
+                        return;
+                    }
+                }
+
+                // Max drawdown check (total equity from strategy start)
+                if (this.MaxDrawdown > 0 && !this.drawdownLimitHit)
+                {
+                    double currentEquity = this.totalRealizedPnl + unrealizedPnl;
+                    if (currentEquity > this.peakEquity)
+                        this.peakEquity = currentEquity;
+
+                    double drawdown = this.peakEquity - currentEquity;
+                    if (drawdown >= this.MaxDrawdown)
+                    {
+                        this.drawdownLimitHit = true;
+                        this.waitClosePositions = true;
+                        this.Log($"MAX DRAWDOWN LIMIT HIT — peak: ${this.peakEquity:F2}  current: ${currentEquity:F2}  drawdown: ${drawdown:F2} >= ${this.MaxDrawdown}. CLOSING ALL.",
+                                 StrategyLoggingLevel.Trading);
+                        foreach (var pos in positions)
+                            pos.Close();
+                        return;
+                    }
+                }
+            }
+
+            // ── Trailing stop logic ──
+            if (this.TrailActivationTicks <= 0 || this.TrailingStopTicks <= 0)
+                return;
 
             if (!positions.Any())
                 return;
@@ -480,7 +545,7 @@ namespace futuresProStrategy
             // ── Daily P&L reset at 6 PM EST ──────────────────────────────────
             this.CheckDailyReset();
 
-            if (this.dailyLimitHit)
+            if (this.dailyLimitHit || this.drawdownLimitHit)
                 return;
 
             // EMA values: GetValue(1) = last fully closed bar
@@ -699,7 +764,10 @@ namespace futuresProStrategy
             else
             {
                 this.inPosition = true;
-                this.Log($"{side} position opened", StrategyLoggingLevel.Trading);
+                this.Log($"{side} position opened — SL: {StopLossTicks}t" +
+                         (TakeProfitTicks > 0 ? $"  TP: {TakeProfitTicks}t" : "") +
+                         $"  (bracket SL/TP should appear on chart)",
+                         StrategyLoggingLevel.Trading);
             }
         }
 
