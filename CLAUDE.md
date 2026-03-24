@@ -84,7 +84,85 @@ This document provides technical context and logic documentation for all trading
 
 ---
 
-### 1. Box Range Strategy (`boxRangeStrategy`)
+### 1. Futures Pro Strategy (`futuresProStrategy`)
+**File:** `futuresProStrategy/futuresProStrategy/futuresProStrategy.cs`
+**Build output:** `C:\Quantower\Settings\Scripts\Strategies\futuresProStrategy\futuresProStrategy.dll`
+**Readme:** `futuresProStrategy/readme.md`
+
+#### Core Logic
+- Multi-factor trend-following for MES / ES / NQ on any chosen timeframe (default 5m)
+- Entry requires a fresh 9/21 EMA cross on bar close — no mid-bar signals
+- Five stacked filters must all pass: EMA cross + 200 EMA trend direction + RSI + MACD (optional) + RTH session gate (optional)
+- Reverse cross closes current trade and re-enters opposite direction only if trend filter AND all entry filters agree; otherwise goes flat
+- Optional mean reversion modes: **bounce** (arm near 200 EMA, enter on first cross back in trend direction) and **fade** (arm when overextended, enter counter-trend targeting 200 EMA as TP)
+- Real-time trailing stop (tick level), daily loss cap (includes unrealized P&L), and total drawdown ceiling (prop firm safe)
+
+#### Entry Flow (bar close)
+1. Check daily/drawdown limits — halt if either hit
+2. If in position: check for reverse cross; close and optionally queue flip
+3. If flat: require `bullishCross` or `bearishCross` (one-bar strict crossover)
+4. If `MeanRevMode` bounce armed: enter on matching cross (skips trend filter — price was just AT the trend EMA)
+5. If `MeanRevMode` fade armed: enter counter-trend cross when overextended
+6. Standard entries: run all 4 filters (trend, RSI, MACD, RTH) before placing
+
+#### Exit Flow
+- **Reverse cross** → close, queue flip, re-open in `Core_PositionRemoved` if all filters agree
+- **Trailing stop** (tick-level in `Hdm_HistoryItemUpdated`) → activates at `TrailActivationTicks` profit; closes on pullback > `TrailingStopTicks` from peak
+- **Hard SL / TP** → bracket order placed at entry
+- **Daily loss / drawdown** → real-time check with unrealized P&L included; closes immediately when threshold hit
+
+#### Key Private Fields
+| Field | Purpose |
+|---|---|
+| `fastEma` / `slowEma` / `trendEma` | EMA indicators for cross and trend filter |
+| `rsi` / `macd` | RSI and MACD indicators |
+| `pendingEntrySide` | Queued reverse-cross flip (fires in `Core_PositionRemoved`) |
+| `trailingActivated` / `bestPrice` / `currentSide` | Trailing stop state |
+| `meanRevBounceArmed` | Side direction armed for mean rev bounce entry |
+| `dailyPnl` / `dailyLimitHit` / `lastResetDay` | Daily loss cap state (resets at 6 PM EST) |
+| `totalRealizedPnl` / `peakEquity` / `drawdownLimitHit` | Max drawdown tracking |
+
+#### Parameters (InputParameter index order)
+| # | Name | Default | Notes |
+|---|---|---|---|
+| 0 | Symbol | — | Trading instrument |
+| 1 | Account | — | Trading account |
+| 2 | Fast EMA | 9 | Fast EMA period |
+| 3 | Slow EMA | 21 | Slow EMA period |
+| 4 | Trend EMA Period | 200 | Direction filter; entries blocked against it |
+| 5 | RSI Period | 14 | RSI lookback |
+| 6 | RSI Overbought | 70 | Blocks long if RSI ≥ value |
+| 7 | RSI Oversold | 30 | Blocks short if RSI ≤ value |
+| 8 | MACD Filter | 0 | 0=off, 1=histogram must agree |
+| 9 | MACD Fast Period | 12 | — |
+| 10 | MACD Slow Period | 26 | — |
+| 11 | MACD Signal Period | 9 | — |
+| 12 | Period | MIN5 | Chart timeframe |
+| 13 | Start Point | -30 days | Historical data start |
+| 14 | Quantity | 1 | Contracts per trade |
+| 15 | Stop Loss (ticks) | 80 | Hard bracket SL |
+| 16 | Take Profit (ticks) | 0 | 0=disabled; use trailing instead |
+| 17 | Trail Activate At (ticks) | 40 | Profit to arm trailing; 0=off |
+| 18 | Trailing Stop (ticks) | 20 | Pullback from peak to close; 0=off |
+| 19 | RTH Only | 0 | 0=24h, 1=block entries outside RTH |
+| 20 | RTH Start Hour (EST) | 9 | — |
+| 21 | RTH End Hour (EST) | 16 | — |
+| 22 | Max Daily Loss ($) | 0 | 0=disabled; resets at 6 PM EST |
+| 23 | Max Drawdown ($) | 2000 | Total equity ceiling since strategy start; 0=off |
+| 24 | Max Trend EMA Distance (ticks) | 0 | Blocks entries if price too far from 200 EMA; 0=off |
+| 25 | MeanRev Mode | 0 | 0=off, 1=bounce, 2=fade, 3=both |
+| 26 | MeanRev Bounce Arm (ticks) | 20 | Distance to 200 EMA to arm bounce |
+| 27 | MeanRev Fade Arm (ticks) | 60 | Distance from 200 EMA to arm fade |
+
+#### API / Platform Notes
+- RTH gate uses `DateTimeUtcNow` (live clock), not bar timestamp — RTH filtering is inaccurate in backtest/replay mode
+- `GetValue(1)` used for all signal reads (last closed bar); `GetValue(0)` only safe in tick handler
+- `MaxDrawdown` never resets; restart strategy instance to clear it
+- Reverse-cross flip is gated: position closes regardless, but re-entry only fires if trend + all filters agree for the new side
+
+---
+
+### 2. Box Range Strategy (`boxRangeStrategy`)
 **File:** `boxRangeStrategy/boxRangeStrategy/boxRangeStrategy.cs`
 
 #### Core Logic
@@ -107,7 +185,7 @@ This document provides technical context and logic documentation for all trading
 
 ---
 
-### 2. Price Surge Strategy (`priceSurgeStrategy`) 
+### 3. Price Surge Strategy (`priceSurgeStrategy`) 
 **File:** `priceSurgeStrategy/priceSurgeStrategy/priceSurgeStrategy.cs`
 
 #### Core Logic
@@ -129,7 +207,7 @@ This document provides technical context and logic documentation for all trading
 
 ---
 
-### 3. Range Scalp Strategy (`rangeScalpStrategy`)
+### 4. Range Scalp Strategy (`rangeScalpStrategy`)
 **File:** `rangeScalpStrategy/rangeScalpStrategy/rangeScalpStrategy.cs`
 
 #### Core Logic
@@ -151,7 +229,7 @@ This document provides technical context and logic documentation for all trading
 
 ---
 
-### 4. SMA Cross Strategy (`smaCrossStrategy`)
+### 5. SMA Cross Strategy (`smaCrossStrategy`)
 **File:** `smaCrossStrategy/smaCrossStrategy/smaCrossStrategy.cs`
 
 #### Core Logic
@@ -175,7 +253,7 @@ This document provides technical context and logic documentation for all trading
 
 ---
 
-### 5. Price Slope Change Strategy (`priceSlopeChangeStrategy`)
+### 6. Price Slope Change Strategy (`priceSlopeChangeStrategy`)
 **File:** `smaSlopeChangeStrategy/priceSlopeChangeStrategy/priceSlopeChangeStrategy.cs`
 
 #### Core Logic
@@ -197,7 +275,7 @@ This document provides technical context and logic documentation for all trading
 
 ---
 
-### 6. Weighted Surge Strategy (`weightedSurgeStrategy`)
+### 7. Weighted Surge Strategy (`weightedSurgeStrategy`)
 **File:** `weightedSurgeStrategy/weightedSurgeStrategy/weightedSurgeStrategy.cs`
 
 #### Core Logic
@@ -219,7 +297,7 @@ This document provides technical context and logic documentation for all trading
 
 ---
 
-### 7. Gold ORB Strategy (`goldOrbStrategy`) 
+### 8. Gold ORB Strategy (`goldOrbStrategy`) 
 **File:** `goldOrbStrategy/goldOrbStrategy/goldOrbStrategy.cs`
 
 #### Core Logic
@@ -298,6 +376,7 @@ double low_1 = HistoricalDataExtensions.Low(this.hdm, 1);
 ✅ Parameter validation and error handling implemented
 ✅ Risk management controls in place
 ✅ `emaCrossStrategy` — actively developed; last build 0 errors 0 warnings (.NET 8, Release)
+✅ `futuresProStrategy` — actively running on MESM6; filters confirmed via live log analysis
 
 ---
 
