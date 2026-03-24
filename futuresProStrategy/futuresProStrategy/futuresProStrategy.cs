@@ -44,22 +44,22 @@ namespace futuresProStrategy
         [InputParameter("Slow EMA", 3, minimum: 2, maximum: 500, increment: 1, decimalPlaces: 0)]
         public int SlowEmaLen { get; set; }
 
-        [InputParameter("Trend EMA (major trend filter)", 4, minimum: 10, maximum: 1000, increment: 10, decimalPlaces: 0)]
+        [InputParameter("Trend EMA Period", 4, minimum: 10, maximum: 1000, increment: 10, decimalPlaces: 0)]
         public int TrendEmaLen { get; set; }
 
         // ── RSI filter ────────────────────────────────────────────────────────
         [InputParameter("RSI Period", 5, minimum: 2, maximum: 100, increment: 1, decimalPlaces: 0)]
         public int RsiPeriod { get; set; }
 
-        [InputParameter("RSI Overbought (block longs above this)", 6, minimum: 50, maximum: 100, increment: 5, decimalPlaces: 0)]
+        [InputParameter("RSI Overbought (blocks long entry)", 6, minimum: 50, maximum: 100, increment: 5, decimalPlaces: 0)]
         public int RsiOverbought { get; set; }
 
-        [InputParameter("RSI Oversold (block shorts below this)", 7, minimum: 0, maximum: 50, increment: 5, decimalPlaces: 0)]
+        [InputParameter("RSI Oversold (blocks short entry)", 7, minimum: 0, maximum: 50, increment: 5, decimalPlaces: 0)]
         public int RsiOversold { get; set; }
 
         // ── MACD filter (optional) ────────────────────────────────────────────
         // 0 = MACD filter disabled; 1 = MACD histogram must agree with direction
-        [InputParameter("Use MACD filter (0=off, 1=on)", 8, minimum: 0, maximum: 1, increment: 1, decimalPlaces: 0)]
+        [InputParameter("MACD Filter (0=off, 1=on)", 8, minimum: 0, maximum: 1, increment: 1, decimalPlaces: 0)]
         public int UseMacd { get; set; }
 
         [InputParameter("MACD Fast Period", 9, minimum: 2, maximum: 100, increment: 1, decimalPlaces: 0)]
@@ -85,35 +85,53 @@ namespace futuresProStrategy
         [InputParameter("Stop Loss (ticks)", 15, minimum: 1, maximum: 10000, increment: 1, decimalPlaces: 0)]
         public int StopLossTicks { get; set; }
 
-        [InputParameter("Take Profit (ticks, 0 = disabled)", 16, minimum: 0, maximum: 10000, increment: 1, decimalPlaces: 0)]
+        [InputParameter("Take Profit (ticks, 0=off)", 16, minimum: 0, maximum: 10000, increment: 1, decimalPlaces: 0)]
         public int TakeProfitTicks { get; set; }
 
         // ── Trailing stop ─────────────────────────────────────────────────────
-        [InputParameter("Trail Activation (ticks profit to start, 0 = disabled)", 17, minimum: 0, maximum: 2000, increment: 5, decimalPlaces: 0)]
+        [InputParameter("Trail Activate At (ticks profit, 0=off)", 17, minimum: 0, maximum: 2000, increment: 5, decimalPlaces: 0)]
         public int TrailActivationTicks { get; set; }
 
-        [InputParameter("Trailing Stop (ticks from peak, 0 = disabled)", 18, minimum: 0, maximum: 2000, increment: 5, decimalPlaces: 0)]
+        [InputParameter("Trailing Stop (ticks from peak, 0=off)", 18, minimum: 0, maximum: 2000, increment: 5, decimalPlaces: 0)]
         public int TrailingStopTicks { get; set; }
 
         // ── Session filter ────────────────────────────────────────────────────
         // 0 = trade 24h; 1 = new entries only during RTH window
-        [InputParameter("RTH Only (0=24h, 1=RTH entries only)", 19, minimum: 0, maximum: 1, increment: 1, decimalPlaces: 0)]
+        [InputParameter("RTH Only (0=24h, 1=RTH only)", 19, minimum: 0, maximum: 1, increment: 1, decimalPlaces: 0)]
         public int RthOnly { get; set; }
 
-        [InputParameter("RTH Start Hour (EST, e.g. 9 = 9:30 AM)", 20, minimum: 0, maximum: 23, increment: 1, decimalPlaces: 0)]
+        [InputParameter("RTH Start Hour (EST, 9=9AM)", 20, minimum: 0, maximum: 23, increment: 1, decimalPlaces: 0)]
         public int RthStartHour { get; set; }
 
-        [InputParameter("RTH End Hour (EST, e.g. 16 = 4:00 PM)", 21, minimum: 0, maximum: 23, increment: 1, decimalPlaces: 0)]
+        [InputParameter("RTH End Hour (EST, 16=4PM)", 21, minimum: 0, maximum: 23, increment: 1, decimalPlaces: 0)]
         public int RthEndHour { get; set; }
 
         // ── Daily risk ────────────────────────────────────────────────────────
         // Maximum loss in dollars per trading day (resets at 6 PM EST). 0 = disabled.
-        [InputParameter("Max Daily Loss ($ amount, 0 = disabled)", 22, minimum: 0, maximum: 100000, increment: 50, decimalPlaces: 0)]
+        [InputParameter("Max Daily Loss ($, 0=off)", 22, minimum: 0, maximum: 100000, increment: 50, decimalPlaces: 0)]
         public int MaxDailyLoss { get; set; }
         // Maximum total drawdown in dollars before strategy shuts down completely.
         // For prop firms: typically $2000. 0 = disabled.
-        [InputParameter("Max Drawdown ($ total, 0 = disabled)", 23, minimum: 0, maximum: 100000, increment: 50, decimalPlaces: 0)]
+        [InputParameter("Max Drawdown ($, 0=off)", 23, minimum: 0, maximum: 100000, increment: 50, decimalPlaces: 0)]
         public int MaxDrawdown { get; set; }
+
+        // ── Mean reversion ────────────────────────────────────────────────────
+        // Blocks trend entries when price is too far from the Trend EMA. 0 = disabled.
+        [InputParameter("Max Trend EMA Distance (ticks, 0=off)", 24, minimum: 0, maximum: 2000, increment: 10, decimalPlaces: 0)]
+        public int MaxExtensionTicks { get; set; }
+
+        // 0=off  1=bounce off 200  2=fade extension  3=both
+        [InputParameter("MeanRev Mode (0=off 1=bnce 2=fade 3=both)", 25, minimum: 0, maximum: 3, increment: 1, decimalPlaces: 0)]
+        public int MeanRevMode { get; set; }
+
+        // Proximity to Trend EMA (ticks) to arm a bounce re-entry in trend direction.
+        [InputParameter("MeanRev Bounce Arm (ticks to 200 EMA)", 26, minimum: 1, maximum: 500, increment: 5, decimalPlaces: 0)]
+        public int MeanRevTouchTicks { get; set; }
+
+        // Distance from Trend EMA (ticks) to arm a counter-trend fade entry.
+        [InputParameter("MeanRev Fade Arm (ticks from 200 EMA)", 27, minimum: 1, maximum: 2000, increment: 10, decimalPlaces: 0)]
+        public int MeanRevExtensionTicks { get; set; }
+
         // ─────────────────────────────────────────────────────────────────────
         public override string[] MonitoringConnectionsIds => new[]
         {
@@ -145,6 +163,9 @@ namespace futuresProStrategy
         private bool   trailingActivated;
         private double bestPrice;
         private Side   currentSide;
+
+        // Mean reversion state
+        private Side? meanRevBounceArmed;
 
         // Daily P&L tracking (in currency)
         private double dailyPnl;
@@ -199,6 +220,12 @@ namespace futuresProStrategy
 
             this.MaxDailyLoss = 0; // disabled by default
             this.MaxDrawdown  = 2000; // $2000 default for prop firm compliance
+
+            // Mean reversion defaults
+            this.MaxExtensionTicks    = 0;   // disabled — no extension cap by default
+            this.MeanRevMode          = 0;   // off by default
+            this.MeanRevTouchTicks    = 20;  // arm bounce when within 20t of 200 EMA
+            this.MeanRevExtensionTicks = 60; // arm fade when 60t+ from 200 EMA
         }
 
         protected override void OnRun()
@@ -212,6 +239,7 @@ namespace futuresProStrategy
             this.pendingEntrySide   = null;
             this.trailingActivated  = false;
             this.bestPrice          = 0;
+            this.meanRevBounceArmed = null;
             this.dailyPnl           = 0;
             this.lastResetDay       = -1;
             this.dailyLimitHit      = false;
@@ -604,14 +632,87 @@ namespace futuresProStrategy
             }
             else
             {
-                // ── Entry logic — requires all filters to pass ────────────────
+                // ── Entry logic ────────────────────────────────────────────────
                 if (this.inPosition)
                     return;
 
+                double tickSize      = this.CurrentSymbol.TickSize;
+                double distFromTrend = Math.Abs(close1 - trend1);
+                double distTicks     = tickSize > 0 ? distFromTrend / tickSize : 0;
+
+                bool bounceMode = this.MeanRevMode == 1 || this.MeanRevMode == 3;
+                bool fadeMode   = this.MeanRevMode == 2 || this.MeanRevMode == 3;
+
+                // ── Bounce arm tracking: runs every bar (no cross needed to arm) ──
+                if (bounceMode && this.MeanRevTouchTicks > 0)
+                {
+                    if (distTicks <= this.MeanRevTouchTicks)
+                    {
+                        // Arm in the direction of the trend at the touch point
+                        this.meanRevBounceArmed = close1 >= trend1 ? Side.Buy : Side.Sell;
+                    }
+                    else if (distTicks > this.MeanRevTouchTicks * 2.5 && this.meanRevBounceArmed.HasValue)
+                    {
+                        this.Log($"Mean rev bounce disarmed — price {distTicks:F0}t from Trend EMA",
+                                 StrategyLoggingLevel.Trading);
+                        this.meanRevBounceArmed = null;
+                    }
+                }
+
+                // All entry types require a fresh cross
                 if (!bullishCross && !bearishCross)
                     return;
 
+                // ── Mean rev BOUNCE entry (mode 1/3) ──────────────────────────
+                // Armed when price was near the 200 EMA; enter on first cross back
+                // in the trend direction (classic 200 EMA bounce with EMA confirmation)
+                if (bounceMode && this.meanRevBounceArmed.HasValue)
+                {
+                    Side bounceSide  = this.meanRevBounceArmed.Value;
+                    bool bounceCross = bounceSide == Side.Buy ? bullishCross : bearishCross;
+
+                    if (bounceCross && this.CheckRsiFilter(bounceSide) && this.CheckMacdFilter(bounceSide)
+                        && (this.RthOnly == 0 || this.IsInRth()))
+                    {
+                        this.Log($"Mean rev BOUNCE {bounceSide} — {distTicks:F0}t from Trend EMA {trend1:F2}",
+                                 StrategyLoggingLevel.Trading);
+                        this.meanRevBounceArmed = null;
+                        this.PlaceEntry(bounceSide);
+                        return;
+                    }
+                }
+
+                // ── Mean rev FADE entry (mode 2/3) ────────────────────────────
+                // Price is overextended from the 200 EMA; fade back against the thrust,
+                // targeting the 200 EMA as take-profit
+                if (fadeMode && this.MeanRevExtensionTicks > 0 && distTicks >= this.MeanRevExtensionTicks)
+                {
+                    bool aboveTrend = close1 > trend1;
+                    Side fadeSide   = aboveTrend ? Side.Sell : Side.Buy;
+                    bool fadeCross  = fadeSide == Side.Sell ? bearishCross : bullishCross;
+
+                    if (fadeCross && this.CheckRsiFilter(fadeSide) && this.CheckMacdFilter(fadeSide)
+                        && (this.RthOnly == 0 || this.IsInRth()))
+                    {
+                        // Auto-set TP to approximately the 200 EMA distance
+                        int tpTicks = (int)Math.Max(1.0, Math.Round(distTicks));
+                        this.Log($"Mean rev FADE {fadeSide} — {distTicks:F0}t from Trend EMA {trend1:F2}, auto TP: {tpTicks}t",
+                                 StrategyLoggingLevel.Trading);
+                        this.PlaceEntry(fadeSide, tpTicks);
+                        return;
+                    }
+                }
+
+                // ── Standard trend-following entry ────────────────────────────
                 Side entrySide = bullishCross ? Side.Buy : Side.Sell;
+
+                // Filter 0: Max extension from Trend EMA (prevents buying overextended tops)
+                if (this.MaxExtensionTicks > 0 && distTicks > this.MaxExtensionTicks)
+                {
+                    this.Log($"Entry {entrySide} blocked — {distTicks:F0}t from Trend EMA (max {MaxExtensionTicks}t allowed)",
+                             StrategyLoggingLevel.Trading);
+                    return;
+                }
 
                 // Filter 1: Trend EMA — price must be on the right side
                 bool trendFilter = entrySide == Side.Buy ? close1 > trend1 : close1 < trend1;
@@ -724,15 +825,18 @@ namespace futuresProStrategy
 
         // ── Execution ─────────────────────────────────────────────────────────
 
-        private void PlaceEntry(Side side)
+        // tpTicksOverride: if >= 0, overrides TakeProfitTicks (used by mean-rev fade entries
+        // to auto-set TP at the distance to the 200 EMA)
+        private void PlaceEntry(Side side, int tpTicksOverride = -1)
         {
+            int effectiveTpTicks = tpTicksOverride >= 0 ? tpTicksOverride : this.TakeProfitTicks;
             double rsiVal = this.rsi.GetValue(1);
             string macdStr = this.macd != null ? $"  MACD-H:{this.macd.GetValue(1, 2):F2}" : "";
 
             this.Log($"Entry: {side} | Fast:{this.fastEma.GetValue(1):F2}  Slow:{this.slowEma.GetValue(1):F2}  " +
                      $"Trend:{this.trendEma.GetValue(1):F2}  RSI:{rsiVal:F1}{macdStr}  " +
                      $"SL:{StopLossTicks}t" +
-                     (TakeProfitTicks > 0 ? $"  TP:{TakeProfitTicks}t" : "") +
+                     (effectiveTpTicks > 0 ? $"  TP:{effectiveTpTicks}t" : "") +
                      (TrailingStopTicks > 0 && TrailActivationTicks > 0
                          ? $"  Trail:{TrailActivationTicks}t/{TrailingStopTicks}t"
                          : ""),
@@ -751,8 +855,8 @@ namespace futuresProStrategy
                 Quantity    = this.Quantity,
                 Side        = side,
                 StopLoss    = SlTpHolder.CreateSL(this.StopLossTicks, PriceMeasurement.Offset),
-                TakeProfit  = this.TakeProfitTicks > 0
-                    ? SlTpHolder.CreateTP(this.TakeProfitTicks, PriceMeasurement.Offset)
+                TakeProfit  = effectiveTpTicks > 0
+                    ? SlTpHolder.CreateTP(effectiveTpTicks, PriceMeasurement.Offset)
                     : null,
             });
 
@@ -765,7 +869,7 @@ namespace futuresProStrategy
             {
                 this.inPosition = true;
                 this.Log($"{side} position opened — SL: {StopLossTicks}t" +
-                         (TakeProfitTicks > 0 ? $"  TP: {TakeProfitTicks}t" : "") +
+                         (effectiveTpTicks > 0 ? $"  TP: {effectiveTpTicks}t" : "") +
                          $"  (bracket SL/TP should appear on chart)",
                          StrategyLoggingLevel.Trading);
             }
