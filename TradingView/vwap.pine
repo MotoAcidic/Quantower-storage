@@ -1,0 +1,112 @@
+//@version=6
+indicator(title="VWAP + EMA9 With Signals", shorttitle="VWAP+EMA9 Signals", overlay=true, timeframe="", timeframe_gaps=true)
+
+// VWAP Inputs
+hideonDWM = input(false, title="Hide VWAP on 1D or Above", group="VWAP Settings", display = display.data_window)
+var anchor = input.string(defval = "Session", title="Anchor Period",
+ options=["Session", "Week", "Month", "Quarter", "Year", "Decade", "Century", "Earnings", "Dividends", "Splits"], group="VWAP Settings")
+src = input(title = "Source", defval = hlc3, group="VWAP Settings", display = display.data_window)
+offset = input.int(0, title="Offset", group="VWAP Settings", minval=0, display = display.data_window)
+
+BANDS_GROUP = "Bands Settings"
+calcModeInput = input.string("Standard Deviation", "Bands Calculation Mode",
+ options = ["Standard Deviation", "Percentage"], group = BANDS_GROUP, display = display.data_window)
+
+showBand_2 = input(false, title = "", group = BANDS_GROUP, inline = "band_2", display = display.data_window)
+bandMult_2 = input.float(2.0, title = "Bands Multiplier #2", group = BANDS_GROUP, inline = "band_2", step = 0.5, minval=0, display = display.data_window, active = showBand_2)
+
+showBand_3 = input(false, title = "", group = BANDS_GROUP, inline = "band_3", display = display.data_window)
+bandMult_3 = input.float(3.0, title = "Bands Multiplier #3", group = BANDS_GROUP, inline = "band_3", step = 0.5, minval=0, display = display.data_window, active = showBand_3)
+
+// VWAP Core
+cumVolume = ta.cum(volume)
+if barstate.islast and cumVolume == 0
+    runtime.error("No volume is provided by the data vendor.")
+
+new_earnings = request.earnings(syminfo.tickerid, earnings.actual, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+new_dividends = request.dividends(syminfo.tickerid, dividends.gross, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+new_split = request.splits(syminfo.tickerid, splits.denominator, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+
+isNewPeriod = switch anchor
+    "Earnings"  => not na(new_earnings)
+    "Dividends" => not na(new_dividends)
+    "Splits"    => not na(new_split)
+    "Session"   => timeframe.change("D")
+    "Week"      => timeframe.change("W")
+    "Month"     => timeframe.change("M")
+    "Quarter"   => timeframe.change("3M")
+    "Year"      => timeframe.change("12M")
+    "Decade"    => timeframe.change("12M") and year % 10 == 0
+    "Century"   => timeframe.change("12M") and year % 100 == 0
+    => false
+
+if na(src[1]) and anchor != "Earnings" and anchor != "Dividends" and anchor != "Splits"
+    isNewPeriod := true
+
+float vwapValue = na
+float upperBandValue2 = na
+float lowerBandValue2 = na
+float upperBandValue3 = na
+float lowerBandValue3 = na
+
+if not (hideonDWM and timeframe.isdwm)
+    [_vwap, _stdevUpper, _] = ta.vwap(src, isNewPeriod, 1)
+    vwapValue := _vwap
+    stdevAbs = _stdevUpper - _vwap
+    bandBasis = calcModeInput == "Standard Deviation" ? stdevAbs : _vwap * 0.01
+
+    upperBandValue2 := _vwap + bandBasis * bandMult_2
+    lowerBandValue2 := _vwap - bandBasis * bandMult_2
+    upperBandValue3 := _vwap + bandBasis * bandMult_3
+    lowerBandValue3 := _vwap - bandBasis * bandMult_3
+
+// VWAP — now ORANGE
+plot(vwapValue, title="VWAP", color=color.orange, offset=offset)
+
+// Remaining bands #2 & #3
+upperBand_2 = plot(upperBandValue2, title="Upper Band #2", color=color.olive, offset=offset, display=showBand_2 ? display.all : display.none)
+lowerBand_2 = plot(lowerBandValue2, title="Lower Band #2", color=color.olive, offset=offset, display=showBand_2 ? display.all : display.none)
+fill(upperBand_2, lowerBand_2, title="Bands Fill #2", color=color.new(color.olive, 95), display=showBand_2 ? display.all : display.none)
+
+upperBand_3 = plot(upperBandValue3, title="Upper Band #3", color=color.teal, offset=offset, display=showBand_3 ? display.all : display.none)
+lowerBand_3 = plot(lowerBandValue3, title="Lower Band #3", color=color.teal, offset=offset, display=showBand_3 ? display.all : display.none)
+fill(upperBand_3, lowerBand_3, title="Bands Fill #3", color=color.new(color.teal, 95), display=showBand_3 ? display.all : display.none)
+
+
+// ─────────────────────────────────────
+// EMA9 — now BLUE
+// ─────────────────────────────────────
+emaLength = input.int(9, "EMA Length", group="EMA Settings")
+ema9 = ta.ema(close, emaLength)
+plot(ema9, title="EMA 9", color=color.blue, linewidth=2)
+
+
+// ─────────────────────────────────────
+// CROSSOVER SIGNALS
+// ─────────────────────────────────────
+emaCrossUp   = ta.crossover(ema9, vwapValue)
+emaCrossDown = ta.crossunder(ema9, vwapValue)
+
+plotshape(emaCrossUp, title="EMA Crosses Above VWAP", style=shape.triangleup,   color=color.blue, size=size.small, location=location.belowbar)
+plotshape(emaCrossDown, title="EMA Crosses Below VWAP", style=shape.triangledown, color=color.red,  size=size.small, location=location.abovebar)
+
+
+// ─────────────────────────────────────
+// NON-REPEATING BUY / SELL SIGNALS
+// ─────────────────────────────────────
+aboveBoth = close > ema9 and close > vwapValue
+belowBoth = close < ema9 and close < vwapValue
+
+aboveBoth_prev = close[1] > ema9[1] and close[1] > vwapValue[1]
+belowBoth_prev = close[1] < ema9[1] and close[1] < vwapValue[1]
+
+buySignal  = aboveBoth and not aboveBoth_prev
+sellSignal = belowBoth and not belowBoth_prev
+
+plotshape(buySignal, title="Buy Signal", style=shape.labelup, text="BUY", 
+     color=color.new(color.blue, 0), textcolor=color.white, size=size.tiny, location=location.belowbar)
+
+plotshape(sellSignal, title="Sell Signal", style=shape.labeldown, text="SELL", 
+     color=color.new(color.red, 0), textcolor=color.white, size=size.tiny, location=location.abovebar)
+
+

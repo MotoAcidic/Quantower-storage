@@ -6,17 +6,17 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <Platforms>AnyCPU</Platforms>
     <AlgoType>Strategy</AlgoType>
-    <AssemblyName>goldOrbStrategy</AssemblyName>
-    <RootNamespace>goldOrbStrategy</RootNamespace>
+    <AssemblyName>futuresProStrategy-Backup</AssemblyName>
+    <RootNamespace>futuresProStrategy</RootNamespace>
     <StartAction>Program</StartAction>
     <StartProgram>C:\Quantower\TradingPlatform\v1.146.18\Console.StarterNew.exe</StartProgram>
-    <StartArguments>--address 127.0.0.1 --port 61742</StartArguments>
+    <StartArguments>--address 127.0.0.1 --port 62743</StartArguments>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
-    <OutputPath>C:\Quantower\TradingPlatform\v1.146.18\..\..\Settings\Scripts\Strategies\goldOrbStrategy</OutputPath>
+     <OutputPath>C:\Quantower\TradingPlatform\v1.146.18\..\..\Settings\Scripts\Strategies\futuresProStrategy-Backup</OutputPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
-    <OutputPath>C:\Quantower\TradingPlatform\v1.146.18\..\..\Settings\Scripts\Strategies\goldOrbStrategy</OutputPath>
+     <OutputPath>C:\Quantower\TradingPlatform\v1.146.18\..\..\Settings\Scripts\Strategies\futuresProStrategy-Backup</OutputPath>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="TradingPlatform.BusinessLayer">

@@ -297,6 +297,43 @@ This document provides technical context and logic documentation for all trading
 
 ---
 
+### 9. TV Confluence Strategy (`tvConfluenceStrategy`) — added 2026-09-12
+**File:** `tvConfluenceStrategy/tvConfluenceStrategy/tvConfluenceStrategy.cs`
+**Readme:** `tvConfluenceStrategy/readme.md`
+**Build output:** `C:\Quantower\Settings\Scripts\Strategies\tvConfluenceStrategy\tvConfluenceStrategy.dll`
+
+#### Core Logic
+- Combines three TradingView indicators from `TradingView/` into one confluence-gated system: **Trendlines.pine** (LuxAlgo trendline break), **keltnerChannel.pine** (Keltner Channel mean-reversion), **supportResistanceChannels.pine** (LonesomeTheBlue S/R channel break)
+- Each detector votes LONG/SHORT/nothing on bar close; entry fires only once `MinConfluencesRequired` of the *enabled* detectors agree on direction
+- Math is a direct, verified port of DayTrader-Portable's `confluences.ts` (`trendline_break`/`keltner_reversion`/`sr_channel_break`) — same pivot definition, same ATR/EMA formulas, same edge-case handling, not a re-derivation from the raw .pine
+- Bar-close only (no intrabar re-evaluation — pivots/zones are a "confirmed shape" question, not a tick-level one)
+- Flat-only entries — unlike the EMA-cross strategies, does NOT flip on an opposite signal while in a position; managed purely by SL/TP/trailing/daily-loss/drawdown until flat, matching the DayTrader-Portable confluence system's own "independent one-shot signal" philosophy rather than a continuous cross state
+
+#### Key Private Fields
+| Field | Purpose |
+|---|---|
+| `barsNeeded` | Computed in `OnRun()` from whichever enabled detector needs the most history |
+| `BuildBarArray()` | Builds an ascending `Bar[]` from `HistoricalDataExtensions.High/Low/Close` offsets, mirroring confluences.ts's `Bar[]` convention |
+| `EvaluateTrendlineBreak` / `EvaluateKeltnerReversion` / `EvaluateSrChannelBreak` | The three ported detectors, each returning a `ConfluenceResult { Met, Direction, Strength, Detail }` |
+| `trailingActivated` / `bestPrice` / `currentSide` | Trailing stop state (same pattern as `futuresProStrategy`) |
+| `dailyPnl` / `dailyLimitHit` / `totalRealizedPnl` / `peakEquity` / `drawdownLimitHit` | Daily loss cap + max drawdown state (same pattern as `futuresProStrategy`) |
+
+#### Parameters (InputParameter index order)
+See `tvConfluenceStrategy/readme.md` for the full table (27 parameters: instrument/period/quantity, 3 params per detector + an on/off toggle each, min-confluences gate, SL/TP/trailing, RTH, daily loss, max drawdown).
+
+#### What was simplified vs. the raw .pine scripts
+- Trendlines.pine's `Stdev`/`Linreg` slope modes not ported (ATR mode only)
+- keltnerChannel.pine's embedded WaveTrend oscillator and overbought/oversold circle markers not ported (Keltner Channel band only)
+- supportResistanceChannels.pine's Close/Open pivot source option and per-touch strength weighting not ported
+- Full detail and rationale in the readme.
+
+#### API / Platform Notes
+- Confirmed `HistoricalDataExtensions.Close/High/Low(hdm, offset)` still resolves as a static extension method against v1.146.18 — same signature as every other strategy in this repo
+- Deliberately does NOT use `Core.Instance.Indicators.BuiltIn.*` for EMA/ATR — computes both directly from the bar array (see "Platform version notes" below for why)
+- Verified with a clean `dotnet build` (0 errors, 0 warnings) against the currently-installed Quantower v1.146.18 / .NET 10
+
+---
+
 ### 8. Gold ORB Strategy (`goldOrbStrategy`) 
 **File:** `goldOrbStrategy/goldOrbStrategy/goldOrbStrategy.cs`
 
@@ -377,6 +414,82 @@ double low_1 = HistoricalDataExtensions.Low(this.hdm, 1);
 ✅ Risk management controls in place
 ✅ `emaCrossStrategy` — actively developed; last build 0 errors 0 warnings (.NET 8, Release)
 ✅ `futuresProStrategy` — actively running on MESM6; filters confirmed via live log analysis
+✅ `tvConfluenceStrategy` — new 2026-09-12, verified with a clean `dotnet build` (0 errors, 0 warnings), not yet run live/paper
+
+### Platform Version Notes (2026-09-12)
+
+The installed Quantower platform had moved on to **v1.146.18** while every
+`.csproj` in this repo still pointed at **v1.145.16/17** (a version that no
+longer exists on disk) and targeted **.NET 8**, while v1.146.18's
+`TradingPlatform.BusinessLayer.dll` now requires **.NET 10**. Net effect:
+`dotnet build` failed on every single strategy in this repo before today,
+not just new ones — confirmed by actually running `dotnet build` (no Visual
+Studio needed; the plain CLI is enough once the `.csproj` points at a real
+install).
+
+**Fixed across every active (non-`Backup`) project** — a path/TFM bump only,
+no logic changes:
+- `<HintPath>`/`<StartProgram>` bumped from `v1.145.16`/`v1.145.17` → `v1.146.18`
+- `<TargetFramework>` bumped from `net8` → `net10.0`
+- All 12 active strategies now build clean with these two changes alone.
+
+**Also fixed:** `futuresProStrategy.cs` had two `CrossMinGapTicks` properties
+declared with the same name (`InputParameter` indices 8 and 28) — a
+duplicate-member compile error once the reference actually resolved. Removed
+the second (dead, unused) declaration; kept index 8, which is the one every
+other cross-debounce read in the file actually references.
+
+**Found but deliberately NOT fixed — needs your input:**
+`futuresProStrategy.cs` (the one strategy noted above as "actively running on
+MESM6") calls `Core.Instance.Indicators.BuiltIn.VWAP()` and
+`.ATR(int period)` — v1.146.18 removed the parameterless `VWAP()` entirely and
+changed `ATR` to require a `MaMode` argument. This is a real behavior
+decision (how to replace VWAP, or whether to), not a mechanical path fix, so
+it was left alone rather than guessed at. **If this strategy is still live,
+confirm whether it's running an already-built DLL from before the platform
+update** (which may or may not still work at runtime against the new
+platform) rather than assuming the fixed reference path alone makes it safe
+to rebuild and redeploy as-is.
+
+### Scripts Folder Cleanup + Output-Path Collisions (2026-09-12)
+
+**`C:\Quantower\Settings\Scripts\ScriptsData\` had grown to 373MB** — 443
+near-empty per-instance folders (one auto-created every time any strategy was
+ever added to a chart, each holding just a day's `.slog` text file) plus a
+`Backtest results\` folder holding the actual saved backtest performance
+data. Deleted all 443 per-instance folders (with the user's confirmation) —
+Quantower recreates them automatically as needed, nothing functional is
+lost. Also removed 7 confirmed-empty (zero files) subfolders inside
+`Backtest results\` for orphaned/renamed strategies. Left the live
+`Futures Pro Strategy (...)` instance's folder alone since Quantower had its
+log file open at the time (actively running).
+
+**Left alone, flagged for the user**: `Indicators\EMACrossBackTestingStrategy`,
+`Indicators\GridbotScalper`, and `Strategies\GridbotScalper` are compiled
+DLLs with no matching source anywhere in this repo — deleting them would be
+unrecoverable, so they were kept as-is rather than guessed at.
+
+**Fixed a real output-path collision**: `futuresProStrategy-Backup\` and
+`smaCrossStrategy-OG\` were both still configured (via stale `AssemblyName`/
+`OutputPath`) to build into the *exact same* `Strategies\` output folder as
+their live counterparts (`futuresProStrategy\` and `smaCrossStrategy\`) —
+building either backup would have silently overwritten the active strategy's
+deployed DLL. Gave each its own distinct assembly name and output folder
+(`Strategies\futuresProStrategy-Backup\` and `Strategies\smaCrossStrategy-OG\`),
+matching the pattern `emaCrossStrategy-Backup\` already used correctly. All
+three (plus every active project) were also brought onto the same
+v1.146.18/.NET 10 pin as everything else and verified with a clean
+`dotnet build`.
+
+**Current state**: every project in this repo (16 total, including backups)
+builds into its own uniquely-named folder under
+`C:\Quantower\Settings\Scripts\Strategies\<name>\` — this is Quantower's own
+canonical location for `AlgoType=Strategy` projects (separate categories
+exist for Indicators/PlaceOrderStrategies, which is why dropping a strategy
+DLL loose in `Scripts\` root instead would actually stop it from showing up
+in Quantower's Strategies list). The only project that still fails to build
+is `futuresProStrategy` itself, for the unrelated VWAP/ATR reason documented
+above.
 
 ---
 

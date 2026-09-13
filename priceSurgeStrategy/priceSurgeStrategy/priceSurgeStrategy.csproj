@@ -1,7 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net8</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <LangVersion>latest</LangVersion>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <Platforms>AnyCPU</Platforms>
@@ -9,18 +9,18 @@
     <AssemblyName>priceSurgeStrategy</AssemblyName>
     <RootNamespace>priceSurgeStrategy</RootNamespace>
     <StartAction>Program</StartAction>
-    <StartProgram>C:\Quantower\TradingPlatform\v1.145.16\Console.StarterNew.exe</StartProgram>
+    <StartProgram>C:\Quantower\TradingPlatform\v1.146.18\Console.StarterNew.exe</StartProgram>
     <StartArguments>--address 127.0.0.1 --port 53059</StartArguments>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
-    <OutputPath>C:\Quantower\TradingPlatform\v1.145.16\..\..\Settings\Scripts\Strategies\priceSurgeStrategy</OutputPath>
+    <OutputPath>C:\Quantower\TradingPlatform\v1.146.18\..\..\Settings\Scripts\Strategies\priceSurgeStrategy</OutputPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
-    <OutputPath>C:\Quantower\TradingPlatform\v1.145.16\..\..\Settings\Scripts\Strategies\priceSurgeStrategy</OutputPath>
+    <OutputPath>C:\Quantower\TradingPlatform\v1.146.18\..\..\Settings\Scripts\Strategies\priceSurgeStrategy</OutputPath>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="TradingPlatform.BusinessLayer">
-      <HintPath>C:\Quantower\TradingPlatform\v1.145.16\bin\TradingPlatform.BusinessLayer.dll</HintPath>
+      <HintPath>C:\Quantower\TradingPlatform\v1.146.18\bin\TradingPlatform.BusinessLayer.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>

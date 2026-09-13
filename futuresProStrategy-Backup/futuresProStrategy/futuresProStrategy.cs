@@ -6,24 +6,26 @@ using TradingPlatform.BusinessLayer;
 namespace futuresProStrategy
 {
     /// <summary>
-    /// Futures Pro Strategy — EMA9 + VWAP crossover with Keltner Channel filter
+    /// Futures Pro Strategy — Multi-factor trend-following for MES / NQ / ES
     ///
-    /// Trading logic based on TradingView indicators:
-    ///   1. EMA9 (9-period EMA) — trend direction and momentum
-    ///   2. VWAP — intraday anchor and dynamic support/resistance
-    ///   3. Keltner Channel (34 EMA base, ATR 88, 1.5x/3.5x multipliers) — filter
+    /// Combines the top futures trading approaches:
+    ///   1. Trend EMA filter (200) — only trade in direction of the major trend
+    ///   2. Fast/Slow EMA cross (9/21) — entry timing signal
+    ///   3. RSI filter — reject entries at overbought/oversold extremes
+    ///   4. MACD histogram — momentum confirmation (optional)
+    ///   5. RTH session filter — optionally restrict to regular trading hours
     ///
     /// Entry (bar close, ALL conditions must pass):
-    ///   LONG  — Close above EMA9 AND above VWAP (new high above both)
-    ///           AND price within Keltner Channel (not overextended)
-    ///   SHORT — Close below EMA9 AND below VWAP (new low below both)
-    ///           AND price within Keltner Channel (not overextended)
+    ///   LONG  — Fast crosses above Slow, price above Trend EMA,
+    ///           RSI &lt; overbought, MACD histogram &gt; 0 (if enabled)
+    ///   SHORT — Fast crosses below Slow, price below Trend EMA,
+    ///           RSI &gt; oversold, MACD histogram &lt; 0 (if enabled)
     ///
     /// Exit:
     ///   - Hard Stop Loss (bracket)
     ///   - Take Profit (bracket, optional)
     ///   - Code-managed trailing stop
-    ///   - Reverse cross: close and flip when EMA9/VWAP cross reverses
+    ///   - Reverse cross: flip ONLY if trend EMA agrees, otherwise just close
     ///   - Daily loss cutoff
     /// </summary>
     public sealed class FuturesProStrategy : Strategy, ICurrentAccount, ICurrentSymbol
@@ -35,27 +37,39 @@ namespace futuresProStrategy
         [InputParameter("Account", 1)]
         public Account CurrentAccount { get; set; }
 
-        // ── EMA9 + VWAP settings (from vwap.pine) ────────────────────────────
-        [InputParameter("EMA Length", 2, minimum: 1, maximum: 500, increment: 1, decimalPlaces: 0)]
-        public int EmaLength { get; set; }
+        // ── EMA settings ──────────────────────────────────────────────────────
+        [InputParameter("Fast EMA", 2, minimum: 1, maximum: 500, increment: 1, decimalPlaces: 0)]
+        public int FastEmaLen { get; set; }
 
-        // ── Keltner Channel settings (from keltnerChannel.pine) ──────────────
-        [InputParameter("KC MA Length", 3, minimum: 1, maximum: 500, increment: 1, decimalPlaces: 0)]
-        public int KcMaLength { get; set; }
+        [InputParameter("Slow EMA", 3, minimum: 2, maximum: 500, increment: 1, decimalPlaces: 0)]
+        public int SlowEmaLen { get; set; }
 
-        [InputParameter("KC ATR Length", 4, minimum: 1, maximum: 500, increment: 1, decimalPlaces: 0)]
-        public int KcAtrLength { get; set; }
+        [InputParameter("Trend EMA Period", 4, minimum: 10, maximum: 1000, increment: 10, decimalPlaces: 0)]
+        public int TrendEmaLen { get; set; }
 
-        [InputParameter("KC ATR Multiplier Min", 5, minimum: 0, maximum: 10, increment: 0.1, decimalPlaces: 1)]
-        public double KcAtrMultMin { get; set; }
+        // ── RSI filter ────────────────────────────────────────────────────────
+        [InputParameter("RSI Period", 5, minimum: 2, maximum: 100, increment: 1, decimalPlaces: 0)]
+        public int RsiPeriod { get; set; }
 
-        [InputParameter("KC ATR Multiplier Max", 6, minimum: 0, maximum: 10, increment: 0.1, decimalPlaces: 1)]
-        public double KcAtrMultMax { get; set; }
+        [InputParameter("RSI Overbought (blocks long entry)", 6, minimum: 50, maximum: 100, increment: 5, decimalPlaces: 0)]
+        public int RsiOverbought { get; set; }
 
-        // ── Keltner Channel filter: only trade when price is within the channel ─
-        // 0 = no KC filter; 1 = only trade when price within KC top/bottom bands
-        [InputParameter("Use KC Filter (0=off, 1=on)", 7, minimum: 0, maximum: 1, increment: 1, decimalPlaces: 0)]
-        public int UseKcFilter { get; set; }
+        [InputParameter("RSI Oversold (blocks short entry)", 7, minimum: 0, maximum: 50, increment: 5, decimalPlaces: 0)]
+        public int RsiOversold { get; set; }
+
+        // ── MACD filter (optional) ────────────────────────────────────────────
+        // 0 = MACD filter disabled; 1 = MACD histogram must agree with direction
+        [InputParameter("MACD Filter (0=off, 1=on)", 8, minimum: 0, maximum: 1, increment: 1, decimalPlaces: 0)]
+        public int UseMacd { get; set; }
+
+        [InputParameter("MACD Fast Period", 9, minimum: 2, maximum: 100, increment: 1, decimalPlaces: 0)]
+        public int MacdFastLen { get; set; }
+
+        [InputParameter("MACD Slow Period", 10, minimum: 2, maximum: 200, increment: 1, decimalPlaces: 0)]
+        public int MacdSlowLen { get; set; }
+
+        [InputParameter("MACD Signal Period", 11, minimum: 2, maximum: 100, increment: 1, decimalPlaces: 0)]
+        public int MacdSignalLen { get; set; }
 
         // ── Chart / history ───────────────────────────────────────────────────
         [InputParameter("Period", 12)]
@@ -101,10 +115,26 @@ namespace futuresProStrategy
         [InputParameter("Max Drawdown ($, 0=off)", 23, minimum: 0, maximum: 100000, increment: 50, decimalPlaces: 0)]
         public int MaxDrawdown { get; set; }
 
-        // ── Intrabar cross debounce ──────────────────────────────────────────
-        // Require EMA/VWAP spread to be at least this many ticks before treating
-        // relation changes as tradable crosses. 0 = no debounce.
-        [InputParameter("Cross Min Gap (ticks, 0=off)", 8, minimum: 0, maximum: 20, increment: 1, decimalPlaces: 0)]
+        // ── Mean reversion ────────────────────────────────────────────────────
+        // Blocks trend entries when price is too far from the Trend EMA. 0 = disabled.
+        [InputParameter("Max Trend EMA Distance (ticks, 0=off)", 24, minimum: 0, maximum: 2000, increment: 10, decimalPlaces: 0)]
+        public int MaxExtensionTicks { get; set; }
+
+        // 0=off  1=bounce off 200  2=fade extension  3=both
+        [InputParameter("MeanRev Mode (0=off 1=bnce 2=fade 3=both)", 25, minimum: 0, maximum: 3, increment: 1, decimalPlaces: 0)]
+        public int MeanRevMode { get; set; }
+
+        // Proximity to Trend EMA (ticks) to arm a bounce re-entry in trend direction.
+        [InputParameter("MeanRev Bounce Arm (ticks to 200 EMA)", 26, minimum: 1, maximum: 500, increment: 5, decimalPlaces: 0)]
+        public int MeanRevTouchTicks { get; set; }
+
+        // Distance from Trend EMA (ticks) to arm a counter-trend fade entry.
+        [InputParameter("MeanRev Fade Arm (ticks from 200 EMA)", 27, minimum: 1, maximum: 2000, increment: 10, decimalPlaces: 0)]
+        public int MeanRevExtensionTicks { get; set; }
+
+        // Intrabar cross debounce: require fast/slow EMA spread to be at least this many ticks
+        // before treating relation changes as tradable crosses. 0 = no debounce.
+        [InputParameter("Cross Min Gap (ticks, 0=off)", 28, minimum: 0, maximum: 20, increment: 1, decimalPlaces: 0)]
         public int CrossMinGapTicks { get; set; }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -115,10 +145,11 @@ namespace futuresProStrategy
         };
 
         // Indicators
-        private Indicator ema9;
-        private Indicator vwap;
-        private Indicator kcMid;
-        private Indicator kcAtr;
+        private Indicator fastEma;
+        private Indicator slowEma;
+        private Indicator trendEma;
+        private Indicator rsi;
+        private Indicator macd;
 
         private HistoricalData hdm;
         private string orderTypeId;
@@ -138,8 +169,8 @@ namespace futuresProStrategy
         private double bestPrice;
         private Side   currentSide;
 
-        // Intrabar EMA/VWAP relation cache: 1=both above, -1=both below, 0=other
-        private int lastEmaVwapRelation;
+        // Intrabar EMA relation cache: 1=fast above slow, -1=fast below slow, 0=equal/unknown.
+        private int lastEmaRelation;
         private DateTime lastCrossActionBarTime;
 
         // Daily P&L tracking (in currency)
@@ -159,18 +190,25 @@ namespace futuresProStrategy
         public FuturesProStrategy() : base()
         {
             this.Name        = "Futures Pro Strategy";
-            this.Description = "EMA9 + VWAP crossover strategy with Keltner Channel filter. " +
-                               "Based on TradingView vwap.pine and keltnerChannel.pine.";
+            this.Description = "Multi-factor trend strategy for MES/NQ/ES. " +
+                               "EMA cross + trend filter + RSI + MACD + RTH session. " +
+                               "Reverse cross flips ONLY with trend, otherwise just closes.";
 
-            // EMA9 + VWAP defaults (from vwap.pine)
-            this.EmaLength = 9;
+            // EMA defaults: 9/21 cross with 200 trend filter
+            this.FastEmaLen   = 9;
+            this.SlowEmaLen   = 21;
+            this.TrendEmaLen  = 200;
 
-            // Keltner Channel defaults (from keltnerChannel.pine)
-            this.KcMaLength    = 34;
-            this.KcAtrLength   = 88;
-            this.KcAtrMultMin  = 1.5;
-            this.KcAtrMultMax  = 3.5;
-            this.UseKcFilter   = 1; // on by default
+            // RSI defaults
+            this.RsiPeriod      = 14;
+            this.RsiOverbought  = 70;
+            this.RsiOversold    = 30;
+
+            // MACD defaults (standard 12/26/9), disabled by default
+            this.UseMacd       = 0;
+            this.MacdFastLen   = 12;
+            this.MacdSlowLen   = 26;
+            this.MacdSignalLen = 9;
 
             this.Period    = Period.MIN5;
             this.StartPoint = Core.TimeUtils.DateTimeUtcNow.AddDays(-30);
@@ -189,7 +227,12 @@ namespace futuresProStrategy
             this.MaxDailyLoss = 0; // disabled by default
             this.MaxDrawdown  = 2000; // $2000 default for prop firm compliance
 
-            this.CrossMinGapTicks = 1;
+            // Mean reversion defaults
+            this.MaxExtensionTicks    = 0;   // disabled — no extension cap by default
+            this.MeanRevMode          = 0;   // off by default
+            this.MeanRevTouchTicks    = 20;  // arm bounce when within 20t of 200 EMA
+            this.MeanRevExtensionTicks = 60; // arm fade when 60t+ from 200 EMA
+            this.CrossMinGapTicks     = 1;
         }
 
         protected override void OnRun()
@@ -203,7 +246,7 @@ namespace futuresProStrategy
             this.pendingEntrySide   = null;
             this.trailingActivated  = false;
             this.bestPrice          = 0;
-            this.lastEmaVwapRelation = 0;
+            this.lastEmaRelation    = 0;
             this.lastCrossActionBarTime = DateTime.MinValue;
             this.dailyPnl           = 0;
             this.lastResetDay       = -1;
@@ -236,21 +279,9 @@ namespace futuresProStrategy
                 return;
             }
 
-            if (this.EmaLength < 1)
+            if (this.FastEmaLen >= this.SlowEmaLen)
             {
-                this.Log($"EMA Length ({this.EmaLength}) must be >= 1.", StrategyLoggingLevel.Error);
-                return;
-            }
-
-            if (this.KcMaLength < 1)
-            {
-                this.Log($"KC MA Length ({this.KcMaLength}) must be >= 1.", StrategyLoggingLevel.Error);
-                return;
-            }
-
-            if (this.KcAtrLength < 1)
-            {
-                this.Log($"KC ATR Length ({this.KcAtrLength}) must be >= 1.", StrategyLoggingLevel.Error);
+                this.Log($"Fast EMA ({this.FastEmaLen}) must be smaller than Slow EMA ({this.SlowEmaLen}).", StrategyLoggingLevel.Error);
                 return;
             }
 
@@ -264,19 +295,24 @@ namespace futuresProStrategy
                 return;
             }
 
-            // Create indicators: EMA9, VWAP, Keltner Channel (34 EMA base, ATR 88)
-            this.ema9   = Core.Instance.Indicators.BuiltIn.EMA(this.EmaLength, PriceType.Close);
-            this.vwap   = Core.Instance.Indicators.BuiltIn.VWAP();
-            this.kcMid  = Core.Instance.Indicators.BuiltIn.EMA(this.KcMaLength, PriceType.Close);
-            this.kcAtr  = Core.Instance.Indicators.BuiltIn.ATR(this.KcAtrLength);
+            // Create indicators
+            this.fastEma  = Core.Instance.Indicators.BuiltIn.EMA(this.FastEmaLen,  PriceType.Close);
+            this.slowEma  = Core.Instance.Indicators.BuiltIn.EMA(this.SlowEmaLen,  PriceType.Close);
+            this.trendEma = Core.Instance.Indicators.BuiltIn.EMA(this.TrendEmaLen, PriceType.Close);
+            this.rsi      = Core.Instance.Indicators.BuiltIn.RSI(this.RsiPeriod, PriceType.Close, RSIMode.Exponential, MaMode.SMA, this.RsiPeriod, IndicatorCalculationType.AllAvailableData);
+
+            if (this.UseMacd == 1)
+                this.macd = Core.Instance.Indicators.BuiltIn.MACD(this.MacdFastLen, this.MacdSlowLen, this.MacdSignalLen, IndicatorCalculationType.AllAvailableData);
 
             this.hdm = this.CurrentSymbol.GetHistory(this.Period, this.CurrentSymbol.HistoryType, this.StartPoint);
-            this.hdm.AddIndicator(this.ema9);
-            this.hdm.AddIndicator(this.vwap);
-            this.hdm.AddIndicator(this.kcMid);
-            this.hdm.AddIndicator(this.kcAtr);
+            this.hdm.AddIndicator(this.fastEma);
+            this.hdm.AddIndicator(this.slowEma);
+            this.hdm.AddIndicator(this.trendEma);
+            this.hdm.AddIndicator(this.rsi);
+            if (this.macd != null)
+                this.hdm.AddIndicator(this.macd);
 
-            this.lastEmaVwapRelation = this.GetEmaVwapRelation();
+            this.lastEmaRelation = this.GetEmaRelation();
 
             Core.PositionAdded      += this.Core_PositionAdded;
             Core.PositionRemoved    += this.Core_PositionRemoved;
@@ -286,9 +322,9 @@ namespace futuresProStrategy
             this.hdm.HistoryItemUpdated += this.Hdm_HistoryItemUpdated;
             this.hdm.NewHistoryItem     += this.Hdm_OnNewHistoryItem;
 
-            this.Log($"Started — EMA:{EmaLength}  VWAP:on  " +
-                     $"KC:{KcMaLength}/{KcAtrLength} ({KcAtrMultMin}x/{KcAtrMultMax}x)  " +
-                     $"KCFilter:{(UseKcFilter == 1 ? "on" : "off")}  " +
+            this.Log($"Started — Fast:{FastEmaLen}  Slow:{SlowEmaLen}  Trend:{TrendEmaLen}  " +
+                     $"RSI:{RsiPeriod} (OB:{RsiOverbought} OS:{RsiOversold})  " +
+                     $"MACD:{(UseMacd == 1 ? $"{MacdFastLen}/{MacdSlowLen}/{MacdSignalLen}" : "off")}  " +
                      $"CrossGap:{CrossMinGapTicks}t  " +
                      $"SL:{StopLossTicks}t  TP:{(TakeProfitTicks > 0 ? $"{TakeProfitTicks}t" : "off")}  " +
                      $"Trail:{(TrailingStopTicks > 0 && TrailActivationTicks > 0 ? $"{TrailActivationTicks}t/{TrailingStopTicks}t" : "off")}  " +
@@ -551,19 +587,11 @@ namespace futuresProStrategy
             // Strategy entries and exits are managed intrabar in Hdm_HistoryItemUpdated.
         }
 
-        private int GetEmaVwapRelation()
+        private int GetEmaRelation()
         {
-            double ema9_0 = this.ema9.GetValue(0);
-            double vwap0  = this.vwap.GetValue(0);
-            double close0 = HistoricalDataExtensions.Close(this.hdm, 0);
-
-            // From vwap.pine: aboveBoth = close > ema9 and close > vwapValue
-            //                 belowBoth = close < ema9 and close < vwapValue
-            bool aboveBoth = close0 > ema9_0 && close0 > vwap0;
-            bool belowBoth = close0 < ema9_0 && close0 < vwap0;
-
-            // Apply cross min gap debounce: require EMA9 and VWAP to be separated by at least CrossMinGapTicks
-            double spread = Math.Abs(ema9_0 - vwap0);
+            double fast0 = this.fastEma.GetValue(0);
+            double slow0 = this.slowEma.GetValue(0);
+            double spread = Math.Abs(fast0 - slow0);
             double minGap = this.CrossMinGapTicks > 0
                 ? this.CrossMinGapTicks * this.CurrentSymbol.TickSize
                 : 0;
@@ -571,48 +599,29 @@ namespace futuresProStrategy
             if (minGap > 0 && spread < minGap)
                 return 0;
 
-            if (aboveBoth)
+            if (fast0 > slow0)
                 return 1;
-            if (belowBoth)
+            if (fast0 < slow0)
                 return -1;
             return 0;
         }
 
-        /// <summary>
-        /// Checks if price is within the Keltner Channel (not overextended).
-        /// From keltnerChannel.pine: KC top = mid + ATR * mult, KC bottom = mid - ATR * mult
-        /// </summary>
-        private bool IsWithinKeltnerChannel()
-        {
-            if (this.UseKcFilter != 1)
-                return true;
-
-            double kcMid0  = this.kcMid.GetValue(0);
-            double kcAtr0  = this.kcAtr.GetValue(0);
-            double close0  = HistoricalDataExtensions.Close(this.hdm, 0);
-
-            double kcTop    = kcMid0 + kcAtr0 * this.KcAtrMultMin;
-            double kcBottom = kcMid0 - kcAtr0 * this.KcAtrMultMin;
-
-            return close0 <= kcTop && close0 >= kcBottom;
-        }
-
         private void ProcessIntrabarEmaCross(Position[] positions)
         {
-            int relation = this.GetEmaVwapRelation();
+            int relation = this.GetEmaRelation();
             if (relation == 0)
                 return;
 
-            if (this.lastEmaVwapRelation == 0)
+            if (this.lastEmaRelation == 0)
             {
-                this.lastEmaVwapRelation = relation;
+                this.lastEmaRelation = relation;
                 return;
             }
 
-            if (relation == this.lastEmaVwapRelation)
+            if (relation == this.lastEmaRelation)
                 return;
 
-            this.lastEmaVwapRelation = relation;
+            this.lastEmaRelation = relation;
             Side crossSide = relation > 0 ? Side.Buy : Side.Sell;
             DateTime barTime = HistoricalDataExtensions.Time(this.hdm, 0);
 
@@ -626,20 +635,12 @@ namespace futuresProStrategy
             if ((crossSide == Side.Buy && inLong) || (crossSide == Side.Sell && inShort))
                 return;
 
-            // Keltner Channel filter: only enter if price is within the channel
-            if (!this.IsWithinKeltnerChannel())
-            {
-                this.Log($"Entry blocked — price outside Keltner Channel (EMA9/VWAP cross: {crossSide})",
-                         StrategyLoggingLevel.Trading);
-                return;
-            }
-
             if (positions.Any())
             {
                 this.lastCrossActionBarTime = barTime;
                 this.pendingEntrySide = crossSide;
                 this.waitClosePositions = true;
-                this.Log($"Intrabar EMA9/VWAP reverse cross — closing {(inLong ? "LONG" : "SHORT")}, flipping to {crossSide}",
+                this.Log($"Intrabar EMA reverse cross — closing {(inLong ? "LONG" : "SHORT")}, flipping to {crossSide}",
                          StrategyLoggingLevel.Trading);
 
                 foreach (var pos in positions)
@@ -659,11 +660,39 @@ namespace futuresProStrategy
                 return;
 
             this.lastCrossActionBarTime = barTime;
-            this.Log($"Intrabar EMA9/VWAP cross entry: {crossSide}", StrategyLoggingLevel.Trading);
+            this.Log($"Intrabar EMA cross entry: {crossSide}", StrategyLoggingLevel.Trading);
             this.PlaceEntry(crossSide);
         }
 
         // ── Filter helpers ────────────────────────────────────────────────────
+
+        /// <summary>
+        /// RSI filter: for longs, RSI must be below overbought level.
+        /// For shorts, RSI must be above oversold level.
+        /// This prevents chasing moves that are already exhausted.
+        /// </summary>
+        private bool CheckRsiFilter(Side side)
+        {
+            double rsiVal = this.rsi.GetValue(1);
+            if (side == Side.Buy)
+                return rsiVal < this.RsiOverbought;
+            else
+                return rsiVal > this.RsiOversold;
+        }
+
+        /// <summary>
+        /// MACD histogram filter: histogram must be positive for longs,
+        /// negative for shorts. Returns true if MACD is disabled.
+        /// </summary>
+        private bool CheckMacdFilter(Side side)
+        {
+            if (this.UseMacd != 1 || this.macd == null)
+                return true;
+
+            // MACD line index: 0=MACD, 1=Signal, 2=Histogram
+            double histogram = this.macd.GetValue(1, 2);
+            return side == Side.Buy ? histogram > 0 : histogram < 0;
+        }
 
         /// <summary>Returns true if the current EST hour is within the RTH window.</summary>
         private bool IsInRth()
@@ -708,14 +737,16 @@ namespace futuresProStrategy
 
         // ── Execution ─────────────────────────────────────────────────────────
 
-        // tpTicksOverride: if >= 0, overrides TakeProfitTicks
+        // tpTicksOverride: if >= 0, overrides TakeProfitTicks (used by mean-rev fade entries
+        // to auto-set TP at the distance to the 200 EMA)
         private void PlaceEntry(Side side, int tpTicksOverride = -1)
         {
             int effectiveTpTicks = tpTicksOverride >= 0 ? tpTicksOverride : this.TakeProfitTicks;
-            double ema9Val = this.ema9.GetValue(1);
-            double vwapVal = this.vwap.GetValue(1);
+            double rsiVal = this.rsi.GetValue(1);
+            string macdStr = this.macd != null ? $"  MACD-H:{this.macd.GetValue(1, 2):F2}" : "";
 
-            this.Log($"Entry: {side} | EMA9:{ema9Val:F2}  VWAP:{vwapVal:F2}  " +
+            this.Log($"Entry: {side} | Fast:{this.fastEma.GetValue(1):F2}  Slow:{this.slowEma.GetValue(1):F2}  " +
+                     $"Trend:{this.trendEma.GetValue(1):F2}  RSI:{rsiVal:F1}{macdStr}  " +
                      $"SL:{StopLossTicks}t" +
                      (effectiveTpTicks > 0 ? $"  TP:{effectiveTpTicks}t" : "") +
                      (TrailingStopTicks > 0 && TrailActivationTicks > 0
