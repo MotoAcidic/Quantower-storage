@@ -297,6 +297,61 @@ This document provides technical context and logic documentation for all trading
 
 ---
 
+### 10-12. Keltner Reversion / Trendline Break / S/R Channel Break Strategies — added 2026-09-12
+
+**Files:** `keltnerReversionStrategy/`, `trendlineBreakStrategy/`, `srChannelBreakStrategy/`
+(each its own project, `.cs`/`.csproj`/`.sln`/`readme.md`)
+**Build outputs:** `C:\Quantower\Settings\Scripts\Strategies\{keltnerReversionStrategy,trendlineBreakStrategy,srChannelBreakStrategy}\*.dll`
+
+Split out of `tvConfluenceStrategy` (below) per the user: rather than one strategy
+voting across all three TradingView indicators, each gets its own independent strategy
+so it can be tuned, backtested, and evaluated on its own, AND so all three can hold
+independent positions on the same account+contract simultaneously rather than only one
+ever being able to trade at a time.
+
+#### Core Logic (each)
+- **keltnerReversionStrategy** - Keltner Channel mean-reversion (`keltnerChannel.pine`)
+- **trendlineBreakStrategy** - ATR-sloped trendline breakout (LuxAlgo `Trendlines.pine`)
+- **srChannelBreakStrategy** - multi-touch S/R zone breakout (LonesomeTheBlue
+  `supportResistanceChannels.pine`)
+- All three: same detector math as `tvConfluenceStrategy`'s corresponding
+  `EvaluateX` method, not re-derived; same risk-management skeleton (SL/TP/trailing/
+  RTH/daily-loss/max-drawdown) as every other strategy in this repo, just single-
+  detector instead of confluence-voting.
+
+#### Multi-instance position isolation (the reason this split needed real code, not just copy-pasting files)
+Quantower positions/orders belong to an account+symbol pair, not to a specific strategy
+instance - `Core.Instance.Positions` returns every position on that account+symbol
+regardless of which strategy (or a human) opened it. Running all three on the same
+account+contract without a way to tell them apart would mean each one's "am I already
+in a trade?" check sees the OTHERS' positions too - only one could ever hold a position
+at a time. Fixed via a `StrategyTag` const per strategy (`"KeltnerReversion"`,
+`"TrendlineBreak"`, `"SrChannelBreak"`), set as `PlaceOrderRequestParameters.Comment`
+on every order placed, with every `Position`/`Order`/`Trade`/`OrderHistory` query
+(including inside the `Core_PositionAdded`/`Core_PositionRemoved`/
+`Core_OrdersHistoryAdded`/`Core_TradeAdded` event handlers, which fire globally for
+ANY strategy's positions) filtered by `.Comment == StrategyTag`.
+
+**⚠️ NOT verified against a live Quantower session** - confirmed via reflection that
+`PlaceOrderRequestParameters`, `Position`, `Order`, `Trade`, and `OrderHistory` all
+expose a `Comment` property, and all three strategies build clean, but there was no
+running platform connection available to confirm `Comment` actually propagates from
+the placing order through to the resulting `Position`/`Trade`/`OrderHistory` records.
+**Before running these three together with real size on the same account, place one
+small test trade per strategy in sim and check each Position's Comment field in
+Quantower's Positions panel.** If it doesn't propagate, each strategy silently falls
+back to seeing every position on the account again, defeating the whole point.
+
+#### API / Platform Notes
+- All three verified with a clean `dotnet build` (0 errors, 0 warnings) against
+  v1.146.18/.NET 10, and confirmed `tvConfluenceStrategy` itself still builds
+  unaffected by the split.
+- `tvConfluenceStrategy` was left in place, unmodified - it's still there if the
+  combined confluence-vote behavior is ever wanted again; these three are additive,
+  not a replacement.
+
+---
+
 ### 9. TV Confluence Strategy (`tvConfluenceStrategy`) — added 2026-09-12
 **File:** `tvConfluenceStrategy/tvConfluenceStrategy/tvConfluenceStrategy.cs`
 **Readme:** `tvConfluenceStrategy/readme.md`
