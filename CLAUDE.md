@@ -59,11 +59,17 @@ instructions in `BUILD.md`; short version:
 ```bash
 dotnet build src/OrbIx.Quantower.Indicator/OrbIx.Quantower.Indicator.csproj -c Release \
   -p:Share=true \
-  -p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.146.18\bin\TradingPlatform.BusinessLayer.dll"
+  -p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.3\bin\TradingPlatform.BusinessLayer.dll"
 ```
-(`v1.146.18` - confirm against whatever's under `C:\Quantower\TradingPlatform\` on the
-machine actually building; BUILD.md deliberately doesn't hard-code it since it moves on
-Quantower updates.)
+(`v1.147.3` as of 2026-09-15 - confirm against whatever's under `C:\Quantower\TradingPlatform\`
+on the machine actually building; BUILD.md deliberately doesn't hard-code it since it moves on
+Quantower updates. **Quantower auto-updated from v1.146.18 to v1.147.3 mid-session on
+2026-09-15** - every DLL deployed earlier that day had been built against the now-stale
+v1.146.18 SDK reference while the live platform had already moved to v1.147.3, and is the
+leading suspect for a same-day report of settings changes intermittently blanking the whole
+chart. Rebuilt against the correct current SDK and redeployed; if a similarly erratic "changing
+one setting breaks everything" report recurs, check this path mismatch FIRST, before
+suspecting the paint code.)
 
 **Verified 2026-09-14**: builds clean (0 errors, 269 pre-existing nullable-annotation-
 context warnings from the source itself - not touched, not this repo's code to restyle) once
@@ -91,6 +97,117 @@ own README for the calibration methodology and status-line format.
 **Explicitly not a signal generator** - the author's own README states plainly that none of
 these displays are claimed to predict anything, and testing several of the ideas found no
 edge; it's a reading-the-tape tool, not an entry system.
+
+**Added 2026-09-15 - wick/volume absorption (`OrbIx.Core/Features/WickVolumeAbsorption.cs` +
+`OrbIx.Quantower.Indicator/WickAbsorptionOverlay.cs`, `InputParameter` indices 163-174,
+`"Wick Absorption: *"`)**: a direct, statement-for-statement port of the user's own
+`Tradingview/absorption.pine` ("works wonders" there) - needs only plain OHLCV bars (no tick
+history, no depth), so it's immune to every data-vendor gap documented above and in the
+Order-Flow Scalping README. Same detection math as the pine script (high-volume gate vs. a
+rolling average, wick-significance gate vs. rolling ATR, P/B pattern, `volume_strength *
+wick_strength` scored against a minimum). Drawn as an actual filled+bordered box (selling =
+red from the bar's high, buying = green from the bar's low), not another dotted line - the
+user's explicit ask, since a chart already carrying HH/LL support/resistance lines, session
+levels, and footprint absorption lines made "is this an absorption level or something else"
+unanswerable at a glance. On by default (`WickAbsorptionEnabled = true`).
+
+**Same date - three old absorption displays turned OFF by default** (`AbsorptionDrawEnabled`,
+`ShowAbsorptionShelves`, `FlowAbsorption`, `FlowVolumeAbsorptionTier1/2`): all footprint-based,
+all answering the same "is this absorption" question the new wick/volume port now answers
+once instead of four times over, and `AbsorptionShelfScan`'s own docstring already calls that
+approach a measured null on MNQ (trial 008: +1.006 ticks vs. matched-random, failed
+Bonferroni, below the cost floor). **Only affects a fresh attach** - Quantower persists
+settings per chart instance, so an already-attached chart keeps its old saved values; toggle
+these off by hand in the settings panel (or remove/re-add the indicator) to get the same
+effect on an existing chart. Everything else (Zones/FVG, Imbalance marks, Flip levels, Flow
+cluster stats/search, stacked imbalance, unfinished auction, big trades, live counter) was
+deliberately left on by default per the user's own call - not redundant with anything else,
+just not on their original want-list.
+
+**Same date - ORB box now extends its own fill instead of degrading to bare dotted lines**
+(`ChartOverlay.cs`'s `DrawOne`): the crisp bordered box still marks only the formation window
+(where the range was actually SET), but the light tinted fill now spans the level's whole
+life - formation window through session end - instead of stopping at the formation window's
+right edge and handing off to thin `Edges` lines for the rest of the session. That abrupt
+handoff was the user's literal complaint ("the orb area should extend the box itself instead
+of just a dotted line").
+
+**Same date - fixed coupled settings/paint faults reported as "turn off the opening-range box
+and everything disappears"** (`OrbIxIndicator.cs`'s `DrawRanges`): the OR box/edges/midline,
+the key/reference price levels, and the active trade setup's lines were three unrelated
+things sharing one try/catch AND one early return keyed off "any completed opening ranges to
+draw." A paint fault in the OR box took the key levels and the trade setup down with it for
+that frame, and a day with zero completed opening ranges (before the first session's range
+closes, or after a data gap) hid the key levels and the trade setup too, though neither has
+anything to do with an opening range existing. Split into three independently-guarded methods
+(`DrawRanges`, `DrawKeyLevelsOverlay`, `DrawActiveSetup`), each gated on its own data. Also
+split the one shared `"Draw level labels"` toggle, which controlled the OR box's own level
+labels, the key/reference levels' labels, AND the setup's price/R tags at once: added
+`"Draw key-level labels"` (`DrawKeyLevelLabels`) and `"Draw setup price/R labels"`
+(`DrawSetupLabels`, indices 85/87) as their own settings, leaving `DrawLabels` (80) scoped to
+the opening range's own levels only. **Not confirmed to be the full explanation** for
+"everything" vanishing if that meant literally every overlay (HH/LL, absorption, delta, flow)
+- each of those already has its own independent enable flag and its own try/catch writing to
+the shared `overlayFault` string, so a fault in one should not silently take the others with
+it; if the problem persists after this fix, the next thing to check is whatever text (if any)
+appears where `overlayFault` is displayed on the chart when it reoccurs.
+
+**Same date - found and fixed the actual likely cause: the Direction panel's paint call had NO
+try/catch**, unlike every one of its ~20 sibling calls in `OnPaintChart`. Nothing wraps
+`OnPaintChart` itself, so an exception there (or the SDK-version mismatch above) propagated
+straight past every per-overlay guard and skipped every draw call sequenced after it for that
+frame - "toggle a setting, lose everything" is exactly what an unguarded early call in an
+otherwise fully-guarded sequence looks like from the chart. Wrapped it in the same
+try/catch-into-`overlayFault` pattern as everything else. Also decoupled `PublishDirection()`
+from `DirectionPanelOn` - it used to skip computing the panel entirely when the panel was
+switched off, which will matter once something else (the callout below) reads the same
+computed reading independently of whether the panel itself is displayed.
+
+**Same date - identified the "MIXED 1-1 / structure / location / flow / regime" box that
+overlaps order management** as the **Direction panel** (`DirectionPanelOn`, shared with the
+standalone Direction indicator) - it paints at a FIXED pixel offset from the pane's corner
+(`DirectionPanelOffsetX/Y`, default 12/220), so it can land on top of wherever an order line
+happens to sit in price-space depending on zoom/scroll. Already had its own on/off toggle and
+offset settings before this session; no code change needed, just repositioning/disabling via
+those three inputs.
+
+**Same date - added `"Status: show the problems line"` (`ShowStatusLine`, default true)**
+gating `DrawStatus`: the bottom-left "problems" line (`StatusOverlay`/`StatusBlock` in Core)
+is drawn BY DESIGN whenever something is genuinely degraded - on this connector its most
+common tenant is the same permanent data-vendor refusal documented above (FRVP/AVP started
+after their anchor, volume analysis unavailable). That's a deliberate "never hide a real
+problem" design (`StatusBlock.cs`'s own doc comment), which the user asked to override for a
+KNOWN, unfixable, already-understood limitation that was cluttering the exact spot used for
+position management. The setting lets the operator choose; FRVP/AVP profiles themselves
+already draw nothing when their data isn't there regardless of this flag - only the text
+notice is gated by it.
+
+**Added 2026-09-15 - the scalp/hold confluence callout** (`OrbIx.Core/Direction/
+DirectionCallout.cs`, `Quantower.Indicator/DirectionCalloutOverlay.cs`, `InputParameter`
+indices 397-402, `"Direction: ..."`/`"callout"`): a bright, hard-to-miss line reading
+`POSSIBLE LONG SCALP`, `POSSIBLE HOLD SHORT`, etc., built entirely from confluences the
+Direction panel already computes (per-timeframe structure votes, price vs. VWAP, cumulative
+delta) - never a new prediction, only a louder rendering of the same verdict plus one extra
+question. **Scalp vs. hold rule**: HOLD requires (a) at least `DirectionCalloutMinLanes`
+(default 2) structure lanes agreeing with the verdict AND (b) the session range still under
+`DirectionCalloutRoomSpentPercent` (default 100%) of the average daily range; anything
+directional that fails either check reads as SCALP instead. Both thresholds are STATED
+trading judgements, not measured or backtested ones - see `DirectionCallout.From`'s doc
+comment. No callout at all when the verdict is Mixed or Undecided. **Independent of the
+Direction panel's own on/off toggle** (`DirectionPanelOn`) - either can run without the
+other, which is also why `PublishDirection()` was changed (same session, above) to compute
+the panel regardless of that toggle. Colours default to pure green/red (`#00FF00`/`#FF0000`,
+deliberately more saturated than any other green/red already on the chart) so the callout
+reads as "the loud one" against everything else.
+
+**Same date - the line anchors to a LEVEL, not to live price.** First shipped tracking
+`this.lastPrice` every fold, which moved the line every tick and made it useless as something
+to trade against - the operator's exact complaint ("it needs to stay at a level"). Now
+(`PublishDirection()`, `directionCalloutSide`/`directionCalloutAnchorPrice` fields) the line's
+price is set ONCE when the callout's SIDE changes (none to long, long to short, etc.) and held
+fixed until the side changes again. A scalp read upgrading to a hold read (or the reverse) on
+the SAME side updates the line's text and colour in place without relocating it, since that is
+still the same opportunity, only re-graded - only a side flip moves the level.
 
 ### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
 **Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show

@@ -607,14 +607,6 @@ internal sealed class ChartOverlay : IDisposable
         var seeded = !range.FlowObserved;
         var style = this.StyleFor(range);
 
-        if (options.Box)
-        {
-            var height = Math.Max(yLow - yHigh, MinimumBoxHeight);
-
-            graphics.FillRectangle(style.Fill, boxLeft, yHigh, boxRight - boxLeft, height);
-            graphics.DrawRectangle(style.Border, boxLeft, yHigh, boxRight - boxLeft, height);
-        }
-
         // Levels start where the range closed: an opening-range level is only meaningful once
         // the range that defined it is finished.
         var levelLeft = Math.Max(boxRight, left);
@@ -625,16 +617,42 @@ internal sealed class ChartOverlay : IDisposable
         // and buries the session actually being traded.
         var live = nowUtc < range.SessionEndUtc;
         var levelRight = right;
+        var levelRightKnown = true;
 
         if (!live)
         {
-            if (!TryX(converter, range.SessionEndUtc, out var xEnd))
-                return true;
+            if (TryX(converter, range.SessionEndUtc, out var xEnd))
+            {
+                levelRight = Math.Min(Math.Max(xEnd, levelLeft), right);
+            }
+            else
+            {
+                levelRightKnown = false;
+            }
+        }
 
-            levelRight = Math.Min(Math.Max(xEnd, levelLeft), right);
+        if (options.Box)
+        {
+            var height = Math.Max(yLow - yHigh, MinimumBoxHeight);
 
-            // Entirely off the left of the view: the box was drawn, the levels are history.
-            if (levelRight <= left)
+            // The tint spans the level's whole life — formation window AND everything after,
+            // until the session ends — so the level reads as one continuous zone instead of a
+            // solid box that stops cold and hands off to bare dotted lines. That handoff was the
+            // exact "just a dotted line" complaint. The crisp bordered box stays scoped to the
+            // formation window alone, so where the range was actually SET is still visible.
+            var fillRight = levelRightKnown ? Math.Max(boxRight, levelRight) : boxRight;
+
+            if (fillRight > boxLeft)
+                graphics.FillRectangle(style.Fill, boxLeft, yHigh, fillRight - boxLeft, height);
+
+            graphics.DrawRectangle(style.Border, boxLeft, yHigh, boxRight - boxLeft, height);
+        }
+
+        if (!live)
+        {
+            // Session end is off-screen in a direction TryX can't resolve: the box was drawn,
+            // the levels are history.
+            if (!levelRightKnown || levelRight <= left)
                 return true;
         }
 

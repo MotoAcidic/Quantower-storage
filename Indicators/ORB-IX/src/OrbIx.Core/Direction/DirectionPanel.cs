@@ -19,8 +19,13 @@ public readonly record struct DirectionRow(string Label, string Value, Direction
 /// <param name="Headline">The verdict line, e.g. "UP 4 of 6".</param>
 /// <param name="Verdict">The verdict itself, for colouring the headline.</param>
 /// <param name="Rows">The component rows, in display order.</param>
+/// <param name="Callout">
+/// The loud scalp/hold rendering of the same verdict, or <see cref="DirectionCallout.None"/>
+/// when the verdict is not directional. See <see cref="DirectionCallout"/>.
+/// </param>
 public sealed record DirectionPanelContent(
-    string Headline, DirectionVerdict Verdict, IReadOnlyList<DirectionRow> Rows);
+    string Headline, DirectionVerdict Verdict, IReadOnlyList<DirectionRow> Rows,
+    DirectionCallout Callout);
 
 /// <summary>
 /// Builds what the panel shows, without drawing any of it.
@@ -43,12 +48,20 @@ public static class DirectionPanel
     /// <param name="location">Price against VWAP.</param>
     /// <param name="flow">Cumulative delta's reading.</param>
     /// <param name="regime">Volatility context, from <see cref="DirectionInputs.Regime"/>.</param>
+    /// <param name="sessionRange">Today's high-to-low range so far, for the callout.</param>
+    /// <param name="averageDailyRange">The average daily range, for the callout.</param>
+    /// <param name="calloutMinConfirmingLanes">See <see cref="DirectionCallout.From"/>.</param>
+    /// <param name="calloutRoomSpentShare">See <see cref="DirectionCallout.From"/>.</param>
     /// <exception cref="ArgumentNullException">If <paramref name="structure"/> is null.</exception>
     public static DirectionPanelContent Build(
         IReadOnlyList<DirectionVote> structure,
         DirectionVote location,
         DirectionVote flow,
-        string regime)
+        string regime,
+        double sessionRange,
+        double averageDailyRange,
+        int calloutMinConfirmingLanes,
+        double calloutRoomSpentShare)
     {
         ArgumentNullException.ThrowIfNull(structure);
 
@@ -72,7 +85,15 @@ public static class DirectionPanel
             new("regime", regime ?? "unknown", DirectionState.Undecided),
         };
 
-        return new DirectionPanelContent(read.Headline, read.Verdict, rows);
+        // Confirmation comes from the STRUCTURE lanes alone, same reasoning as Aggregate
+        // above: location and flow are the fastest-moving inputs on the panel, and letting
+        // them count as "confirmation" of themselves would make every directional read
+        // self-confirming.
+        var callout = DirectionCallout.From(
+            read, structure, sessionRange, averageDailyRange,
+            calloutMinConfirmingLanes, calloutRoomSpentShare);
+
+        return new DirectionPanelContent(read.Headline, read.Verdict, rows, callout);
     }
 
     /// <summary>

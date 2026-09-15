@@ -54,6 +54,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
     // depends on the chart's own period.
     private DirectionEngine? direction;
     private readonly DirectionOverlay directionOverlay = new();
+    private readonly DirectionCalloutOverlay directionCalloutOverlay = new();
     private DirectionPanelContent? directionPanel;
     private readonly EventRing<BookDelta> bookRing = new(16384);
 
@@ -336,11 +337,20 @@ public sealed class OrbIxIndicator : Qt.Indicator
     [InputParameter("Draw the extension targets", 70)]
     public bool DrawExtensions { get; set; } = true;
 
+    // Scoped to the opening range's OWN levels only. Key/reference levels and the active
+    // setup's price tags used to share this one flag with the range's levels — three unrelated
+    // things behind one checkbox — and now have their own below.
     [InputParameter("Draw level labels", 80)]
     public bool DrawLabels { get; set; } = true;
 
     [InputParameter("Draw key levels near price", 84)]
     public bool DrawKeyLevels { get; set; } = true;
+
+    [InputParameter("Draw key-level labels", 85)]
+    public bool DrawKeyLevelLabels { get; set; } = true;
+
+    [InputParameter("Draw setup price/R labels", 87)]
+    public bool DrawSetupLabels { get; set; } = true;
 
     /// <summary>
     /// How far either side of price a level is still worth drawing, as a percentage of the
@@ -356,6 +366,23 @@ public sealed class OrbIxIndicator : Qt.Indicator
 
     [InputParameter("Draw sessions that closed before this indicator loaded", 90)]
     public bool SeedFromHistory { get; set; } = true;
+
+    /// <summary>
+    /// Whether the bottom-left "problems" line draws at all.
+    ///
+    /// StatusBlock (OrbIx.Core.Diagnostics) only ever puts a genuinely broken feature here —
+    /// "display only, measured non-predictive" statements never reach the chart, only the log.
+    /// So by design this line is not noise; on THIS connector, though, its most common tenant
+    /// is the same known, permanent data-vendor refusal documented on
+    /// VolumeAnalysisForceTickData above (FRVP/AVP started after their anchor, volume analysis
+    /// unavailable for the symbol) — a fact worth knowing once, not a warning worth repeating
+    /// every session at a fixed spot on a chart the operator is placing orders against. On by
+    /// default, so nothing changes for anyone who wants the notice; off hides the line, not the
+    /// underlying limitation or the FRVP/AVP profiles themselves — those already draw nothing
+    /// when their data isn't there, independent of this setting.
+    /// </summary>
+    [InputParameter("Status: show the problems line", 91)]
+    public bool ShowStatusLine { get; set; } = true;
 
     // ---- HH/LL structure port ------------------------------------------------------------
     //
@@ -455,6 +482,43 @@ public sealed class OrbIxIndicator : Qt.Indicator
     /// </summary>
     [InputParameter("Direction: panel top offset (px)", 396, 0, 4000, 0, 0)]
     public int DirectionPanelOffsetY { get; set; } = 220;
+
+    /// <summary>
+    /// The loud version of the same verdict the panel already prints quietly as its headline:
+    /// a bright line at the current price reading "POSSIBLE LONG SCALP", "POSSIBLE HOLD SHORT"
+    /// and so on. INDEPENDENT of "Direction panel" above — this can be on with the detail
+    /// panel off, or the other way around, same as every other setting on this chart is meant
+    /// to be its own switch. See OrbIx.Core.Direction.DirectionCallout for exactly what decides
+    /// scalp vs. hold and why, and the warning that it is a stated trading judgement, not a
+    /// measured or backtested edge.
+    /// </summary>
+    [InputParameter("Direction: show possible scalp/hold callout", 397)]
+    public bool DirectionCalloutEnabled { get; set; } = true;
+
+    /// <summary>
+    /// How many structure lanes must agree with the verdict before the callout calls it a HOLD
+    /// instead of a SCALP. See <see cref="OrbIx.Core.Direction.DirectionCallout.From"/>.
+    /// </summary>
+    [InputParameter("Direction: callout — min structure lanes to call HOLD", 398, 1, 10, 1, 0)]
+    public int DirectionCalloutMinLanes { get; set; } = 2;
+
+    /// <summary>
+    /// Share of the average daily range, as a percentage, at or above which the day is
+    /// considered to have spent its room — the callout will not call a HOLD past this point
+    /// even with full structural agreement. 100 matches the boundary the regime row already
+    /// draws ("expanded" vs "inside average").
+    /// </summary>
+    [InputParameter("Direction: callout — ADR% considered room spent", 399, 10, 300, 5, 0)]
+    public int DirectionCalloutRoomSpentPercent { get; set; } = 100;
+
+    [InputParameter("Direction: callout — long colour", 400)]
+    public Color DirectionCalloutLongColor { get; set; } = Color.FromArgb(0x00, 0xFF, 0x00);
+
+    [InputParameter("Direction: callout — short colour", 401)]
+    public Color DirectionCalloutShortColor { get; set; } = Color.FromArgb(0xFF, 0x00, 0x00);
+
+    [InputParameter("Direction: callout — line width (px)", 402, 1, 10, 1, 1)]
+    public double DirectionCalloutLineWidth { get; set; } = 2.5;
 
     // ---- Fibonacci retracement -------------------------------------------
     //
@@ -588,14 +652,66 @@ public sealed class OrbIxIndicator : Qt.Indicator
     // entries would let two charts of one instrument disagree about what the system does.
     // These inputs govern the drawing only.
 
+    // Defaults to OFF as of the wick/volume absorption port below: this live touch-bracket
+    // display and the new one both answer "is this an absorption level," and stacking both
+    // on the same chart was the user's own "is that an absorption level or what" complaint.
+    // The new one is kept as the single default absorption display; this one is a settings
+    // toggle away for anyone who still wants the touch-bracket read alongside it.
     [InputParameter("Absorption: draw on chart", 160)]
-    public bool AbsorptionDrawEnabled { get; set; } = true;
+    public bool AbsorptionDrawEnabled { get; set; } = false;
 
     [InputParameter("Absorption: bid-holding colour", 161)]
     public Color AbsorptionBidColor { get; set; } = Color.FromArgb(0x66, 0xBB, 0x6A);
 
     [InputParameter("Absorption: ask-holding colour", 162)]
     public Color AbsorptionAskColor { get; set; } = Color.FromArgb(0xE5, 0x73, 0x73);
+
+    /// <summary>
+    /// A direct port of the user's own TradingView script (Tradingview/absorption.pine,
+    /// "Absorption Detector") - added 2026-09-15 alongside the footprint-based absorption above,
+    /// not in place of it. Deliberately independent: it needs ONLY plain OHLCV bars (no tick
+    /// history, no depth, no per-price volume), so nothing found elsewhere in this project (the
+    /// platform's tick-history refusal, a synthetic Level-1-only book) can degrade it. Drawn as
+    /// filled boxes (<see cref="WickAbsorptionOverlay"/>), not another dotted line, specifically
+    /// because the user's own feedback was that a chart full of thin dotted lines (HH/LL support/
+    /// resistance, session levels, the footprint shelf scan) makes it impossible to tell which
+    /// line means what at a glance.
+    /// </summary>
+    [InputParameter("Wick Absorption: enable", 163)]
+    public bool WickAbsorptionEnabled { get; set; } = true;
+
+    [InputParameter("Wick Absorption: volume threshold (x average)", 164, 1.1, 3.0, 0.1, 1)]
+    public double WickAbsorptionVolumeThreshold { get; set; } = 1.2;
+
+    [InputParameter("Wick Absorption: minimum volume", 165, 1000, 50000, 100, 0)]
+    public double WickAbsorptionMinVolume { get; set; } = 2500;
+
+    [InputParameter("Wick Absorption: min wick size (x ATR)", 166, 0.1, 0.8, 0.05, 2)]
+    public double WickAbsorptionMinWickSize { get; set; } = 0.2;
+
+    [InputParameter("Wick Absorption: minimum strength", 167, 0.5, 5.0, 0.1, 1)]
+    public double WickAbsorptionMinStrength { get; set; } = 1.5;
+
+    [InputParameter("Wick Absorption: ATR length", 168, 5, 50, 1, 0)]
+    public int WickAbsorptionAtrLength { get; set; } = 14;
+
+    [InputParameter("Wick Absorption: volume average length", 169, 10, 100, 1, 0)]
+    public int WickAbsorptionVolumeAvgLength { get; set; } = 30;
+
+    [InputParameter("Wick Absorption: zone extends (bars)", 170, 5, 100, 1, 0)]
+    public int WickAbsorptionZoneExtendBars { get; set; } = 20;
+
+    [InputParameter("Wick Absorption: max zones kept", 171, 5, 200, 1, 0)]
+    public int WickAbsorptionMaxZones { get; set; } = 50;
+
+    [InputParameter("Wick Absorption: selling colour", 172)]
+    public Color WickAbsorptionSellingColor { get; set; } = Color.FromArgb(0xFF, 0x44, 0x44);
+
+    [InputParameter("Wick Absorption: buying colour", 173)]
+    public Color WickAbsorptionBuyingColor { get; set; } = Color.FromArgb(0x00, 0xDD, 0x44);
+
+    [InputParameter("Wick Absorption: show labels", 174)]
+    public bool WickAbsorptionShowLabels { get; set; } = true;
 
     /// <summary>
     /// Research instrumentation, off by default: one NDJSON line per closed
@@ -669,8 +785,12 @@ public sealed class OrbIxIndicator : Qt.Indicator
     /// matched-random, failing Bonferroni and below the 2.76-tick cost floor. Reference only; this
     /// feeds no playbook and gates no entry.
     /// </summary>
+    // Defaults to OFF for the same reason as AbsorptionDrawEnabled above: this is the
+    // footprint-based absorption display the docstring just called a measured null, and it
+    // was one more thing on the chart answering the same "is this absorption" question the
+    // wick/volume port now answers instead.
     [InputParameter("Shelves: draw (lines in the sand)", 1100)]
-    public bool ShowAbsorptionShelves { get; set; } = true;
+    public bool ShowAbsorptionShelves { get; set; } = false;
 
     /// <summary>
     /// How many closed bars the scan reads, ending at the newest.
@@ -786,8 +906,11 @@ public sealed class OrbIxIndicator : Qt.Indicator
     [InputParameter("Flow: stacked imbalance lines", 1203)]
     public bool FlowStackedImbalance { get; set; } = true;
 
+    // Defaults to OFF alongside AbsorptionDrawEnabled and ShowAbsorptionShelves above: same
+    // footprint-based absorption question, now answered once by the wick/volume port instead
+    // of three times over.
     [InputParameter("Flow: absorption stack lines", 1204)]
-    public bool FlowAbsorption { get; set; } = true;
+    public bool FlowAbsorption { get; set; } = false;
 
     [InputParameter("Flow: unfinished auction lines", 1205)]
     public bool FlowUnfinishedAuction { get; set; } = true;
@@ -819,16 +942,17 @@ public sealed class OrbIxIndicator : Qt.Indicator
     public bool FlowGex { get; set; }
 
     /// <summary>
-    /// Heavy volume at a price the bar could not leave, MODERATE tier. On by default: the
-    /// thresholds were solved to draw roughly ten to fifteen marks a session, which is a
-    /// readable chart rather than a wall of lines.
+    /// Heavy volume at a price the bar could not leave, MODERATE tier. Defaults to OFF as of
+    /// the wick/volume absorption port: a fourth absorption display was the actual clutter
+    /// problem, not this one's own thresholds — re-enable it if the footprint read is still
+    /// wanted alongside the new one.
     /// </summary>
     [InputParameter("Flow: absorption tier 1 (moderate)", 1212)]
-    public bool FlowVolumeAbsorptionTier1 { get; set; } = true;
+    public bool FlowVolumeAbsorptionTier1 { get; set; } = false;
 
-    /// <summary>The same reading at the HEAVY threshold, drawn brighter. Three to six a session.</summary>
+    /// <summary>The same reading at the HEAVY threshold, drawn brighter. Same default change, same reason.</summary>
     [InputParameter("Flow: absorption tier 2 (heavy)", 1213)]
-    public bool FlowVolumeAbsorptionTier2 { get; set; } = true;
+    public bool FlowVolumeAbsorptionTier2 { get; set; } = false;
 
     /// <summary>
     /// Drives the absorbed engines and assembles what they draw. Null until a chart with a
@@ -1928,6 +2052,13 @@ public sealed class OrbIxIndicator : Qt.Indicator
     /// <summary>One evidence line per engine build — see the FeedHhLl report.</summary>
     private bool hhllSeedReported;
 
+    private readonly WickAbsorptionOverlay wickAbsorptionOverlay = new();
+    private readonly List<DateTime> wickAbsorptionBarOpen = new();
+    private WickVolumeAbsorption? wickAbsorptionEngine;
+    private (int AtrLength, int VolumeSmaLength, double VolumeThreshold, double MinVolumeAbs,
+              double MinWickSize, double MinStrength, int MaxZones) wickAbsorptionParams;
+    private volatile WickAbsorptionDrawable wickAbsorptionDrawable = WickAbsorptionDrawable.Empty;
+
     public OrbIxIndicator()
     {
         this.Name = "ORB-IX";
@@ -2210,7 +2341,9 @@ public sealed class OrbIxIndicator : Qt.Indicator
             Math.Max(1, this.HhLlLeftBars),
             Math.Max(1, this.HhLlRightBars),
             new DirectionSettings(
-                this.DirectionVwapFlatTicks, this.DirectionDeltaFlatContracts));
+                this.DirectionVwapFlatTicks, this.DirectionDeltaFlatContracts,
+                Math.Max(1, this.DirectionCalloutMinLanes),
+                this.DirectionCalloutRoomSpentPercent / 100d));
 
         symbol.NewLevel2 += this.OnLevel2;
         symbol.NewLast += this.OnLast;
@@ -2237,8 +2370,11 @@ public sealed class OrbIxIndicator : Qt.Indicator
         // panel outliving the symbol it described would keep rendering a verdict
         // for an instrument the chart is no longer showing.
         this.directionOverlay.Dispose();
+        this.directionCalloutOverlay.Dispose();
         this.direction = null;
         this.directionPanel = null;
+        this.directionCalloutSide = 0;
+        this.directionCalloutAnchorPrice = double.NaN;
 
         // THE DIAGNOSTIC THAT SETTLES THE OPEN QUESTION. Why a resolved wait never got
         // reported is not established, and the mechanism suspected — this method running
@@ -2295,6 +2431,12 @@ public sealed class OrbIxIndicator : Qt.Indicator
         this.hhllColored = 0;
         this.hhllColorsApplied = false;
         this.hhllSeedReported = false;
+
+        // Same reasoning: a wick-absorption zone measured against a different chart's bars
+        // would anchor to a price/time that means nothing on the new chart.
+        this.wickAbsorptionEngine = null;
+        this.wickAbsorptionBarOpen.Clear();
+        this.wickAbsorptionDrawable = WickAbsorptionDrawable.Empty;
 
         // The zone and delta features start over on the next load, same
         // reasoning as the HH/LL block above.
@@ -2692,6 +2834,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
             this.AdvanceContextRanges(nowUtc);
             this.SeedClosedSessionsFromBars(nowUtc);
             this.FeedHhLl();
+            this.FeedWickAbsorption();
             this.FeedZones();
             this.PublishDelta();
             this.PublishImbalance();
@@ -2749,13 +2892,19 @@ public sealed class OrbIxIndicator : Qt.Indicator
     private static string DescribePeriod(TimeSpan? period) =>
         period is { } p ? DirectionLanes.Label(p) : "none (not a time chart)";
 
+    // Computed regardless of DirectionPanelOn, unlike before: the panel and the loud
+    // scalp/hold callout below are two independent consumers of the same reading, and gating
+    // the computation on one consumer's toggle meant turning the panel off silently starved
+    // the other. This is the same class of coupling fixed in DrawRanges earlier.
     private void PublishDirection()
     {
         DirectionEngine? current = this.direction;
 
-        if (current is null || !this.DirectionPanelOn)
+        if (current is null)
         {
             this.directionPanel = null;
+            this.directionCalloutSide = 0;
+            this.directionCalloutAnchorPrice = double.NaN;
             return;
         }
 
@@ -2764,7 +2913,37 @@ public sealed class OrbIxIndicator : Qt.Indicator
 
         this.directionPanel = current.Panel(
             this.lastPrice, vwap, tick, this.averageDailyRange);
+
+        // THE CALLOUT LINE ANCHORS TO A LEVEL, NOT TO PRICE. Feeding it this.lastPrice every
+        // fold made it track every tick, which was the operator's exact complaint: a line
+        // that moves with the candle cannot mark a level to trade against. It now moves only
+        // when the SIDE changes (long, short, or neither) -- flipping from a scalp read to a
+        // hold read on the same side, or the other way round, updates the text and colour in
+        // place without relocating the line, because that is still the same opportunity, only
+        // re-graded.
+        int side = this.directionPanel.Callout.Kind switch
+        {
+            DirectionCalloutKind.ScalpLong or DirectionCalloutKind.HoldLong => 1,
+            DirectionCalloutKind.ScalpShort or DirectionCalloutKind.HoldShort => -1,
+            _ => 0,
+        };
+
+        if (side != this.directionCalloutSide)
+        {
+            this.directionCalloutSide = side;
+            this.directionCalloutAnchorPrice = side == 0 ? double.NaN : this.lastPrice;
+        }
     }
+
+    /// <summary>-1, 0 or 1: which side the direction callout is currently anchored on.</summary>
+    private int directionCalloutSide;
+
+    /// <summary>
+    /// The price the callout line is drawn at. Set once when <see cref="directionCalloutSide"/>
+    /// changes and held fixed until it changes again — see the remark in
+    /// <see cref="PublishDirection"/>.
+    /// </summary>
+    private double directionCalloutAnchorPrice = double.NaN;
 
     private void FeedHhLl()
     {
@@ -2900,6 +3079,119 @@ public sealed class OrbIxIndicator : Qt.Indicator
         this.hhllColored = 0;
         this.hhllColorsApplied = false;
     }
+
+    /// <summary>
+    /// Feeds the wick/volume absorption port (Tradingview/absorption.pine) one closed bar at a
+    /// time, same incremental-engine shape as <see cref="FeedHhLl"/> - restart the engine
+    /// wholesale on a settings change or a shrunken series, catch up bar-by-bar otherwise, rebuild
+    /// the drawable only when something actually advanced.
+    /// </summary>
+    private void FeedWickAbsorption()
+    {
+        var bars = this.HistoricalData;
+
+        if (bars is null)
+            return;
+
+        if (!this.WickAbsorptionEnabled)
+        {
+            if (this.wickAbsorptionEngine is not null)
+            {
+                this.wickAbsorptionEngine = null;
+                this.wickAbsorptionBarOpen.Clear();
+                this.wickAbsorptionDrawable = WickAbsorptionDrawable.Empty;
+            }
+
+            return;
+        }
+
+        var wanted = (
+            this.WickAbsorptionAtrLength, this.WickAbsorptionVolumeAvgLength,
+            this.WickAbsorptionVolumeThreshold, this.WickAbsorptionMinVolume,
+            this.WickAbsorptionMinWickSize, this.WickAbsorptionMinStrength,
+            this.WickAbsorptionMaxZones);
+
+        var closed = bars.Count - 1;
+
+        if (closed < 0)
+            return;
+
+        if (this.wickAbsorptionEngine is null || this.wickAbsorptionParams != wanted
+            || this.wickAbsorptionBarOpen.Count > closed)
+        {
+            this.wickAbsorptionEngine = new WickVolumeAbsorption(
+                wanted.WickAbsorptionAtrLength, wanted.WickAbsorptionVolumeAvgLength, wanted.WickAbsorptionVolumeThreshold,
+                wanted.WickAbsorptionMinVolume, wanted.WickAbsorptionMinWickSize, wanted.WickAbsorptionMinStrength, wanted.WickAbsorptionMaxZones);
+            this.wickAbsorptionParams = wanted;
+            this.wickAbsorptionBarOpen.Clear();
+        }
+
+        var advanced = false;
+
+        while (this.wickAbsorptionBarOpen.Count < closed)
+        {
+            if (!this.TryReadBar(bars, this.wickAbsorptionBarOpen.Count, out var bar))
+                break;
+
+            this.wickAbsorptionEngine.Feed(bar.Open, bar.High, bar.Low, bar.Close, bar.Volume);
+            this.wickAbsorptionBarOpen.Add(bar.OpenUtc);
+            advanced = true;
+        }
+
+        if (advanced || this.wickAbsorptionDrawable.Zones.Length == 0)
+            this.wickAbsorptionDrawable = this.BuildWickAbsorptionDrawable();
+    }
+
+    /// <summary>
+    /// Resolves the engine's bar-indexed zones into real timestamps/prices for the paint side -
+    /// same "fold builds it, paint only reads it" split as every other drawable here.
+    /// </summary>
+    private WickAbsorptionDrawable BuildWickAbsorptionDrawable()
+    {
+        if (this.wickAbsorptionEngine is not { } engine || this.wickAbsorptionBarOpen.Count == 0)
+            return WickAbsorptionDrawable.Empty;
+
+        var zones = engine.Zones;
+
+        if (zones.Count == 0)
+            return WickAbsorptionDrawable.Empty;
+
+        var lastBarIndex = this.wickAbsorptionBarOpen.Count - 1;
+        var result = new WickAbsorptionZoneDraw[zones.Count];
+
+        for (var i = 0; i < zones.Count; i++)
+        {
+            var zone = zones[i];
+
+            if (zone.StartBar < 0 || zone.StartBar > lastBarIndex)
+                continue;
+
+            var startUtc = this.wickAbsorptionBarOpen[zone.StartBar];
+            var endBarIndex = Math.Min(lastBarIndex, zone.StartBar + this.WickAbsorptionZoneExtendBars);
+            var endUtc = this.wickAbsorptionBarOpen[endBarIndex];
+
+            // The zone hasn't finished extending yet if it's still within its window of the most
+            // recently fed bar - carry it out to "now" instead of freezing at the last closed bar,
+            // so a fresh zone doesn't look truncated while the chart is still live.
+            if (endBarIndex == lastBarIndex && zone.StartBar + this.WickAbsorptionZoneExtendBars > lastBarIndex)
+                endUtc = DateTime.UtcNow;
+
+            var thickness = zone.Atr * WickAbsorptionZoneThicknessAtrMultiple;
+
+            result[i] = new WickAbsorptionZoneDraw(
+                startUtc, endUtc, zone.Level + thickness, zone.Level - thickness, zone.Side, zone.Strength);
+        }
+
+        return new WickAbsorptionDrawable(result);
+    }
+
+    /// <summary>
+    /// absorption.pine's own default (<c>zone_thickness</c> input, 0.15). Not exposed as a chart
+    /// setting - it is a small cosmetic thickness for the box, not a detection parameter, and this
+    /// project's convention (see the Fib/Zones inputs above) is to only surface inputs that change
+    /// what fires, not how thick a line is drawn.
+    /// </summary>
+    private const double WickAbsorptionZoneThicknessAtrMultiple = 0.15;
 
     // ---- HTF zones (approved plan 2026-08-28) ----------------------------
 
@@ -5517,7 +5809,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
 
     /// <summary>One chart bar, in the engine's own terms.</summary>
     private readonly record struct Bar(
-        DateTime OpenUtc, DateTime CloseUtc, double High, double Low, double Close, double Volume);
+        DateTime OpenUtc, DateTime CloseUtc, double Open, double High, double Low, double Close, double Volume);
 
     /// <summary>
     /// Reads one bar, oldest first.
@@ -5537,7 +5829,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
         if (bars[index, SeekOriginHistory.Begin] is not HistoryItemBar item)
             return false;
 
-        bar = new Bar(item.TimeLeft, item.TimeRight, item.High, item.Low, item.Close, item.Volume);
+        bar = new Bar(item.TimeLeft, item.TimeRight, item.Open, item.High, item.Low, item.Close, item.Volume);
         return true;
     }
 
@@ -6881,11 +7173,54 @@ public sealed class OrbIxIndicator : Qt.Indicator
         // Direction indicator uses. Outside the focus gate is wrong for it -- it is
         // context, not a breach -- so it draws only when focus is not engaged, and
         // that check happens below where `focus` is read.
+        // GUARDED LIKE EVERY OTHER OVERLAY CALL IN THIS METHOD, WHICH IT WAS NOT: this was the
+        // one draw call among roughly twenty with no try/catch, so a fault here (or a race
+        // between this thread reading this.directionPanel and the fold thread nulling it out
+        // when the setting toggles off) threw straight out of OnPaintChart, past every
+        // per-overlay guard, and skipped every draw call sequenced after it for that frame --
+        // "turn off a setting and the chart loses everything" is exactly what an unguarded
+        // early call in an otherwise-guarded sequence looks like from the chart.
         if (this.DirectionPanelOn)
         {
-            this.directionOverlay.Draw(
-                graphics, args!.Rectangle, this.directionPanel,
-                this.DirectionPanelOffsetX, this.DirectionPanelOffsetY);
+            try
+            {
+                this.directionOverlay.Draw(
+                    graphics, args!.Rectangle, this.directionPanel,
+                    this.DirectionPanelOffsetX, this.DirectionPanelOffsetY);
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = PathDisplay.Redact(
+                    $"The direction panel failed to draw: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        // The loud scalp/hold line — INDEPENDENT of DirectionPanelOn above, deliberately: this
+        // reads the same this.directionPanel the detail panel does, but the two are separate
+        // toggles so either can be on with the other off.
+        if (this.DirectionCalloutEnabled && paintWindow is not null)
+        {
+            try
+            {
+                DirectionCalloutDraw? callout = this.directionCalloutSide != 0
+                    && this.directionPanel is { Callout.Kind: not DirectionCalloutKind.None } content
+                    && double.IsFinite(this.directionCalloutAnchorPrice)
+                    ? new DirectionCalloutDraw(
+                        this.directionCalloutAnchorPrice, content.Callout.Text, content.Callout.IsLong)
+                    : null;
+
+                this.directionCalloutOverlay.Draw(
+                    graphics, paintWindow, callout,
+                    new DirectionCalloutOverlay.Options(
+                        this.DirectionCalloutLongColor, this.DirectionCalloutShortColor,
+                        (float)this.DirectionCalloutLineWidth),
+                    registry);
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = PathDisplay.Redact(
+                    $"The direction callout failed to draw: {ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         // FOCUS MODE STRIPS EVERYTHING BUT THE BREACH, THE TAPE AND THE LIMITS. The status
@@ -6903,6 +7238,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
             // land on top of the grid rather than under it.
             this.DrawFib(graphics, registry);
             this.DrawHhLl(graphics, registry);
+            this.DrawWickAbsorption(graphics, registry);
             this.DrawZones(graphics, registry);
             // BEFORE the ranges and the setup geometry: imbalance is tape context and must sit
             // under the decision lines, never over them.
@@ -6929,6 +7265,8 @@ public sealed class OrbIxIndicator : Qt.Indicator
             this.DrawFlowCounter(graphics, registry);
 
             this.DrawRanges(graphics);
+            this.DrawKeyLevelsOverlay(graphics);
+            this.DrawActiveSetup(graphics);
         }
 
         this.DrawWave1Geometry(graphics, registry);
@@ -6973,7 +7311,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
         var window = this.CurrentChart?.MainWindow;
         var status = this.statusChartText;
 
-        if (window is null || status.Length == 0)
+        if (window is null || status.Length == 0 || !this.ShowStatusLine)
             return;
 
         try
@@ -7244,6 +7582,14 @@ public sealed class OrbIxIndicator : Qt.Indicator
     /// <summary>A ceiling, for the pathological case where a band holds a great many levels.</summary>
     private const int MaxDrawnLevels = 14;
 
+    // Split into three independently-guarded calls, where one method used to do all three:
+    // the opening-range boxes, the key/reference price levels, and the active trade setup's
+    // lines are three unrelated things that happened to share one try/catch and one early
+    // return keyed off "any opening ranges to draw." A fault drawing the OR box used to take
+    // the key levels and the trade setup down with it for that frame, and a day with zero
+    // completed opening ranges (before the first session's range closes, or after a data gap)
+    // hid the key levels and the trade setup too, even though neither one has anything to do
+    // with an opening range existing.
     private void DrawRanges(Graphics graphics)
     {
         var window = this.CurrentChart?.MainWindow;
@@ -7259,18 +7605,50 @@ public sealed class OrbIxIndicator : Qt.Indicator
                 new ChartOverlay.Options(
                     this.DrawBox, this.DrawEdges, this.DrawMidline, this.DrawExtensions, this.DrawLabels),
                 DateTime.UtcNow);
-
-            this.overlay.DrawLevels(graphics, window, this.drawableLevels, this.DrawLabels);
-
-            // Drawn LAST so the setup's lines sit above the reference levels. When both are on
-            // the chart the one describing a decision is the one that must be legible.
-            this.overlay.DrawSetup(
-                graphics, window, this.drawableSetup, this.drawableSignalLabel, this.DrawLabels);
         }
         catch (Exception ex)
         {
             this.overlayFault = PathDisplay.Redact(
                 $"The range overlay failed to draw: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private void DrawKeyLevelsOverlay(Graphics graphics)
+    {
+        var window = this.CurrentChart?.MainWindow;
+
+        if (this.overlay is null || window is null || this.drawableLevels.Length == 0)
+            return;
+
+        try
+        {
+            this.overlay.DrawLevels(graphics, window, this.drawableLevels, this.DrawKeyLevelLabels);
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = PathDisplay.Redact(
+                $"The key levels overlay failed to draw: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // Drawn LAST (see the call site) so the setup's lines sit above the reference levels. When
+    // both are on the chart the one describing a decision is the one that must be legible.
+    private void DrawActiveSetup(Graphics graphics)
+    {
+        var window = this.CurrentChart?.MainWindow;
+
+        if (this.overlay is null || window is null || this.drawableSetup is null)
+            return;
+
+        try
+        {
+            this.overlay.DrawSetup(
+                graphics, window, this.drawableSetup, this.drawableSignalLabel, this.DrawSetupLabels);
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = PathDisplay.Redact(
+                $"The setup overlay failed to draw: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -7333,6 +7711,30 @@ public sealed class OrbIxIndicator : Qt.Indicator
         {
             this.overlayFault = PathDisplay.Redact(
                 $"The HH/LL overlay failed to draw: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private void DrawWickAbsorption(Graphics graphics, List<RectangleF> labelRegistry)
+    {
+        var chart = this.CurrentChart;
+        var window = chart?.MainWindow;
+        var drawable = this.wickAbsorptionDrawable;
+
+        if (window is null || chart is null || drawable.Zones.Length == 0)
+            return;
+
+        try
+        {
+            this.wickAbsorptionOverlay.Draw(graphics, window, drawable,
+                new WickAbsorptionOverlay.Options(
+                    this.WickAbsorptionSellingColor, this.WickAbsorptionBuyingColor,
+                    this.WickAbsorptionShowLabels),
+                labelRegistry);
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = PathDisplay.Redact(
+                $"The Wick Absorption overlay failed to draw: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -7489,6 +7891,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
         this.overlay?.Dispose();
         this.overlay = null;
         this.hhllOverlay.Dispose();
+        this.wickAbsorptionOverlay.Dispose();
         this.fibOverlay.Dispose();
         this.zoneOverlay.Dispose();
         this.deltaOverlay.Dispose();

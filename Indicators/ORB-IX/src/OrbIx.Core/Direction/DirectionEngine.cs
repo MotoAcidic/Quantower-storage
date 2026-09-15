@@ -13,17 +13,29 @@ namespace OrbIx.Core.Direction;
 /// <param name="DeltaFlatContracts">
 /// Magnitude of cumulative delta inside which flow counts as flat.
 /// </param>
+/// <param name="CalloutMinConfirmingLanes">
+/// See <see cref="DirectionCallout.From"/>'s <c>minConfirmingLanes</c> parameter.
+/// </param>
+/// <param name="CalloutRoomSpentShare">
+/// See <see cref="DirectionCallout.From"/>'s <c>roomSpentShare</c> parameter.
+/// </param>
 /// <remarks>
-/// NEITHER IS MEASURED AND BOTH ARE STATED. Price is never exactly on VWAP and
-/// delta is never exactly zero, so without bands both would vote on the last tick
-/// of noise. Where the band belongs is a trading judgement; these are defaults, not
-/// findings, and they live in configuration so changing one is visible.
+/// NEITHER OF THE FIRST TWO IS MEASURED AND BOTH ARE STATED. Price is never exactly on
+/// VWAP and delta is never exactly zero, so without bands both would vote on the last
+/// tick of noise. Where the band belongs is a trading judgement; these are defaults, not
+/// findings, and they live in configuration so changing one is visible. The two callout
+/// thresholds are the same kind of stated default, not a measured one — see
+/// <see cref="DirectionCallout"/>.
 /// </remarks>
 public readonly record struct DirectionSettings(
-    double VwapFlatTicks, double DeltaFlatContracts)
+    double VwapFlatTicks, double DeltaFlatContracts,
+    int CalloutMinConfirmingLanes, double CalloutRoomSpentShare)
 {
-    /// <summary>Two ticks either side of VWAP, and 100 contracts of delta.</summary>
-    public static DirectionSettings Default { get; } = new(2d, 100d);
+    /// <summary>
+    /// Two ticks either side of VWAP, 100 contracts of delta, two lanes to confirm a hold,
+    /// and the day's full average range as the room-spent boundary.
+    /// </summary>
+    public static DirectionSettings Default { get; } = new(2d, 100d, 2, 1.0);
 }
 
 /// <summary>
@@ -144,7 +156,10 @@ public sealed class DirectionEngine
 
         string regime = DirectionInputs.Regime(this.SessionRange, averageDailyRange);
 
-        return DirectionPanel.Build(lanes, location, flow, regime);
+        return DirectionPanel.Build(
+            lanes, location, flow, regime,
+            this.SessionRange, averageDailyRange,
+            this.settings.CalloutMinConfirmingLanes, this.settings.CalloutRoomSpentShare);
     }
 
     /// <summary>
