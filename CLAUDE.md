@@ -5,10 +5,69 @@ This document provides technical context and logic documentation for all trading
 
 ---
 
+## Repository Layout (reorganized 2026-09-14)
+
+```text
+Quantower-storage/
+├── Strategies/          - every Quantower Strategy project (AlgoType=Strategy)
+│   ├── <name>Strategy/  - one folder per strategy, see catalog below
+│   └── Backups/         - dated/backup copies of strategies, kept separate from the active ones
+├── Indicators/           - every Quantower Indicator project (AlgoType=Indicator)
+│   └── ORB-IX/           - see "Indicator Catalog" below
+├── TradingView/          - reference .pine scripts strategies here are ported FROM (not
+│                           themselves a Strategy or Indicator project - source material only)
+├── CLAUDE.md             - this file
+└── README.md             - user-facing parameter reference (not yet updated for every
+                            strategy below - see "Known gaps" at the end of this file)
+```
+
+Before this date everything sat loose at the repo root with no distinction between what
+Quantower treats as a Strategy vs. an Indicator - `Strategies/` and `Indicators/` now mirror
+that platform-level distinction directly, so it's visible at a glance which category
+something belongs to without opening it. All strategy `**File:**`/`**Readme:**` paths below
+are relative to the repo root and already reflect the new `Strategies/` prefix.
+`C:\Quantower\Settings\Scripts\...` paths (deployment targets) are unaffected by this repo's
+own layout and unchanged throughout.
+
+**Note while moving files**: a background C# language server (VS Code's C# Dev Kit) was
+holding file locks on `obj/`/`.vs/` folders inside several strategy projects, and had also
+somehow gotten `.vs/` IDE-cache junk committed into git for a handful of projects (it should
+never have been tracked - `.gitignore` already excludes `bin/`/`obj/` but not `.vs/`). Both
+were cleared out as part of this move: all `obj/`/`bin/`/`.vs/` folders across the repo were
+deleted (regenerable build/IDE artifacts, not source) and the stray tracked `.vs/` files were
+removed from git. If `.vs/` reappears in `git status` after opening a project in Visual
+Studio/VS Code, it's safe to `rm -rf` and never `git add` it.
+
+---
+
+## Indicator Catalog
+
+### ORB-IX (`Indicators/ORB-IX/`)
+**Files:** `Indicators/ORB-IX/OrbIxIndicator.dll`, `OrbIxIndicator.deps.json`, `README.md`
+**Source:** none in this repo - given to the user by a friend as a **compiled DLL only**, not
+buildable/modifiable here. Treat this folder as a binary drop, not a project.
+**Install:** copy `OrbIxIndicator.dll` to its own folder under
+`C:\Quantower\Settings\Scripts\Indicators\ORB-IX\` (see the indicator's own README for the
+full explanation of why the DLL needs its own folder).
+
+**What it is** (from its own README - draws only, places no orders, reads no account):
+opening range/session structure, market structure (HH/LL read), volume profiles (FRVP +
+anchored), VWAP with bands, and eleven switchable order-flow displays built from each bar's
+footprint (cluster stats/search, stacked imbalance, absorption, unfinished auction, big
+trades, live counter, DOM levels, delta with flip levels, trend lines/fib fan/GEX walls).
+Notably self-calibrates its stacked-imbalance volume floor from the actual tape in front of
+it rather than shipping a fixed number tuned on one instrument (MNQ) - see the indicator's
+own README for the calibration methodology and status-line format.
+**Explicitly not a signal generator** - the author's own README states plainly that none of
+these displays are claimed to predict anything, and testing several of the ideas found no
+edge; it's a reading-the-tape tool, not an entry system.
+
+---
+
 ## Strategy Catalog
 
 ### 0. EMA Cross Strategy (`emaCrossStrategy`)
-**File:** `emaCrossStrategy/emaCrossStrategy/emaCrossStrategy.cs`
+**File:** `Strategies/emaCrossStrategy/emaCrossStrategy/emaCrossStrategy.cs`
 **Build output:** `C:\Quantower\Settings\Scripts\Strategies\emaCrossStrategy\emaCrossStrategy.dll`
 
 #### Core Logic
@@ -85,9 +144,9 @@ This document provides technical context and logic documentation for all trading
 ---
 
 ### 1. Futures Pro Strategy (`futuresProStrategy`)
-**File:** `futuresProStrategy/futuresProStrategy/futuresProStrategy.cs`
+**File:** `Strategies/futuresProStrategy/futuresProStrategy/futuresProStrategy.cs`
 **Build output:** `C:\Quantower\Settings\Scripts\Strategies\futuresProStrategy\futuresProStrategy.dll`
-**Readme:** `futuresProStrategy/readme.md`
+**Readme:** `Strategies/futuresProStrategy/readme.md`
 
 #### Core Logic
 - Multi-factor trend-following for MES / ES / NQ on any chosen timeframe (default 5m)
@@ -163,7 +222,7 @@ This document provides technical context and logic documentation for all trading
 ---
 
 ### 2. Box Range Strategy (`boxRangeStrategy`)
-**File:** `boxRangeStrategy/boxRangeStrategy/boxRangeStrategy.cs`
+**File:** `Strategies/boxRangeStrategy/boxRangeStrategy/boxRangeStrategy.cs`
 
 #### Core Logic
 - Identifies high and low price ranges over a lookback period
@@ -186,7 +245,7 @@ This document provides technical context and logic documentation for all trading
 ---
 
 ### 3. Price Surge Strategy (`priceSurgeStrategy`) 
-**File:** `priceSurgeStrategy/priceSurgeStrategy/priceSurgeStrategy.cs`
+**File:** `Strategies/priceSurgeStrategy/priceSurgeStrategy/priceSurgeStrategy.cs`
 
 #### Core Logic
 - Detects sudden price movements exceeding normal volatility
@@ -208,7 +267,7 @@ This document provides technical context and logic documentation for all trading
 ---
 
 ### 4. Range Scalp Strategy (`rangeScalpStrategy`)
-**File:** `rangeScalpStrategy/rangeScalpStrategy/rangeScalpStrategy.cs`
+**File:** `Strategies/rangeScalpStrategy/rangeScalpStrategy/rangeScalpStrategy.cs`
 
 #### Core Logic
 - Quick scalping within identified price ranges
@@ -230,7 +289,7 @@ This document provides technical context and logic documentation for all trading
 ---
 
 ### 5. SMA Cross Strategy (`smaCrossStrategy`)
-**File:** `smaCrossStrategy/smaCrossStrategy/smaCrossStrategy.cs`
+**File:** `Strategies/smaCrossStrategy/smaCrossStrategy/smaCrossStrategy.cs`
 
 #### Core Logic
 - Classic moving average crossover system
@@ -254,7 +313,7 @@ This document provides technical context and logic documentation for all trading
 ---
 
 ### 6. Price Slope Change Strategy (`priceSlopeChangeStrategy`)
-**File:** `smaSlopeChangeStrategy/priceSlopeChangeStrategy/priceSlopeChangeStrategy.cs`
+**File:** `Strategies/smaSlopeChangeStrategy/priceSlopeChangeStrategy/priceSlopeChangeStrategy.cs`
 
 #### Core Logic
 - Monitors slope changes in moving averages
@@ -276,7 +335,7 @@ This document provides technical context and logic documentation for all trading
 ---
 
 ### 7. Weighted Surge Strategy (`weightedSurgeStrategy`)
-**File:** `weightedSurgeStrategy/weightedSurgeStrategy/weightedSurgeStrategy.cs`
+**File:** `Strategies/weightedSurgeStrategy/weightedSurgeStrategy/weightedSurgeStrategy.cs`
 
 #### Core Logic
 - Enhanced version of Price Surge Strategy
@@ -299,7 +358,7 @@ This document provides technical context and logic documentation for all trading
 
 ### 10-12. Keltner Reversion / Trendline Break / S/R Channel Break Strategies — added 2026-09-12
 
-**Files:** `keltnerReversionStrategy/`, `trendlineBreakStrategy/`, `srChannelBreakStrategy/`
+**Files:** `Strategies/keltnerReversionStrategy/`, `Strategies/trendlineBreakStrategy/`, `Strategies/srChannelBreakStrategy/`
 (each its own project, `.cs`/`.csproj`/`.sln`/`readme.md`)
 **Build outputs:** `C:\Quantower\Settings\Scripts\Strategies\{keltnerReversionStrategy,trendlineBreakStrategy,srChannelBreakStrategy}\*.dll`
 
@@ -353,8 +412,8 @@ back to seeing every position on the account again, defeating the whole point.
 ---
 
 ### 9. TV Confluence Strategy (`tvConfluenceStrategy`) — added 2026-09-12
-**File:** `tvConfluenceStrategy/tvConfluenceStrategy/tvConfluenceStrategy.cs`
-**Readme:** `tvConfluenceStrategy/readme.md`
+**File:** `Strategies/tvConfluenceStrategy/tvConfluenceStrategy/tvConfluenceStrategy.cs`
+**Readme:** `Strategies/tvConfluenceStrategy/readme.md`
 **Build output:** `C:\Quantower\Settings\Scripts\Strategies\tvConfluenceStrategy\tvConfluenceStrategy.dll`
 
 #### Core Logic
@@ -390,7 +449,7 @@ See `tvConfluenceStrategy/readme.md` for the full table (27 parameters: instrume
 ---
 
 ### 8. Gold ORB Strategy (`goldOrbStrategy`) 
-**File:** `goldOrbStrategy/goldOrbStrategy/goldOrbStrategy.cs`
+**File:** `Strategies/goldOrbStrategy/goldOrbStrategy/goldOrbStrategy.cs`
 
 #### Core Logic
 - Opening Range Breakout strategy for gold trading
@@ -411,6 +470,94 @@ See `tvConfluenceStrategy/readme.md` for the full table (27 parameters: instrume
 - `strategyMode`: Breakout confirmation mode
 - `confirmationCandleMinutes`: Time to wait for confirmation
 - `riskRewardRatio`: Target calculation multiplier
+
+---
+
+### 9. EMA Simple Strategy (`emaSimpleStrategy`) — undocumented until 2026-09-14
+**File:** `Strategies/emaSimpleStrategy/emaSimpleStrategy/emaSimpleStrategy.cs`
+
+#### Core Logic
+A deliberately stripped-down sibling of `emaCrossStrategy` — same Micro/Mid EMA crossover
+and reverse-cross-flips-the-position idea, but with **none** of the impulse-filter/retrace-
+watch/HTF-touch-re-entry/partial-close machinery. Enters on a fresh cross, reverses on the
+opposite cross, manages risk with a hard SL + optional TP bracket and an optional simple
+trailing stop. Entirely bar-close driven for signals; the trailing stop is the only tick-
+level logic (`Hdm_HistoryItemUpdated`).
+
+#### Key Private Fields
+| Field | Purpose |
+|---|---|
+| `pendingEntrySide` | Queued reverse-cross flip, fires in `Core_PositionRemoved` |
+| `trailingActivated` / `bestPrice` / `currentSide` | Trailing stop state |
+| `inPosition` / `waitOpenPosition` / `waitClosePositions` | Order-in-flight guards |
+
+#### Parameters (InputParameter index order)
+| # | Name | Default | Notes |
+|---|---|---|---|
+| 0 | Symbol | — | Trading instrument |
+| 1 | Account | — | Trading account |
+| 2 | Micro EMA (fast) | 5 | Fast EMA period |
+| 3 | Mid EMA (slow) | 29 | Slow EMA period |
+| 4 | Period | MIN1 | Chart timeframe |
+| 5 | Start Point | 30 days ago | Historical data start |
+| 6 | Quantity | 1 | Contracts per trade |
+| 7 | Stop Loss (ticks) | 100 | Hard bracket SL |
+| 8 | Take Profit (ticks) | 0 | 0 = disabled |
+| 9 | Trail Activation (ticks) | 30 | Profit to arm trailing; 0 = off |
+| 10 | Trailing Stop (ticks) | 15 | Pullback from peak to close; 0 = off |
+
+---
+
+### 10. EMA Trend Strategy (`emaTrendStrategy`) — undocumented until 2026-09-14
+**File:** `Strategies/emaTrendStrategy/emaTrendStrategy/emaTrendStrategy.cs`
+
+#### Core Logic
+EMA crossover (Fast/Slow) gated by two OPTIONAL filters the file's own header comment
+describes clearly: a **trend filter** (price must be on the correct side of a third,
+slower Trend EMA - 0 disables it) and a **momentum filter** (the Fast/Slow spread at the
+crossover bar must exceed the prior 4 bars' average spread × a multiplier - 1.0 disables
+it). Three selectable exit modes:
+- **Mode 0 (Bar Push)** - code-managed exit when price ticks past the prior bar's high/low
+  against the position; fixed SL as a safety net only.
+- **Mode 1 (SL/TP + Trailing)** - a bracket order placed at entry does all exit management.
+- **Mode 2 (TV Match)** - mirrors `emaCrossStrategy`'s TradingView-ported weakness-bar exit
+  (EMA gap shrinking for N consecutive bars) plus reverse-cross re-entry; fixed SL as a
+  hard backstop underneath.
+
+#### Parameters (InputParameter index order, partial - see file for the full exit-mode block)
+| # | Name | Default | Notes |
+|---|---|---|---|
+| 0 | Symbol | — | Trading instrument |
+| 1 | Account | — | Trading account |
+| 2 | Fast EMA | — | Fast EMA period |
+| 3 | Slow EMA | — | Slow EMA period |
+| 4 | Trend EMA | 0 = disabled | Direction filter |
+| 5 | Period | — | Chart timeframe |
+| 6 | Start Point | — | Historical data start |
+| 7 | Quantity | 1 | Contracts per trade |
+| 8 | Momentum Multiplier | 1.0 = disabled | Crossover-strength filter |
+| 10 | Exit Mode | 2 (TV Match) | 0 = Bar Push, 1 = SL/TP+Trailing, 2 = TV Match |
+| 11 | Stop Loss (ticks) | 100 | Hard safety net, all modes |
+| 12 | Trailing Stop (ticks) | 40 | Exit Mode 1 only |
+
+---
+
+### 11. ES ORB Strategy (`esOrbStrategy`) — undocumented until 2026-09-14
+**File:** `Strategies/esOrbStrategy/esOrbStrategy/esOrbStrategy.cs`
+
+#### Core Logic
+Opening Range Breakout for ES, more configurable than `goldOrbStrategy`: three **entry
+modes** (`Immediate Breakout`, `Dynamic Multi-Level Retest` i.e. wait for a 50% retest of
+the range, `Wait for Any Retest`) crossed with three **stop-loss modes** (`Full Range`,
+`50% Range`, `Fixed Points`) via C# enums exposed as dropdown `InputParameter` variants
+(same UI pattern as `esOrbStrategy.cs`'s own `EntryMode`/`StopLossMode` enums - note enums
+need the explicit `variants:` array since `[InputParameter]` doesn't render raw enums, per
+the platform note already captured under EMA Cross Strategy above).
+
+#### API / Platform Notes
+- Demonstrates the enum-as-dropdown `variants: new object[] { "label", EnumValue, ... }`
+  pattern other strategies in this repo could reuse instead of the `int`-with-a-comment
+  workaround `emaCrossStrategy`/`emaTrendStrategy` use for their mode selectors.
 
 ---
 
@@ -562,3 +709,20 @@ above.
 | Gold ORB | Session breakouts | Gold futures | Medium |
 
 This documentation should be updated whenever strategy logic or parameters are modified.
+
+---
+
+## Known gaps (as of the 2026-09-14 reorganization)
+
+- **`README.md` is stale** - it documents 8 strategies in user-facing parameter-table form
+  (EMA Cross through Gold ORB) but was never updated for `tvConfluenceStrategy`,
+  `keltnerReversionStrategy`, `trendlineBreakStrategy`, `srChannelBreakStrategy`,
+  `esOrbStrategy`, `emaSimpleStrategy`, or `emaTrendStrategy` - all of those exist only in
+  this file (CLAUDE.md) and/or their own per-project `readme.md`. Worth a pass if the
+  README is meant to stay the user-facing entry point.
+- **`ORB-IX` has no build/verification story in this repo** - it's a compiled DLL from a
+  friend with no source anywhere here (see Indicator Catalog above). If it ever needs a
+  fix, that's a request to whoever built it, not an edit in this repo.
+- **`Strategies/Backups/`** holds 5 dated snapshots; none were reviewed for whether they're
+  still worth keeping vs. superseded by their active counterpart - untouched during this
+  reorganization beyond the relocation itself.
