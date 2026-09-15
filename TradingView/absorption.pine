@@ -1,0 +1,254 @@
+//@version=5
+indicator("Absorption Detector", shorttitle="Absorption", overlay=true, max_boxes_count=500, max_labels_count=100)
+
+// ===== DETECTION INPUTS =====
+group1 = "Absorption Detection"
+volume_threshold = input.float(1.2, "Volume Threshold", minval=1.1, maxval=3.0, group=group1, tooltip="Volume multiplier compared to average volume (1.2 = 20% above average)")
+min_volume_abs = input.float(2500, "Minimum Volume", minval=1000, maxval=50000, group=group1, tooltip="Absolute minimum volume required regardless of ratio")
+min_wick_size = input.float(0.2, "Min Wick Size (ATR)", minval=0.1, maxval=0.8, group=group1, tooltip="Minimum wick size as multiple of ATR (0.2 = 20% of ATR)")
+min_strength = input.float(1.5, "Minimum Strength", minval=0.5, maxval=5.0, group=group1, tooltip="Minimum combined volume/wick strength score")
+atr_length = input.int(14, "ATR Length", minval=5, maxval=50, group=group1, tooltip="Period for Average True Range calculation")
+volume_sma_length = input.int(30, "Volume Average Length", minval=10, maxval=100, group=group1, tooltip="Period for volume moving average")
+
+// ===== DISPLAY SETTINGS =====
+group2 = "Display Options"
+show_zones = input.bool(true, "Show Absorption Zones", group=group2, tooltip="Display absorption zones as boxes on chart")
+show_labels = input.bool(true, "Show Pattern Labels", group=group2, tooltip="Display text labels for absorption patterns")
+show_historic = input.bool(false, "Show Historic Zones", group=group2, tooltip="Show all historic zones for backtesting (disable for performance)")
+zone_extend = input.int(20, "Zone Extension", minval=5, maxval=50, group=group2, tooltip="How many bars to extend zones into the future")
+label_offset = input.float(1.5, "Label Distance", minval=0.5, maxval=3.0, group=group2, tooltip="Distance of labels from candles (in ATR multiples)")
+max_zones = input.int(50, "Maximum Zones", minval=10, maxval=500, group=group2, tooltip="Maximum number of zones to keep (higher = more history, slower performance)")
+zone_thickness = input.float(0.15, "Zone Thickness", minval=0.05, maxval=0.5, group=group2, tooltip="Thickness of absorption zones (in ATR multiples)")
+
+// ===== STYLING - SELLING ABSORPTION =====
+group3 = "Selling Absorption Styling"
+selling_zone_color = input.color(color.new(#ff4444, 85), "Zone Color", group=group3, tooltip="Color for selling absorption zones")
+selling_border_color = input.color(color.new(#ff4444, 60), "Border Color", group=group3, tooltip="Border color for selling absorption zones")
+selling_label_color = input.color(#ff4444, "Label Color", group=group3, tooltip="Background color for selling labels")
+selling_text_color = input.color(color.white, "Label Text Color", group=group3, tooltip="Text color for selling labels")
+selling_border_width = input.int(1, "Border Width", minval=1, maxval=3, group=group3, tooltip="Border thickness for selling zones")
+
+// ===== STYLING - BUYING ABSORPTION =====
+group4 = "Buying Absorption Styling"
+buying_zone_color = input.color(color.new(#00dd44, 85), "Zone Color", group=group4, tooltip="Color for buying absorption zones")
+buying_border_color = input.color(color.new(#00dd44, 60), "Border Color", group=group4, tooltip="Border color for buying absorption zones")
+buying_label_color = input.color(#00dd44, "Label Color", group=group4, tooltip="Background color for buying labels")
+buying_text_color = input.color(color.white, "Label Text Color", group=group4, tooltip="Text color for buying labels")
+buying_border_width = input.int(1, "Border Width", minval=1, maxval=3, group=group4, tooltip="Border thickness for buying zones")
+
+// ===== INFO PANEL STYLING =====
+group5 = "Info Panel Styling"
+show_info_panel = input.bool(false, "Show Info Panel", group=group5, tooltip="Display information panel in top-right corner")
+panel_position = input.string("Top Right", "Panel Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group=group5, tooltip="Position of the information panel")
+panel_bg_color = input.color(color.new(color.white, 95), "Panel Background", group=group5, tooltip="Background color for info panel")
+panel_text_color = input.color(color.black, "Panel Text Color", group=group5, tooltip="Text color for info panel")
+panel_header_color = input.color(#333333, "Panel Header Color", group=group5, tooltip="Header background color for info panel")
+
+// ===== ALERT SETTINGS =====
+group6 = "Alert Settings"
+enable_selling_alerts = input.bool(true, "Enable Selling Alerts", group=group6, tooltip="Send alerts for selling absorption patterns")
+enable_buying_alerts = input.bool(true, "Enable Buying Alerts", group=group6, tooltip="Send alerts for buying absorption patterns")
+alert_text_selling = input.string("🔴 SELLING ABSORPTION: Institutions absorbing retail buying pressure", "Selling Alert Text", group=group6, tooltip="Custom text for selling absorption alerts")
+alert_text_buying = input.string("🟢 BUYING ABSORPTION: Institutions absorbing retail selling pressure", "Buying Alert Text", group=group6, tooltip="Custom text for buying absorption alerts")
+
+// ===== CORE CALCULATIONS =====
+atr = ta.atr(atr_length)
+avg_volume = ta.sma(volume, volume_sma_length)
+
+// Price components
+upper_wick = high - math.max(open, close)
+lower_wick = math.min(open, close) - low
+price_range = high - low
+
+// ===== ABSORPTION DETECTION =====
+// High volume condition
+high_volume = volume > avg_volume * volume_threshold and volume > min_volume_abs
+
+// Significant wicks
+upper_wick_significant = upper_wick > atr * min_wick_size
+lower_wick_significant = lower_wick > atr * min_wick_size
+
+// P-Pattern: Selling absorption (upper wick + high volume + close in lower half)
+p_pattern = high_volume and upper_wick_significant and close <= (high + low) / 2
+
+// B-Pattern: Buying absorption (lower wick + high volume + close in upper half) 
+b_pattern = high_volume and lower_wick_significant and close >= (high + low) / 2
+
+// Strength calculation
+volume_strength = volume / avg_volume
+wick_strength_upper = upper_wick / atr
+wick_strength_lower = lower_wick / atr
+
+p_strength = volume_strength * wick_strength_upper
+b_strength = volume_strength * wick_strength_lower
+
+// Only show strong patterns
+strong_p_pattern = p_pattern and p_strength >= min_strength
+strong_b_pattern = b_pattern and b_strength >= min_strength
+
+// ===== ZONE MANAGEMENT =====
+type AbsorptionZone
+    float level
+    float strength
+    int start_bar
+    string pattern_type
+    color zone_color
+    color border_color
+    int border_width
+
+var array<AbsorptionZone> zones = array.new<AbsorptionZone>()
+
+// Add zones for strong patterns
+if strong_p_pattern and barstate.isconfirmed
+    level = high
+    new_zone = AbsorptionZone.new(
+         level=level, 
+         strength=p_strength, 
+         start_bar=bar_index, 
+         pattern_type="SELLING", 
+         zone_color=selling_zone_color,
+         border_color=selling_border_color,
+         border_width=selling_border_width
+         )
+    array.push(zones, new_zone)
+
+if strong_b_pattern and barstate.isconfirmed
+    level = low
+    new_zone = AbsorptionZone.new(
+         level=level, 
+         strength=b_strength, 
+         start_bar=bar_index, 
+         pattern_type="BUYING", 
+         zone_color=buying_zone_color,
+         border_color=buying_border_color,
+         border_width=buying_border_width
+         )
+    array.push(zones, new_zone)
+
+// Clean old zones based on user preference
+while array.size(zones) > max_zones
+    array.shift(zones)
+
+// ===== VISUALIZATION =====
+var array<box> zone_boxes = array.new<box>()
+var array<label> zone_labels = array.new<label>()
+
+// Clear old visuals
+for box_item in zone_boxes
+    box.delete(box_item)
+array.clear(zone_boxes)
+
+for label_item in zone_labels
+    label.delete(label_item)
+array.clear(zone_labels)
+
+// Draw zones with historic option
+if show_zones and array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        zone = array.get(zones, i)
+        
+        // Show all zones if historic is enabled, otherwise limit to recent
+        show_this_zone = show_historic or (bar_index - zone.start_bar < 150)
+        
+        if show_this_zone
+            zone_thick = atr * zone_thickness
+            zone_top = zone.level + zone_thick
+            zone_bottom = zone.level - zone_thick
+            
+            // Extend zones based on user setting
+            zone_right = bar_index + zone_extend
+            
+            zone_box = box.new(
+                 left=zone.start_bar, 
+                 top=zone_top, 
+                 right=zone_right, 
+                 bottom=zone_bottom, 
+                 border_color=zone.border_color, 
+                 bgcolor=zone.zone_color, 
+                 border_width=zone.border_width
+                 )
+            array.push(zone_boxes, zone_box)
+
+// Labels with custom styling
+if show_labels
+    label_distance = atr * label_offset
+    
+    if strong_p_pattern
+        label_y = high + label_distance
+        pattern_label = label.new(
+             x=bar_index, 
+             y=label_y, 
+             text="SELLING\nABSORPTION", 
+             style=label.style_label_down, 
+             color=selling_label_color, 
+             textcolor=selling_text_color, 
+             size=size.normal, 
+             tooltip="Selling Absorption | Strength: " + str.tostring(p_strength, "#.##") + " | Volume: " + str.tostring(volume/1000, "#.#") + "K"
+             )
+        array.push(zone_labels, pattern_label)
+    
+    if strong_b_pattern
+        label_y = low - label_distance
+        pattern_label = label.new(
+             x=bar_index, 
+             y=label_y, 
+             text="BUYING\nABSORPTION", 
+             style=label.style_label_up, 
+             color=buying_label_color, 
+             textcolor=buying_text_color, 
+             size=size.normal, 
+             tooltip="Buying Absorption | Strength: " + str.tostring(b_strength, "#.##") + " | Volume: " + str.tostring(volume/1000, "#.#") + "K"
+             )
+        array.push(zone_labels, pattern_label)
+
+// ===== INFO PANEL =====
+if show_info_panel and barstate.islast
+    // Determine panel position
+    panel_pos = switch panel_position
+        "Top Left" => position.top_left
+        "Top Right" => position.top_right
+        "Bottom Left" => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        => position.top_right
+    
+    var table info_table = table.new(panel_pos, 2, 5, bgcolor=panel_bg_color, border_width=1)
+    
+    // Header
+    table.cell(info_table, 0, 0, "ABSORPTION", text_color=color.white, bgcolor=panel_header_color, text_size=size.normal)
+    table.cell(info_table, 1, 0, "STATUS", text_color=color.white, bgcolor=panel_header_color, text_size=size.normal)
+    
+    // Volume ratio
+    table.cell(info_table, 0, 1, "Volume Ratio", text_color=panel_text_color, text_size=size.small)
+    vol_ratio = volume / avg_volume
+    vol_color = vol_ratio >= volume_threshold ? #00dd44 : color.gray
+    table.cell(info_table, 1, 1, str.tostring(vol_ratio, "#.#")+"x", text_color=vol_color, text_size=size.small)
+    
+    // Active zones
+    table.cell(info_table, 0, 2, "Total Zones", text_color=panel_text_color, text_size=size.small)
+    table.cell(info_table, 1, 2, str.tostring(array.size(zones)), text_color=#4444ff, text_size=size.small)
+    
+    // Current volume
+    table.cell(info_table, 0, 3, "Current Vol", text_color=panel_text_color, text_size=size.small)
+    table.cell(info_table, 1, 3, str.tostring(volume/1000, "#.#")+"K", text_color=panel_text_color, text_size=size.small)
+    
+    // Last signal
+    table.cell(info_table, 0, 4, "Last Signal", text_color=panel_text_color, text_size=size.small)
+    last_signal = strong_p_pattern ? "SELLING" : strong_b_pattern ? "BUYING" : "NONE"
+    signal_color = strong_p_pattern ? selling_label_color : strong_b_pattern ? buying_label_color : color.gray
+    table.cell(info_table, 1, 4, last_signal, text_color=signal_color, text_size=size.small)
+
+// ===== ENHANCED ALERTS =====
+if enable_selling_alerts and strong_p_pattern
+    alert(alert_text_selling, alert.freq_once_per_bar)
+
+if enable_buying_alerts and strong_b_pattern
+    alert(alert_text_buying, alert.freq_once_per_bar)
+
+// Basic alertconditions for compatibility
+alertcondition(strong_p_pattern, "Selling Absorption", "Strong selling absorption detected")
+alertcondition(strong_b_pattern, "Buying Absorption", "Strong buying absorption detected")
+
+// ===== PLOT FOR EXTERNAL ACCESS =====
+plot(strong_p_pattern ? 1 : strong_b_pattern ? -1 : 0, "Absorption Signal", display=display.none)
+plot(p_strength, "Selling Strength", color=color.new(#ff4444, 100), display=display.none)
+plot(b_strength, "Buying Strength", color=color.new(#00dd44, 100), display=display.none)

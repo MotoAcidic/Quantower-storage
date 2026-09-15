@@ -1,0 +1,125 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Quantower indicator shell. §11 makes this a renderer and an adapter: the engine is
+    OrbIx.Core, which has no reference to the platform. Nothing here decides anything.
+
+    net10.0-windows is required, not preferred: the installed platform (v1.146.18) binds
+    System.Runtime 10 and System.Drawing.Common 9, and net8.0-windows fails with CS1705.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <AssemblyName>OrbIxIndicator</AssemblyName>
+    <RootNamespace>OrbIx.Quantower.Indicator</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <!--
+    THE SHARE BUILD: -p:Share=true.
+
+    WHY THIS EXISTS AT ALL. A build of this project embeds the operator's BUILD PATH in the
+    assembly, and that path contains their username. Measured, not supposed: `strings` on the
+    ordinary Release DLL returns
+
+        <home><user>/aramid-orb/src/.../obj/Release/OrbIxIndicator.pdb
+
+    Scrubbing every source file does not touch it, because the compiler writes it. So an
+    indicator handed to someone else carries the identity of whoever built it unless the build
+    itself is told otherwise.
+
+    DebugType=none stops the PDB reference being written at all: the installed SDK's
+    Microsoft.Common.CurrentVersion.targets sets _DebugSymbolsProduced=false for it. PathMap
+    maps what remains of the source root to a neutral "/src". Verified together on this
+    toolchain: 0 occurrences of the home path in the produced assembly, against 1 without.
+
+    OPT-IN, NOT THE DEFAULT, deliberately: an ordinary build keeps its symbols so a fault on
+    the operator's own chart still has a stack trace worth reading.
+  -->
+  <PropertyGroup Condition="'$(Share)' == 'true'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <Deterministic>true</Deterministic>
+    <PathMap>$(MSBuildThisFileDirectory)..\..\=/src/</PathMap>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Compiled IN, not referenced. Quantower loads scripts with Assembly.Load(bytes) and
+      caches them keyed by assembly FullName:
+
+          돇됎[assembly.FullName] = new 됶(Path.GetDirectoryName(P_0), assembly);
+
+      A shared OrbIx.Core.dll therefore has ONE cache key across every script folder, and
+      whichever copy loads first serves the whole process. Two folders once held different
+      builds of it under the identical identity "OrbIx.Core, Version=1.0.0.0" — an indicator
+      compiled against the newer one, resolved against the older, cannot find its own types
+      and renders nothing at all.
+
+      Directory.Build.props already states this hazard for the vendor SDK: "a second copy in
+      the plugin folder gives the same class two distinct type identities." It applies just
+      as much to ours, so the engine ships inside this assembly and no OrbIx.Core.dll is
+      deployed. There is nothing left to cache under a shared key.
+
+      The OrbIx.Core project still exists: the tests and the replay harness build against it,
+      and its having no reference to the platform is what keeps §11's separation honest.
+    -->
+    <Compile Include="..\OrbIx.Core\**\*.cs"
+             Exclude="..\OrbIx.Core\bin\**;..\OrbIx.Core\obj\**" />
+
+    <!--
+      The direction panel's renderer, shared with the standalone Direction
+      indicator by SOURCE for exactly the reason spelled out above: a shared DLL
+      would carry one Assembly.Load cache key across both script folders.
+    -->
+    <Compile Include="..\OrbIx.Quantower.Shared\**\*.cs"
+             Exclude="..\OrbIx.Quantower.Shared\bin\**;..\OrbIx.Quantower.Shared\obj\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>$(QuantowerSdkPath)</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- The shipped configuration travels with the indicator so a deploy is one folder. -->
+  <ItemGroup>
+    <!--
+      Embedded, not merely copied. Quantower loads scripts with
+      Assembly.Load(File.ReadAllBytes(path)), so Assembly.Location is an empty string and a
+      script cannot find its own folder — a configuration file sitting beside the DLL is
+      therefore unreachable at runtime. Compiling it in removes the path dependency entirely.
+
+      Still copied to the output as well, so the build artefact remains readable and the
+      deploy can place an editable copy.
+
+      THE SHARE BUILD EMBEDS A DIFFERENT FILE, AND THAT IS THE WHOLE OF THE SECOND LEAK. The
+      operator's configuration carries their prop firm's account ids, starting equity, daily
+      loss and trailing-drawdown figures, flatten time and the firm's own policy URLs, and
+      because it is embedded, every one of those strings is INSIDE the assembly. Measured: 11
+      such strings survive a build that has already had its debug path stripped.
+
+      orbix.share.json is not a copy of it with the numbers blanked. It is a minimal
+      configuration: the settings a recipient needs and none of the operator's research
+      commentary, which is where most of the identifying material lives. Less surface, less to
+      review, nothing to miss.
+    -->
+    <EmbeddedResource Condition="'$(Share)' != 'true'"
+                      Include="..\..\config\orbix.default.json" Link="orbix.default.json" />
+    <None Condition="'$(Share)' != 'true'"
+          Include="..\..\config\orbix.default.json" Link="orbix.default.json"
+          CopyToOutputDirectory="PreserveNewest" />
+
+    <EmbeddedResource Condition="'$(Share)' == 'true'"
+                      Include="..\..\config\orbix.share.json" Link="orbix.default.json" />
+    <None Condition="'$(Share)' == 'true'"
+          Include="..\..\config\orbix.share.json" Link="orbix.default.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

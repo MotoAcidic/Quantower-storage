@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    §11: "Put every module in a platform-agnostic core assembly with no Quantower types
+    in its public surface." That is enforced mechanically here — this project has no
+    reference to TradingPlatform.BusinessLayer, so a Quantower type cannot leak into
+    Core even by accident, and the offline replay harness can drive the same engine the
+    chart does.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>OrbIx.Core</AssemblyName>
+    <RootNamespace>OrbIx.Core</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- So a pure helper whose arithmetic decides a shipped number can be tested by CALLING it.
+         InstrumentCalibration.Percentile was private, and two mutations of it (shifting the
+         nearest rank by one, and flooring where it ceils) survived the whole suite including
+         an exact golden assertion on the calibrated floor. They survive because the percentiles
+         only GENERATE candidates and the winner is picked by rate, so the defect is invisible
+         through the public result on any one tape. The same pattern as OrbIx.Replay. -->
+    <InternalsVisibleTo Include="OrbIx.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -43,12 +43,42 @@ Studio/VS Code, it's safe to `rm -rf` and never `git add` it.
 ## Indicator Catalog
 
 ### ORB-IX (`Indicators/ORB-IX/`)
-**Files:** `Indicators/ORB-IX/OrbIxIndicator.dll`, `OrbIxIndicator.deps.json`, `README.md`
-**Source:** none in this repo - given to the user by a friend as a **compiled DLL only**, not
-buildable/modifiable here. Treat this folder as a binary drop, not a project.
-**Install:** copy `OrbIxIndicator.dll` to its own folder under
+**Files:** `Indicators/ORB-IX/src/` (full source, 3 projects), `config/orbix.share.json`,
+`BUILD.md`, `MANUAL.md`, `README.md`, a pre-built `OrbIxIndicator.dll`, and
+`Archive/` (superseded pre-built binaries kept for history - see that folder's own README)
+**Source:** UPDATED 2026-09-14 - the friend originally sent only a compiled DLL (in a folder
+he'd named after himself); he later sent the **full source** in that same folder. Both are
+now merged into this one `ORB-IX/` home (dropping the person-named folder - this is what it
+is, source and all, not just a binary anyone happened to send).
+
+#### Build
+Three projects (`OrbIx.Core` - pure rules/measurement, no platform types, deliberately
+testable without a chart; `OrbIx.Quantower.Shared` - chart period/instrument bridge;
+`OrbIx.Quantower.Indicator` - the indicator and its overlays, `net10.0-windows`). Full
+instructions in `BUILD.md`; short version:
+```bash
+dotnet build src/OrbIx.Quantower.Indicator/OrbIx.Quantower.Indicator.csproj -c Release \
+  -p:Share=true \
+  -p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.146.18\bin\TradingPlatform.BusinessLayer.dll"
+```
+(`v1.146.18` - confirm against whatever's under `C:\Quantower\TradingPlatform\` on the
+machine actually building; BUILD.md deliberately doesn't hard-code it since it moves on
+Quantower updates.)
+
+**Verified 2026-09-14**: builds clean (0 errors, 269 pre-existing nullable-annotation-
+context warnings from the source itself - not touched, not this repo's code to restyle) once
+one gap was fixed: the `.csproj` expects the embedded config at `../../config/orbix.share.json`
+relative to the indicator project, but the file as sent sat loose at the `ORB-IX/` root with
+no `config/` folder. Moved into `config/orbix.share.json` to match what the build expects -
+if this indicator is ever re-sent/re-synced from the friend, check whether that's still
+where it lands.
+
+**Install:** copy the built `OrbIxIndicator.dll` to its own folder under
 `C:\Quantower\Settings\Scripts\Indicators\ORB-IX\` (see the indicator's own README for the
-full explanation of why the DLL needs its own folder).
+full explanation of why the DLL needs its own folder). **Deployed 2026-09-14** with a fresh
+build from this verified source, replacing the originally-provided pre-built DLL (different
+hash - not a discrepancy to chase, just confirms it's a from-source build now rather than
+whatever binary happened to be attached originally).
 
 **What it is** (from its own README - draws only, places no orders, reads no account):
 opening range/session structure, market structure (HH/LL read), volume profiles (FRVP +
@@ -61,6 +91,15 @@ own README for the calibration methodology and status-line format.
 **Explicitly not a signal generator** - the author's own README states plainly that none of
 these displays are claimed to predict anything, and testing several of the ideas found no
 edge; it's a reading-the-tape tool, not an entry system.
+
+### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
+**Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show
+delta, DOM/resting orders, absorption, auto-drawn fib, and FRVP+AVP (higher/lower timeframe
+POC) all together, matching a working reference screenshot. Documents a CONFIRMED
+platform/data-vendor refusal (Quantower's own toast: "Volume analysis calculation from ticks
+history is not allowed for one data vendor") that explains historical-backfill gaps in
+footprint/absorption data on some connections but not others - see that folder's README for
+the full finding and the exact `InputParameter` names to enable each requested display.
 
 ---
 
@@ -720,9 +759,8 @@ This documentation should be updated whenever strategy logic or parameters are m
   `esOrbStrategy`, `emaSimpleStrategy`, or `emaTrendStrategy` - all of those exist only in
   this file (CLAUDE.md) and/or their own per-project `readme.md`. Worth a pass if the
   README is meant to stay the user-facing entry point.
-- **`ORB-IX` has no build/verification story in this repo** - it's a compiled DLL from a
-  friend with no source anywhere here (see Indicator Catalog above). If it ever needs a
-  fix, that's a request to whoever built it, not an edit in this repo.
+- ~~`ORB-IX` has no build/verification story in this repo~~ - resolved 2026-09-14, full
+  source arrived and now builds clean from this repo (see Indicator Catalog above).
 - **`Strategies/Backups/`** holds 5 dated snapshots; none were reviewed for whether they're
   still worth keeping vs. superseded by their active counterpart - untouched during this
   reorganization beyond the relocation itself.
