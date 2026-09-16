@@ -1,0 +1,21 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AuctionResponse.ATAS/AuctionResponse.ATAS.csproj" />
+    <Project Path="src/AuctionResponse.Core/AuctionResponse.Core.csproj" />
+    <Project Path="src/AuctionResponse.Replay/AuctionResponse.Replay.csproj" />
+    <Project Path="src/AuctionResponse.Research/AuctionResponse.Research.csproj" />
+    <Project Path="src/AuctionResponse.Ui/AuctionResponse.Ui.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AuctionResponse.Tests/AuctionResponse.Tests.csproj" />
+  </Folder>
+  <Folder Name="/_preview/">
+    <Project Path="_preview/Preview.csproj" />
+  </Folder>
+  <Folder Name="/_reflect/">
+    <Project Path="_reflect/Reflect.csproj" />
+  </Folder>
+  <Folder Name="/_smoke/">
+    <Project Path="_smoke/Smoke.csproj" />
+  </Folder>
+</Solution>

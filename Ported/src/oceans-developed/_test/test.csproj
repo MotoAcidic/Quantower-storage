@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>test</AssemblyName>
+    <RootNamespace>OceansDeveloped.Tests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <!--
+    The profile maths and the trade-date clock carry no ATAS types, so they run here against
+    references that share none of their code. Only the rendering needs the platform.
+  -->
+  <ItemGroup>
+    <Compile Include="../DevelopedMath.cs" />
+    <Compile Include="../DevelopedClock.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+
+</Project>

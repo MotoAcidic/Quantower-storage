@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>test</AssemblyName>
+    <RootNamespace>OceansOrderBlocks.Tests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <!-- The clock and the whole detection/zone/flow/CVD pipeline are ATAS-free so they can be
+       checked here on synthetic bars. -->
+  <ItemGroup>
+    <Compile Include="../OrderBlocksClock.cs" />
+    <Compile Include="../OrderBlocksMath.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+
+</Project>

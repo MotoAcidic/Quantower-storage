@@ -22,10 +22,10 @@ internal readonly record struct DirectionCalloutDraw(double Price, string Text, 
 /// </summary>
 internal sealed class DirectionCalloutOverlay : IDisposable
 {
-    internal readonly record struct Options(Color LongColor, Color ShortColor, float LineWidth);
+    internal readonly record struct Options(Color LongColor, Color ShortColor, float LineWidth, bool Dashed = false);
 
     private readonly Font font = new(FontFamily.GenericSansSerif, 11f, FontStyle.Bold);
-    private readonly Dictionary<(int Argb, float Width), Pen> lines = new();
+    private readonly Dictionary<(int Argb, float Width, bool Dashed), Pen> lines = new();
     private readonly Dictionary<int, SolidBrush> labelBrushes = new();
     private readonly SolidBrush labelBack = new(Color.FromArgb(215, 16, 18, 24));
     private bool disposed;
@@ -55,7 +55,7 @@ internal sealed class DirectionCalloutOverlay : IDisposable
 
         try
         {
-            graphics.DrawLine(this.Line(colour, options.LineWidth), pane.Left, y, pane.Right, y);
+            graphics.DrawLine(this.Line(colour, options.LineWidth, options.Dashed), pane.Left, y, pane.Right, y);
 
             var size = graphics.MeasureString(draw.Text, this.font);
             var rect = new RectangleF(
@@ -77,13 +77,13 @@ internal sealed class DirectionCalloutOverlay : IDisposable
         }
     }
 
-    private Pen Line(Color colour, float width)
+    private Pen Line(Color colour, float width, bool dashed)
     {
-        var key = (colour.ToArgb(), width);
+        var key = (colour.ToArgb(), width, dashed);
 
         if (!this.lines.TryGetValue(key, out var pen))
         {
-            pen = new Pen(colour, width) { DashStyle = DashStyle.Solid };
+            pen = new Pen(colour, width) { DashStyle = dashed ? DashStyle.Dash : DashStyle.Solid };
             this.lines[key] = pen;
         }
 

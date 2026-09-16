@@ -1,0 +1,95 @@
+{
+  "version": "1.0.0",
+  "status": "EXPERIMENTAL_SPECIFICATION_NOT_ATAS_PRESET",
+  "instrument": {
+    "instrumentKey": null,
+    "tickSize": null,
+    "crossInstrumentEnabled": false
+  },
+  "timing": {
+    "clockMode": "ReceiveElapsedWithRecordedDecisionTicks",
+    "decisionIntervalMs": 250,
+    "windowsMs": [1000, 5000, 30000],
+    "warmupMs": 30000,
+    "lateTickPolicy": "OneActualTimeTickNoBackfill"
+  },
+  "baseline": {
+    "artifactPath": null,
+    "lookbackSessions": 20,
+    "minimumSessions": 10,
+    "minimumSamplesPerBucketWindow": 300,
+    "bucketMinutes": 30,
+    "quantileMethod": "NearestRank",
+    "freezePolicy": "BeforeSessionStart"
+  },
+  "candidate": {
+    "windowMs": 5000,
+    "zoneHalfWidthTicks": 2,
+    "attackerVolumeQuantile": 0.9,
+    "quantileComparison": "StrictlyGreater",
+    "minimumProgressTicks": 0,
+    "maximumProgressTicks": 2,
+    "maximumForwardExcursionTicks": 2,
+    "minimumZoneVolumeFraction": 0.25,
+    "confirmationBufferTicks": 2,
+    "failureBeyondZoneTicks": 4,
+    "confirmationPriceDwellMs": 1000,
+    "failurePriceDwellMs": 1000,
+    "timeoutMs": 30000,
+    "cooldownMs": 30000,
+    "levelPolicy": "ManualDeclaredBeforeWindow",
+    "confirmationPrice": "Midpoint"
+  },
+  "health": {
+    "maximumQuoteAgeMs": 1000,
+    "maximumSpreadTicks": 8,
+    "minimumKnownSideFraction": 0.95,
+    "maximumProcessingLagMs": 250,
+    "ingressCapacityEvents": 100000,
+    "overflowPolicy": "FaultAndResynchronize",
+    "requireCompleteQuotePath": true
+  },
+  "session": {
+    "timezone": "America/New_York",
+    "windowsTimezoneEquivalent": "Eastern Standard Time",
+    "startLocal": "09:30:00",
+    "endLocalExclusive": "16:00:00",
+    "calendarPath": null,
+    "blackoutIntervalsUtc": [],
+    "blackoutPolicy": "UserSuppliedNoAutomaticNewsClaims"
+  },
+  "display": {
+    "maximumRequestedFramesPerSecond": 10,
+    "plotWindowMs": 5000,
+    "trailMs": 30000,
+    "plotClip": 3,
+    "neutralVisualBand": 0.25,
+    "descriptiveLabelDwellMs": 5000,
+    "circularViewEnabled": false,
+    "currentAndFrozenEvidenceSeparate": true
+  },
+  "optionalModules": {
+    "responseRegressionEnabled": false,
+    "mboEvidenceEnabled": false,
+    "probabilitiesEnabled": false,
+    "reconciliationIntervalMs": 100,
+    "forecastHorizonMs": 30000,
+    "regressionMinimumTrainWindows": 2000,
+    "regressionMinimumValidationWindows": 500,
+    "residualScaleFloorTicks": 0.5,
+    "enhancedResistanceResidualThreshold": 1.5
+  },
+  "recording": {
+    "directory": null,
+    "permissionConfirmed": false,
+    "requireRecorderForResearch": true,
+    "rotation": "InstrumentSession",
+    "retentionDays": null
+  },
+  "alerts": {
+    "audibleEnabled": false,
+    "logCandidates": true,
+    "logTerminalTransitions": true,
+    "automaticTradingEnabled": false
+  }
+}

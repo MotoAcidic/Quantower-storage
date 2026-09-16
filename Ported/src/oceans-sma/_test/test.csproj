@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>test</AssemblyName>
+    <RootNamespace>OceansSma.Tests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <!--
+    The averaging is deliberately free of ATAS types so it can be exercised on synthetic bars
+    here, where the arithmetic can actually be checked against a brute-force reference.
+  -->
+  <ItemGroup>
+    <Compile Include="../SmaMath.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+
+</Project>

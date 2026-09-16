@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>asiawicktest</AssemblyName>
+    <RootNamespace>OceansAsiaWick.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <!-- The signal core, the clock and the risk rules are ATAS-free precisely so they can be
+       exercised without the platform. Nothing else from the indicator is pulled in. -->
+  <ItemGroup>
+    <Compile Include="../AsiaWickClock.cs" />
+    <Compile Include="../AsiaWickMath.cs" />
+    <Compile Include="../AsiaWickRisk.cs" />
+  </ItemGroup>
+
+</Project>

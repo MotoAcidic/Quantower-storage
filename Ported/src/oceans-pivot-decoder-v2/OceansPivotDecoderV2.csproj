@@ -1,0 +1,93 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      net10.0-windows, not net8.0-windows. The installed ATAS 8.0.14.396 assemblies are
+      themselves built for net10.0, and a net8.0 project cannot reference them: the compiler
+      rejects a primary reference built against a higher framework (MSB3274 / CS1705). Lower
+      this only if the ATAS install is downgraded too.
+    -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <OutputType>Library</OutputType>
+    <AssemblyName>OceansPivotDecoderV2</AssemblyName>
+    <RootNamespace>OceansPivotDecoderV2</RootNamespace>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AtasDir>C:\Program Files (x86)\ATAS Platform</AtasDir>
+
+    <!--
+      ATAS scans %APPDATA%\ATAS\Indicators, and only at startup. It does not read
+      Documents\ATAS\Indicators; a DLL dropped there is never loaded. Override on the command
+      line if a future install moves: dotnet build -p:AtasIndicatorsDir=...
+    -->
+    <AtasIndicatorsDir Condition="'$(AtasIndicatorsDir)' == ''">$(APPDATA)\ATAS\Indicators</AtasIndicatorsDir>
+  </PropertyGroup>
+
+  <!-- The tool projects are standalone; leaving them in the glob breaks the build on
+       duplicate assembly attributes. -->
+  <ItemGroup>
+    <Compile Remove="_test/**;_smoke/**;_reflect/**" />
+    <None Remove="_test/**;_smoke/**;_reflect/**" />
+    <EmbeddedResource Remove="_test/**;_smoke/**;_reflect/**" />
+  </ItemGroup>
+
+  <!-- ATAS assemblies are supplied by the host platform: reference, never copy. -->
+  <ItemGroup>
+    <Reference Include="ATAS.Indicators">
+      <HintPath>$(AtasDir)\ATAS.Indicators.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ATAS.DataFeedsCore">
+      <HintPath>$(AtasDir)\ATAS.DataFeedsCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ATAS.Types">
+      <HintPath>$(AtasDir)\ATAS.Types.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Attributes">
+      <HintPath>$(AtasDir)\OFT.Attributes.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Core">
+      <HintPath>$(AtasDir)\OFT.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Localization">
+      <HintPath>$(AtasDir)\OFT.Localization.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Rendering">
+      <HintPath>$(AtasDir)\OFT.Rendering.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Utils.Common">
+      <HintPath>$(AtasDir)\Utils.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!--
+    Post-build deploy. ContinueOnError is deliberate: ATAS holds the DLL open while it is
+    running, and a locked file must leave you with a successful build and a warning, not a red
+    build that sends you hunting for a compile error that is not there.
+
+    Restart ATAS after this; the indicator folder is read only at startup.
+  -->
+  <Target Name="CopyToAtas" AfterTargets="Build" Condition="'$(SkipAtasDeploy)' != 'true'">
+    <MakeDir Directories="$(AtasIndicatorsDir)" ContinueOnError="true" />
+    <Copy SourceFiles="$(TargetPath)"
+          DestinationFolder="$(AtasIndicatorsDir)"
+          ContinueOnError="true">
+      <Output TaskParameter="CopiedFiles" ItemName="AtasCopied" />
+    </Copy>
+    <Message Condition="'@(AtasCopied)' != ''" Importance="high"
+             Text="Deployed to $(AtasIndicatorsDir) - restart ATAS to load it." />
+    <Warning Condition="'@(AtasCopied)' == ''"
+             Text="Could not copy to $(AtasIndicatorsDir). ATAS probably has the DLL loaded - close it and build again." />
+  </Target>
+
+</Project>

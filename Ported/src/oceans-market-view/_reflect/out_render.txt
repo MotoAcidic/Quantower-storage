@@ -1,0 +1,93 @@
+--- OFT.Rendering.Context.RenderContext   [OFT.Rendering] ---
+    P  Boolean UseTestFramework
+    P  System.Drawing.Rectangle ClipBounds
+    P  System.Drawing.Size Size
+    P  Single FontAntiAliasingMinSize
+    P  Boolean IsValid
+    P  IRenderContextSettings Settings
+    M  Int32 FillRectangle(System.Drawing.Color brush1, System.Drawing.Color brush2, System.Drawing.Rectangle rect)
+    M  virtual Int32 DrawFillRectangle(RenderPen pen, System.Drawing.Color brush, System.Drawing.Rectangle rect)
+    M  virtual Int32 DrawFillRectangle(RenderPen pen, System.Drawing.Color brush, System.Drawing.Rectangle rect, Int32 radius)
+    M  virtual Int32 FillHistogram(System.Drawing.Color brush, Point[] points)
+    M  virtual Int32 SetTextRenderingHint(RenderTextRenderingHint textRenderingHint)
+    M  abstract Int32 SetInterpolationMode(RenderInterpolationModes interpolationMode)
+    M  abstract Int32 SetSmoothingMode(RenderSmoothingModes smoothingMode)
+    M  abstract Int32 DrawLine(RenderPen pen, Int32 x1, Int32 y1, Int32 x2, Int32 y2)
+    M  abstract Int32 DrawLines(RenderPen pen, Point[] points)
+    M  abstract Int32 DrawRectangle(RenderPen pen, System.Drawing.Rectangle rect)
+    M  abstract Int32 DrawRectangle(RenderPen pen, System.Drawing.Rectangle rect, Int32 radius)
+    M  abstract Int32 DrawEllipse(RenderPen pen, System.Drawing.Rectangle rect)
+    M  abstract Int32 DrawPolygon(RenderPen pen, Point[] points)
+    M  abstract Int32 Clear(System.Drawing.Color color)
+    M  abstract Int32 FillRectangle(System.Drawing.Color brush, System.Drawing.Rectangle rect)
+    M  abstract Int32 FillRectangle(System.Drawing.Color brush, System.Drawing.Rectangle rect, Int32 radius)
+    M  abstract Int32 FillRectangle(System.Drawing.Color brush1, System.Drawing.Color brush2, System.Drawing.Rectangle rect, Boolean vertical)
+    M  abstract Int32 FillPolygon(System.Drawing.Color brush, Point[] points)
+    M  abstract Int32 FillPolygon(System.Drawing.Color brushStart, System.Drawing.Color brushEnd, Point[] points, Boolean vertical)
+    M  abstract Int32 FillEllipse(System.Drawing.Color brush, System.Drawing.Rectangle rect)
+    M  abstract Int32 FillPie(System.Drawing.Color brush, System.Drawing.Rectangle rect, Single startAngle, Single sweepAngle)
+    M  abstract Int32 DrawString(String s, RenderFont font, System.Drawing.Color brush, Int32 x, Int32 y)
+    M  abstract Int32 DrawString(String s, RenderFont font, System.Drawing.Color brush, Int32 x, Int32 y, RenderStringFormat format)
+    M  abstract Int32 DrawString(String s, RenderFont font, System.Drawing.Color brush, System.Drawing.Rectangle layoutRectangle)
+    M  abstract Int32 DrawString(String s, RenderFont font, System.Drawing.Color brush, System.Drawing.Rectangle layoutRectangle, RenderStringFormat format)
+    M  abstract System.Drawing.Size MeasureString(String text, RenderFont font)
+    M  abstract System.Drawing.Rectangle MeasureStringWithOverhang(String text, RenderFont renderFont)
+    M  abstract Int32 DrawStaticImage(Image image, System.Drawing.Rectangle dest)
+    M  abstract Int32 DrawStaticImage(IBitmapImage image, System.Drawing.Rectangle dest)
+    M  abstract Int32 DrawLayout(DrawingLayout layout, System.Drawing.Point point)
+    M  abstract Int32 SetClip(System.Drawing.Rectangle rect)
+    M  abstract Int32 ResetClip()
+    M  abstract Int32 TranslateTransform(Int32 dx, Int32 dy)
+    M  abstract RenderContext CreateLayoutRenderContext(DrawingLayout layout)
+    M  virtual Int32 DrawHeatmap(HeatmapControl heatmapControl, System.Drawing.Rectangle dest)
+    M  virtual Int32 PrepareCachedHeatmap(HeatmapControl heatmapControl)
+    M  virtual Int32 DrawCachedHeatmap(HeatmapControl heatmapControl, System.Drawing.Rectangle dest)
+    M  virtual Void BeginRender()
+    M  virtual Void EndRender()
+    M  abstract Int32 DrawSmoothedLine(RenderPen pen, Point[] points)
+    M  abstract Int32 DrawQuadraticSpline(RenderPen pen, Point[] points)
+    C  .ctor()
+  : inherited from System.MarshalByRefObject
+    M  Object GetLifetimeService()
+    M  virtual Object InitializeLifetimeService()
+    M  MarshalByRefObject MemberwiseClone(Boolean cloneIdentity)
+    C  .ctor()
+  : interface IStringMeasure
+    M  abstract System.Drawing.Size MeasureString(String text, RenderFont font)
+    M  abstract System.Drawing.Rectangle MeasureStringWithOverhang(String text, RenderFont renderFont)
+
+--- ATAS.Indicators.IChart   [ATAS.Indicators] ---
+    P  IChartColorsStore ColorsStore
+    P  IChartCoordinatesManager CoordinatesManager
+    P  IMouseLocationInfo MouseLocationInfo
+    P  IKeyboardInfo KeyboardInfo
+    P  IDrawingObjectsListInfo DrawingObjectsListInfo
+    P  IChartContainer PriceChartContainer
+    P  IContainer ChartContainer
+    P  RenderFont PriceAxisFont
+    P  String StringFormat
+    P  String ChartType
+    P  String TimeFrame
+    P  IEnumerable`1 TradingSessionDescriptions
+    P  ChartVisualModes ChartVisualMode
+    P  FootprintContentModes FootprintContentMode
+    P  FootprintVisualModes FootprintVisualMode
+    P  FootprintColorSchemes FootprintColorScheme
+    P  Boolean HidePriceAxis
+    P  Int32 StatusLineHorizontalOffset
+    P  Int32 IndicatorsListVerticalOffset
+    P  Int32 IndicatorsListHorizontalOffset
+    P  Decimal DpiY
+    P  Decimal DpiX
+    M  abstract String TryGetMinimizedVolumeString(Decimal value)
+    M  abstract String TryGetMinimizedVolumeString(Decimal value, Decimal price)
+    M  abstract String GetPriceString(Decimal value)
+  : interface IContainer
+    P  System.Drawing.Rectangle Region
+
+--- ATAS.Indicators.DrawingLayouts (enum)   [ATAS.Indicators] ---
+    E  None
+    E  Historical
+    E  LatestBar
+    E  Final
+

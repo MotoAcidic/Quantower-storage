@@ -29,6 +29,29 @@ using TradingPlatform.BusinessLayer.Integration;
 using OrbCore = OrbIx.Core;
 using Qt = TradingPlatform.BusinessLayer;
 
+// Ocean's Anchor's absorption/zone types, aliased rather than a blanket "using OceansAnchor;"
+// because Zone/ZoneKind (OrbIx.Core.Structure, the HTF FVG/order-block "Zones" feature) and
+// Aggressor (OrbIx.Core.Abstractions, used bare everywhere already) would collide across the
+// whole file otherwise.
+using AnchorZone = OceansAnchor.Zone;
+using AnchorZoneKind = OceansAnchor.ZoneKind;
+using AnchorAggressor = OceansAnchor.Aggressor;
+using AnchorTestSide = OceansAnchor.TestSide;
+using AnchorSignalState = OceansAnchor.SignalState;
+using AnchorEvent = OceansAnchor.AbsorptionEvent;
+using AnchorEventPath = OceansAnchor.EventPath;
+using AnchorSignalEngine = OceansAnchor.SignalEngine;
+using AnchorZoneMaintenance = OceansAnchor.ZoneMaintenance;
+using AnchorSignalGate = OceansAnchor.SignalGate;
+using AnchorStateRules = OceansAnchor.StateRules;
+using AnchorTradeSnapshot = OceansAnchor.TradeSnapshot;
+using AnchorAbsorptionRules = OceansAnchor.AbsorptionRules;
+using AnchorTapeAbsorption = OceansAnchor.TapeAbsorption;
+using AnchorDisplacementWatch = OceansAnchor.DisplacementWatch;
+using AnchorClusterRules = OceansAnchor.ClusterRules;
+using AnchorClusterAbsorption = OceansAnchor.ClusterAbsorption;
+using AnchorBarFacts = OceansAnchor.BarFacts;
+
 namespace OrbIx.Quantower.Indicator;
 
 /// <summary>
@@ -444,9 +467,14 @@ public sealed class OrbIxIndicator : Qt.Indicator
     [InputParameter("HH/LL undecided bar colour", 385)]
     public Color HhLlUndecidedColor { get; set; } = Color.FromArgb(0x6B, 0x72, 0x80);
 
+    // Defaults to OFF: the user's own complaint was this detail box (structure/location/flow/
+    // regime rows) sitting on the chart and getting in the way of order management, and the
+    // loud scalp/hold callout line below already surfaces the same verdict with far less
+    // screen real estate. The detail rows are still there, one settings toggle away, for
+    // whoever wants to see exactly which inputs are voting.
     /// <summary>Whether the direction panel is drawn.</summary>
     [InputParameter("Direction panel", 390)]
-    public bool DirectionPanelOn { get; set; } = true;
+    public bool DirectionPanelOn { get; set; } = false;
 
     /// <summary>Whether the chart's own period is read as a structure lane.</summary>
     [InputParameter("Direction: include the chart's timeframe", 391)]
@@ -484,16 +512,32 @@ public sealed class OrbIxIndicator : Qt.Indicator
     public int DirectionPanelOffsetY { get; set; } = 220;
 
     /// <summary>
-    /// The loud version of the same verdict the panel already prints quietly as its headline:
-    /// a bright line at the current price reading "POSSIBLE LONG SCALP", "POSSIBLE HOLD SHORT"
-    /// and so on. INDEPENDENT of "Direction panel" above — this can be on with the detail
-    /// panel off, or the other way around, same as every other setting on this chart is meant
-    /// to be its own switch. See OrbIx.Core.Direction.DirectionCallout for exactly what decides
-    /// scalp vs. hold and why, and the warning that it is a stated trading judgement, not a
-    /// measured or backtested edge.
+    /// A REGIME DIVIDER, not an entry call: a bright line frozen at the price where the
+    /// direction verdict last flipped side, reading "ONLY LONG SCALPS ABOVE" or "ONLY SHORT
+    /// SCALPS BELOW" — the operator's own framing (2026-09-16) for what this line means to
+    /// them, replacing its original "POSSIBLE LONG SCALP" entry-call wording. It still moves
+    /// only on a side flip, same anchor-to-a-level discipline as before, not to live price.
+    /// INDEPENDENT of "Direction panel" above — this can be on with the detail panel off, or
+    /// the other way around, same as every other setting on this chart is meant to be its own
+    /// switch. See OrbIx.Core.Direction.DirectionCallout for exactly what decides the side and
+    /// why, and the warning that it is a stated trading judgement, not a measured or backtested
+    /// edge. See DirectionReversalEnabled below for the companion "price broke the regime"
+    /// signal.
     /// </summary>
-    [InputParameter("Direction: show possible scalp/hold callout", 397)]
+    [InputParameter("Direction: show bias line", 397)]
     public bool DirectionCalloutEnabled { get; set; } = true;
+
+    /// <summary>
+    /// A second, independent line: fires when price crosses to the WRONG side of the bias
+    /// line above, before (or without) the underlying verdict formally flipping to agree —
+    /// "possible reversal back to that line", the operator's own phrase (2026-09-16). Reuses
+    /// the bias line's own scalp/hold text when the fresh verdict already agrees with the
+    /// reversal direction ("POSSIBLE REVERSAL — LONG SCALP"); otherwise a plainer "POSSIBLE
+    /// REVERSAL — LONG"/"...SHORT" until it does. Drawn dashed so it never reads as a second
+    /// bias line.
+    /// </summary>
+    [InputParameter("Direction: show possible reversal line", 403)]
+    public bool DirectionReversalEnabled { get; set; } = true;
 
     /// <summary>
     /// How many structure lanes must agree with the verdict before the callout calls it a HOLD
@@ -677,8 +721,12 @@ public sealed class OrbIxIndicator : Qt.Indicator
     /// resistance, session levels, the footprint shelf scan) makes it impossible to tell which
     /// line means what at a glance.
     /// </summary>
+    // Defaults to OFF as of the Anchor Gate below: same "is this absorption" question, now
+    // answered by a real tested state machine (arm/trigger/confirm, tape-timed) instead of a
+    // single-bar threshold. Kept as a settings-panel toggle for anyone who still wants the
+    // absorption.pine-style boxes alongside it.
     [InputParameter("Wick Absorption: enable", 163)]
-    public bool WickAbsorptionEnabled { get; set; } = true;
+    public bool WickAbsorptionEnabled { get; set; } = false;
 
     [InputParameter("Wick Absorption: volume threshold (x average)", 164, 1.1, 3.0, 0.1, 1)]
     public double WickAbsorptionVolumeThreshold { get; set; } = 1.2;
@@ -712,6 +760,44 @@ public sealed class OrbIxIndicator : Qt.Indicator
 
     [InputParameter("Wick Absorption: show labels", 174)]
     public bool WickAbsorptionShowLabels { get; set; } = true;
+
+    /// <summary>
+    /// The absorption display drawn from Ocean's Anchor's zone state machine (Dormant -> Armed
+    /// -> Triggered -> Confirmed/Expired/Broken), ported from a friend's ATAS indicator suite at
+    /// Ported/src/oceans-anchor/ — see directionAbsorptionScalpStrategy's readme for the fuller
+    /// explanation, since this indicator reuses the exact same engine. THE ZONE SOURCE HERE IS
+    /// THIS INDICATOR'S OWN HH/LL support/resistance levels, not Anchor's own volume-profile HVN
+    /// detector (which needs footprint data this connector's own historical volume-analysis
+    /// refusal would starve). A print is tested for absorption two ways: Anchor's tape-based
+    /// test (a large print showing NO follow-through within a timed window — the "actual signal"
+    /// per Anchor's own naming) and, when no tape event fires, a bar-shape 3-of-4 test (delta
+    /// outlier vs. recent distribution, close-back-inside, volume concentrated at the extreme, a
+    /// real wick). On by default, replacing "Wick Absorption" above as the primary absorption
+    /// read.
+    /// </summary>
+    [InputParameter("Anchor Gate: enable", 175)]
+    public bool AnchorGateEnabled { get; set; } = true;
+
+    [InputParameter("Anchor Gate: min print size (contracts)", 176, 1, 100000, 1, 0)]
+    public int AnchorGateSizeFloor { get; set; } = 150;
+
+    [InputParameter("Anchor Gate: zone buffer (ticks)", 177, 1, 100, 1, 0)]
+    public int AnchorGateZoneBufferTicks { get; set; } = 8;
+
+    [InputParameter("Anchor Gate: max displacement after print (ticks)", 178, 1, 100, 1, 0)]
+    public int AnchorGateMaxDisplacementTicks { get; set; } = 6;
+
+    [InputParameter("Anchor Gate: cluster tests required (of 4)", 179, 1, 4, 1, 0)]
+    public int AnchorGateClusterMinScore { get; set; } = 3;
+
+    [InputParameter("Anchor Gate: show reasoning panel", 210)]
+    public bool AnchorGateShowPanel { get; set; } = true;
+
+    [InputParameter("Anchor Gate: long colour", 211)]
+    public Color AnchorGateLongColor { get; set; } = Color.FromArgb(0x00, 0xDD, 0x44);
+
+    [InputParameter("Anchor Gate: short colour", 212)]
+    public Color AnchorGateShortColor { get; set; } = Color.FromArgb(0xFF, 0x44, 0x44);
 
     /// <summary>
     /// Research instrumentation, off by default: one NDJSON line per closed
@@ -2037,6 +2123,12 @@ public sealed class OrbIxIndicator : Qt.Indicator
     private readonly List<DateTime> hhllBarOpen = new();
     private readonly List<double> hhllBarHigh = new();
     private readonly List<double> hhllBarLow = new();
+
+    // Closes, parallel to the arrays above — kept ONLY so the paint fold can find where a
+    // still-open support/resistance line was actually broken (see BuildHhLlDrawable). The
+    // Pine-faithful engine's own EndBar freezes on rechange/suchange, which can lag well
+    // behind the bar that first closed through the level; this does not touch that logic.
+    private readonly List<double> hhllBarClose = new();
     private HhLlEngine? hhllEngine;
     private (int Left, int Right) hhllParams;
     private volatile HhLlDrawable hhllDrawable = HhLlDrawable.Empty;
@@ -2058,6 +2150,38 @@ public sealed class OrbIxIndicator : Qt.Indicator
     private (int AtrLength, int VolumeSmaLength, double VolumeThreshold, double MinVolumeAbs,
               double MinWickSize, double MinStrength, int MaxZones) wickAbsorptionParams;
     private volatile WickAbsorptionDrawable wickAbsorptionDrawable = WickAbsorptionDrawable.Empty;
+
+    // ---- Ocean's Anchor absorption gate (ported from a friend's ATAS indicator suite,
+    // Ported/src/oceans-anchor/) -- same engine directionAbsorptionScalpStrategy runs, built
+    // from THIS indicator's own HH/LL segments as the zone source rather than Anchor's own
+    // footprint-based HVN detector. See the InputParameter doc comment above and the
+    // strategy's readme for the fuller explanation.
+    private readonly AnchorGateOverlay anchorGateOverlay = new();
+    private readonly AnchorDisplacementWatch anchorDisplacementWatch = new();
+    private readonly AnchorAbsorptionRules anchorAbsorptionRules = new();
+    private readonly AnchorClusterRules anchorClusterRules = new();
+    private readonly AnchorStateRules anchorZoneStateRules = new();
+    private readonly AnchorSignalEngine anchorLongSignal = new();
+    private readonly AnchorSignalEngine anchorShortSignal = new();
+
+    private AnchorZone? anchorLongZone;
+    private AnchorZone? anchorShortZone;
+    private int anchorLongZoneFromSegmentBar = int.MinValue;
+    private int anchorShortZoneFromSegmentBar = int.MinValue;
+    private int anchorBarsFed;
+
+    private readonly List<double> anchorRecentDeltas = new();
+    private readonly List<AnchorBarFacts> anchorRecentBars = new();
+
+    // Ticks buffered for the bar currently forming, consumed and cleared the moment it closes.
+    // Only ever describes the MOST RECENT bar in a catch-up burst -- older bars in the same
+    // burst (e.g. a fresh attach with several already-closed bars to replay) get OHLC-only
+    // zone maintenance, never a cluster-absorption score, because there is no tick history to
+    // score them with. The same live-forward-only limitation already documented for this
+    // connector's volume analysis, arrived at independently here.
+    private readonly List<(double Price, double Size, double SignedSize)> anchorFormingBarTicks = new();
+
+    private volatile AnchorGateDrawable anchorGateDrawable = AnchorGateDrawable.Empty;
 
     public OrbIxIndicator()
     {
@@ -2375,6 +2499,8 @@ public sealed class OrbIxIndicator : Qt.Indicator
         this.directionPanel = null;
         this.directionCalloutSide = 0;
         this.directionCalloutAnchorPrice = double.NaN;
+        this.directionReversalSide = 0;
+        this.directionReversalAnchorPrice = double.NaN;
 
         // THE DIAGNOSTIC THAT SETTLES THE OPEN QUESTION. Why a resolved wait never got
         // reported is not established, and the mechanism suspected — this method running
@@ -2426,6 +2552,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
         this.hhllBarOpen.Clear();
         this.hhllBarHigh.Clear();
         this.hhllBarLow.Clear();
+        this.hhllBarClose.Clear();
         this.hhllDrawable = HhLlDrawable.Empty;
         this.fibDrawable = FibDrawable.Empty;
         this.hhllColored = 0;
@@ -2437,6 +2564,20 @@ public sealed class OrbIxIndicator : Qt.Indicator
         this.wickAbsorptionEngine = null;
         this.wickAbsorptionBarOpen.Clear();
         this.wickAbsorptionDrawable = WickAbsorptionDrawable.Empty;
+
+        // Same reasoning again: an Anchor zone tracks a level's state across bars, and a stale
+        // one carried into a different chart's data would describe absorption that never
+        // happened here.
+        this.anchorLongZone = null;
+        this.anchorShortZone = null;
+        this.anchorLongZoneFromSegmentBar = int.MinValue;
+        this.anchorShortZoneFromSegmentBar = int.MinValue;
+        this.anchorBarsFed = 0;
+        this.anchorRecentDeltas.Clear();
+        this.anchorRecentBars.Clear();
+        this.anchorFormingBarTicks.Clear();
+        this.anchorDisplacementWatch.Clear();
+        this.anchorGateDrawable = AnchorGateDrawable.Empty;
 
         // The zone and delta features start over on the next load, same
         // reasoning as the HH/LL block above.
@@ -2749,6 +2890,11 @@ public sealed class OrbIxIndicator : Qt.Indicator
                 // panel and the playbooks can never describe different tapes.
                 this.direction?.OnTick(tick);
 
+                // Anchor's tape-based absorption test needs per-tick timing (a print showing
+                // no follow-through within a real millisecond window), so it is fed here
+                // rather than waiting for the fold's bar-close pass.
+                this.FeedAnchorTape(in tick);
+
                 // A bar closes on the tick that closes it, not at the end of whatever batch the
                 // drain happened to collect. Everything the evaluation reads is then the state
                 // that prevailed at the close.
@@ -2834,6 +2980,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
             this.AdvanceContextRanges(nowUtc);
             this.SeedClosedSessionsFromBars(nowUtc);
             this.FeedHhLl();
+            this.FeedAnchorGate();
             this.FeedWickAbsorption();
             this.FeedZones();
             this.PublishDelta();
@@ -2905,6 +3052,8 @@ public sealed class OrbIxIndicator : Qt.Indicator
             this.directionPanel = null;
             this.directionCalloutSide = 0;
             this.directionCalloutAnchorPrice = double.NaN;
+            this.directionReversalSide = 0;
+            this.directionReversalAnchorPrice = double.NaN;
             return;
         }
 
@@ -2914,13 +3063,18 @@ public sealed class OrbIxIndicator : Qt.Indicator
         this.directionPanel = current.Panel(
             this.lastPrice, vwap, tick, this.averageDailyRange);
 
-        // THE CALLOUT LINE ANCHORS TO A LEVEL, NOT TO PRICE. Feeding it this.lastPrice every
-        // fold made it track every tick, which was the operator's exact complaint: a line
-        // that moves with the candle cannot mark a level to trade against. It now moves only
-        // when the SIDE changes (long, short, or neither) -- flipping from a scalp read to a
-        // hold read on the same side, or the other way round, updates the text and colour in
-        // place without relocating the line, because that is still the same opportunity, only
-        // re-graded.
+        // THE BIAS LINE ANCHORS TO A LEVEL, NOT TO PRICE. Feeding it this.lastPrice every fold
+        // made it track every tick, which was the operator's exact complaint: a line that moves
+        // with the candle cannot mark a level to trade against. It now moves only when the SIDE
+        // changes (long, short, or neither) -- flipping from a scalp read to a hold read on the
+        // same side, or the other way round, updates the text and colour in place without
+        // relocating the line, because that is still the same opportunity, only re-graded.
+        //
+        // WHAT THE LINE MEANS CHANGED 2026-09-16, THE MECHANIC DID NOT: this used to be an
+        // entry call ("POSSIBLE LONG SCALP"); it is now a REGIME DIVIDER, per the operator's own
+        // framing -- "if i go past this line i should only look for long scalps and if it goes
+        // under than only look for short scalps". The paint side reads directionCalloutSide to
+        // decide which of those two fixed sentences to print, not a graded scalp/hold verdict.
         int side = this.directionPanel.Callout.Kind switch
         {
             DirectionCalloutKind.ScalpLong or DirectionCalloutKind.HoldLong => 1,
@@ -2932,18 +3086,87 @@ public sealed class OrbIxIndicator : Qt.Indicator
         {
             this.directionCalloutSide = side;
             this.directionCalloutAnchorPrice = side == 0 ? double.NaN : this.lastPrice;
+
+            // A freshly-anchored bias line starts with nothing to reverse against.
+            this.directionReversalSide = 0;
+            this.directionReversalAnchorPrice = double.NaN;
+        }
+
+        // REVERSAL: price has moved to the WRONG side of the FROZEN bias line -- contradicting
+        // the regime that line itself established -- tracked independently of the callout's own
+        // side because price moves every tick and the bias line does not. A bias regime can be
+        // violated by price well before the full multi-input vote behind directionCalloutSide
+        // catches up and re-flips it; THAT gap is exactly what this is meant to catch. Anchors
+        // once when the violation starts, same freeze-on-price-not-on-verdict discipline as the
+        // bias line above, and clears the moment price is back on the correct side.
+        if (this.directionCalloutSide != 0 && double.IsFinite(this.directionCalloutAnchorPrice)
+            && double.IsFinite(this.lastPrice))
+        {
+            int priceSideOfBias = this.lastPrice > this.directionCalloutAnchorPrice ? 1
+                : this.lastPrice < this.directionCalloutAnchorPrice ? -1 : 0;
+
+            if (priceSideOfBias != 0 && priceSideOfBias != this.directionCalloutSide)
+            {
+                if (this.directionReversalSide != priceSideOfBias)
+                {
+                    this.directionReversalSide = priceSideOfBias;
+                    this.directionReversalAnchorPrice = this.lastPrice;
+                }
+            }
+            else
+            {
+                this.directionReversalSide = 0;
+                this.directionReversalAnchorPrice = double.NaN;
+            }
+        }
+        else
+        {
+            this.directionReversalSide = 0;
+            this.directionReversalAnchorPrice = double.NaN;
         }
     }
 
-    /// <summary>-1, 0 or 1: which side the direction callout is currently anchored on.</summary>
+    /// <summary>-1, 0 or 1: which side the bias line currently divides the market into.</summary>
     private int directionCalloutSide;
 
     /// <summary>
-    /// The price the callout line is drawn at. Set once when <see cref="directionCalloutSide"/>
+    /// The price the bias line is drawn at. Set once when <see cref="directionCalloutSide"/>
     /// changes and held fixed until it changes again — see the remark in
     /// <see cref="PublishDirection"/>.
     /// </summary>
     private double directionCalloutAnchorPrice = double.NaN;
+
+    /// <summary>
+    /// -1, 0 or 1: which side price has moved to AGAINST the bias line's own regime. Zero means
+    /// price is on the correct side (or there is no bias line yet) — no reversal condition.
+    /// </summary>
+    private int directionReversalSide;
+
+    /// <summary>
+    /// The price the reversal line is drawn at. Set once when the reversal condition starts and
+    /// held fixed until it resolves — same reasoning as <see cref="directionCalloutAnchorPrice"/>.
+    /// </summary>
+    private double directionReversalAnchorPrice = double.NaN;
+
+    /// <summary>
+    /// The reversal line's text. If the fresh per-bar verdict has already caught up to agree
+    /// with the direction price broke toward, borrows its own scalp/hold grading rather than
+    /// restating it — one vocabulary for "long or short scalps" everywhere on the chart, per
+    /// the operator's own ask. Until it catches up, a plainer sentence still names the side.
+    /// </summary>
+    private static string BuildReversalText(int reversalSide, DirectionPanelContent? panel)
+    {
+        var isLong = reversalSide > 0;
+
+        if (panel is { Callout.Kind: not DirectionCalloutKind.None } content
+            && content.Callout.IsLong == isLong)
+        {
+            var baseText = content.Callout.Text.Replace("POSSIBLE ", string.Empty, StringComparison.Ordinal);
+            return $"POSSIBLE REVERSAL — {baseText}";
+        }
+
+        return isLong ? "POSSIBLE REVERSAL — LONG" : "POSSIBLE REVERSAL — SHORT";
+    }
 
     private void FeedHhLl()
     {
@@ -2964,6 +3187,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
                 this.hhllBarOpen.Clear();
                 this.hhllBarHigh.Clear();
                 this.hhllBarLow.Clear();
+                this.hhllBarClose.Clear();
                 this.hhllDrawable = HhLlDrawable.Empty;
         this.fibDrawable = FibDrawable.Empty;
             }
@@ -2990,6 +3214,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
             this.hhllBarOpen.Clear();
             this.hhllBarHigh.Clear();
             this.hhllBarLow.Clear();
+            this.hhllBarClose.Clear();
             this.hhllColored = 0;
             this.hhllSeedReported = false;
         }
@@ -3005,6 +3230,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
             this.hhllBarOpen.Add(bar.OpenUtc);
             this.hhllBarHigh.Add(bar.High);
             this.hhllBarLow.Add(bar.Low);
+            this.hhllBarClose.Add(bar.Close);
             advanced = true;
         }
 
@@ -3192,6 +3418,275 @@ public sealed class OrbIxIndicator : Qt.Indicator
     /// what fires, not how thick a line is drawn.
     /// </summary>
     private const double WickAbsorptionZoneThicknessAtrMultiple = 0.15;
+
+    // ---- Ocean's Anchor absorption gate -----------------------------------------------------
+
+    /// <summary>
+    /// Feeds the Anchor zone state machine one closed bar at a time, same incremental shape as
+    /// <see cref="FeedHhLl"/>/<see cref="FeedWickAbsorption"/> - restart on a shrunken series,
+    /// catch up bar-by-bar otherwise. Must run AFTER <see cref="FeedHhLl"/> in the fold sequence:
+    /// the zone SOURCE is this indicator's own HH/LL segments, so a stale HH/LL read here would
+    /// anchor a zone to a level that no longer exists.
+    /// </summary>
+    private void FeedAnchorGate()
+    {
+        var bars = this.HistoricalData;
+
+        if (bars is null || this.hhllEngine is null)
+            return;
+
+        if (!this.AnchorGateEnabled)
+        {
+            if (this.anchorLongZone is not null || this.anchorShortZone is not null)
+            {
+                this.anchorLongZone = null;
+                this.anchorShortZone = null;
+                this.anchorLongZoneFromSegmentBar = int.MinValue;
+                this.anchorShortZoneFromSegmentBar = int.MinValue;
+                this.anchorBarsFed = 0;
+                this.anchorRecentDeltas.Clear();
+                this.anchorRecentBars.Clear();
+                this.anchorFormingBarTicks.Clear();
+                this.anchorGateDrawable = AnchorGateDrawable.Empty;
+            }
+
+            return;
+        }
+
+        // Read live, every fold, same reasoning as the delta/HH/LL settings elsewhere: a
+        // threshold that only took effect after a reload would look like the gate ignoring it.
+        this.anchorAbsorptionRules.SizeFloor = this.AnchorGateSizeFloor;
+        this.anchorAbsorptionRules.ZoneBufferTicks = this.AnchorGateZoneBufferTicks;
+        this.anchorAbsorptionRules.MaxDisplacementTicks = this.AnchorGateMaxDisplacementTicks;
+        this.anchorClusterRules.MinScore = this.AnchorGateClusterMinScore;
+        this.anchorZoneStateRules.ZoneBufferTicks = this.AnchorGateZoneBufferTicks;
+        this.anchorLongSignal.Rules = this.anchorZoneStateRules;
+        this.anchorShortSignal.Rules = this.anchorZoneStateRules;
+
+        var closed = bars.Count - 1;
+        if (closed < 0)
+            return;
+
+        if (this.anchorBarsFed > closed)
+        {
+            this.anchorBarsFed = 0;
+            this.anchorLongZone = null;
+            this.anchorShortZone = null;
+            this.anchorLongZoneFromSegmentBar = int.MinValue;
+            this.anchorShortZoneFromSegmentBar = int.MinValue;
+            this.anchorRecentDeltas.Clear();
+            this.anchorRecentBars.Clear();
+        }
+
+        var tickSize = this.instrument.TickSize;
+        if (!double.IsFinite(tickSize) || tickSize <= 0)
+            return;
+
+        while (this.anchorBarsFed < closed)
+        {
+            if (!this.TryReadBar(bars, this.anchorBarsFed, out var bar))
+                break;
+
+            var isLastInBurst = this.anchorBarsFed == closed - 1;
+
+            // Extreme-band volume/delta and per-bar delta come from LIVE ticks buffered for the
+            // bar that just closed - only ever available for the newest bar in a catch-up burst.
+            // Older bars get OHLC-only zone maintenance (arming/breaking/traversal), never a
+            // cluster score: there is no tick history to score them with, the same live-forward-
+            // only limitation already documented for this connector's volume analysis.
+            double barDelta = 0, extremeBandLowVol = 0, extremeBandLowDelta = 0, extremeBandHighVol = 0, extremeBandHighDelta = 0;
+
+            if (isLastInBurst && this.anchorFormingBarTicks.Count > 0)
+            {
+                var band = this.AnchorGateZoneBufferTicks * tickSize;
+                foreach (var t in this.anchorFormingBarTicks)
+                {
+                    barDelta += t.SignedSize;
+                    if (Math.Abs(t.Price - bar.Low) <= band) { extremeBandLowVol += t.Size; extremeBandLowDelta += t.SignedSize; }
+                    if (Math.Abs(t.Price - bar.High) <= band) { extremeBandHighVol += t.Size; extremeBandHighDelta += t.SignedSize; }
+                }
+            }
+
+            if (isLastInBurst)
+                this.anchorFormingBarTicks.Clear();
+
+            var facts = new AnchorBarFacts
+            {
+                Open = (decimal)bar.Open, High = (decimal)bar.High, Low = (decimal)bar.Low, Close = (decimal)bar.Close,
+                Volume = (decimal)bar.Volume, Delta = (decimal)barDelta,
+            };
+
+            this.anchorRecentDeltas.Add(barDelta);
+            if (this.anchorRecentDeltas.Count > this.anchorClusterRules.DeltaLookback) this.anchorRecentDeltas.RemoveAt(0);
+
+            this.anchorRecentBars.Add(facts);
+            if (this.anchorRecentBars.Count > 6) this.anchorRecentBars.RemoveAt(0);
+
+            this.anchorLongSignal.NoteBarDelta(facts.Delta);
+            this.anchorShortSignal.NoteBarDelta(facts.Delta);
+
+            this.RefreshAnchorZone(isResistance: false, ref this.anchorLongZone, ref this.anchorLongZoneFromSegmentBar, tickSize);
+            this.RefreshAnchorZone(isResistance: true, ref this.anchorShortZone, ref this.anchorShortZoneFromSegmentBar, tickSize);
+
+            var otf = AnchorSignalGate.OneTimeframing(this.anchorRecentBars, Math.Min(5, this.anchorRecentBars.Count - 1));
+
+            this.AdvanceAnchorZone(
+                this.anchorLongZone, AnchorTestSide.SupportLong, this.anchorLongSignal, facts,
+                isLastInBurst, tickSize, otf);
+            this.AdvanceAnchorZone(
+                this.anchorShortZone, AnchorTestSide.ResistanceShort, this.anchorShortSignal, facts,
+                isLastInBurst, tickSize, otf);
+
+            this.anchorBarsFed++;
+        }
+
+        this.anchorGateDrawable = this.BuildAnchorGateDrawable();
+    }
+
+    private void RefreshAnchorZone(bool isResistance, ref AnchorZone? zone, ref int fromSegmentBar, double tickSize)
+    {
+        var segment = this.hhllEngine!.Segments.LastOrDefault(s => s.IsResistance == isResistance);
+        if (segment is null)
+            return;
+
+        if (zone is not null && segment.StartBar == fromSegmentBar)
+            return;
+
+        fromSegmentBar = segment.StartBar;
+
+        var buffer = this.AnchorGateZoneBufferTicks * tickSize;
+
+        zone = new AnchorZone
+        {
+            Bottom = (decimal)(segment.Price - buffer),
+            Top = (decimal)(segment.Price + buffer),
+            Poc = (decimal)segment.Price,
+            Kind = AnchorZoneKind.CompositeHvn, // stand-in label -- built from HH/LL, not a volume profile
+            Rank = 1,
+            Naked = true,
+            StartBar = segment.StartBar,
+            BornSession = DateTime.UtcNow,
+        };
+    }
+
+    private void AdvanceAnchorZone(
+        AnchorZone? zone, AnchorTestSide side, AnchorSignalEngine engine, AnchorBarFacts facts,
+        bool haveTicksThisBar, double tickSize, int otf)
+    {
+        if (zone is null)
+            return;
+
+        engine.Advance(zone, this.anchorBarsFed, facts, DateTime.UtcNow, (decimal)tickSize, otf);
+
+        if (!haveTicksThisBar || zone.State != AnchorSignalState.Armed)
+            return;
+
+        if (!AnchorClusterAbsorption.Touches(facts, zone, side, (decimal)tickSize, this.anchorAbsorptionRules))
+            return;
+
+        var priorDeltas = this.anchorRecentDeltas.Select(d => (decimal)d).ToList();
+        var score = AnchorClusterAbsorption.Score(facts, priorDeltas, side, zone, (decimal)tickSize, this.anchorClusterRules);
+
+        if (score.Total < this.anchorClusterRules.MinScore)
+            return;
+
+        zone.NoteCluster(facts.Low, facts.High);
+
+        var evt = new AnchorEvent
+        {
+            Time = DateTime.UtcNow,
+            Price = zone.Poc,
+            Volume = facts.Volume,
+            Direction = side == AnchorTestSide.SupportLong ? AnchorAggressor.Sell : AnchorAggressor.Buy,
+            Path = AnchorEventPath.Cluster,
+            Bar = this.anchorBarsFed,
+        };
+
+        engine.Promote(zone, evt, this.anchorBarsFed);
+    }
+
+    /// <summary>Tape-based absorption: fed per tick from the drain loop, not per bar.</summary>
+    private void FeedAnchorTape(in TickEvent tick)
+    {
+        if (!this.AnchorGateEnabled)
+            return;
+
+        var tickSize = this.instrument.TickSize;
+        if (!double.IsFinite(tickSize) || tickSize <= 0)
+            return;
+
+        this.anchorFormingBarTicks.Add((tick.Price, tick.Size, tick.SignedSize));
+
+        var snapshot = new AnchorTradeSnapshot
+        {
+            Time = tick.TimestampUtc,
+            FirstPrice = (decimal)tick.Price,
+            LastPrice = (decimal)tick.Price,
+            Volume = (decimal)tick.Size,
+            Direction = tick.Aggressor switch
+            {
+                Aggressor.Buy => AnchorAggressor.Buy,
+                Aggressor.Sell => AnchorAggressor.Sell,
+                _ => AnchorAggressor.Between,
+            },
+        };
+
+        var decimalTick = (decimal)tickSize;
+        this.anchorDisplacementWatch.NotePrint(snapshot.LastPrice);
+
+        foreach (var (zone, side) in this.ArmedAnchorZones())
+        {
+            if (zone.Side != side || !AnchorTapeAbsorption.Qualifies(snapshot, zone, decimalTick, this.anchorAbsorptionRules))
+                continue;
+
+            this.anchorDisplacementWatch.Add(
+                new AnchorEvent
+                {
+                    Time = snapshot.Time, Price = snapshot.LastPrice, Volume = snapshot.Volume,
+                    Direction = snapshot.Direction, Path = AnchorEventPath.Tape, Bar = this.anchorBarsFed,
+                },
+                zone, this.anchorAbsorptionRules);
+        }
+
+        foreach (var pair in this.anchorDisplacementWatch.Resolve(DateTime.UtcNow, decimalTick, this.anchorAbsorptionRules))
+        {
+            var evt = pair.Key;
+            var zone = pair.Value;
+            zone.NoteCluster(evt.Price, evt.Price);
+
+            (zone.Side == AnchorTestSide.SupportLong ? this.anchorLongSignal : this.anchorShortSignal)
+                .Promote(zone, evt, evt.Bar);
+        }
+    }
+
+    private IEnumerable<(AnchorZone Zone, AnchorTestSide Side)> ArmedAnchorZones()
+    {
+        if (this.anchorLongZone is { State: AnchorSignalState.Armed } lz)
+            yield return (lz, AnchorTestSide.SupportLong);
+        if (this.anchorShortZone is { State: AnchorSignalState.Armed } sz)
+            yield return (sz, AnchorTestSide.ResistanceShort);
+    }
+
+    private AnchorGateDrawable BuildAnchorGateDrawable()
+    {
+        var zones = new List<AnchorGateZoneDraw>(2);
+
+        void AddZone(AnchorZone? zone, bool isLong)
+        {
+            if (zone is null || zone.State == AnchorSignalState.Dormant)
+                return;
+
+            zones.Add(new AnchorGateZoneDraw(
+                (double)zone.Poc, isLong, zone.State,
+                zone.HasCluster ? (double?)((double)zone.ClusterLow) : null,
+                zone.HasCluster ? (double?)((double)zone.ClusterHigh) : null));
+        }
+
+        AddZone(this.anchorLongZone, isLong: true);
+        AddZone(this.anchorShortZone, isLong: false);
+
+        return new AnchorGateDrawable(zones.ToArray());
+    }
 
     // ---- HTF zones (approved plan 2026-08-28) ----------------------------
 
@@ -5586,13 +6081,47 @@ public sealed class OrbIxIndicator : Qt.Indicator
         for (var i = 0; i < segments.Length; i++)
         {
             var segment = engine.Segments[i];
+            DateTime? endUtc;
+
+            if (segment.EndBar is { } end)
+            {
+                endUtc = this.hhllBarOpen[end];
+            }
+            else
+            {
+                // VISUAL CLIP ONLY — segment.EndBar itself is untouched, so the Pine-faithful
+                // engine's own res/sup state never changes because of this. The engine only
+                // freezes a line when a NEW opposing pivot redefines the level
+                // (rechange/suchange), which can lag well behind the bar that actually closed
+                // through it; drawing all the way to the pane's right edge until then read as
+                // a level still live long after price had already broken it.
+                var breakBar = this.FindHhLlBreakBar(segment);
+                endUtc = breakBar is { } b ? this.hhllBarOpen[b] : null;
+            }
+
             segments[i] = new HhLlSegmentDraw(
-                this.hhllBarOpen[segment.StartBar],
-                segment.EndBar is { } end ? this.hhllBarOpen[end] : null,
-                segment.Price, segment.IsResistance);
+                this.hhllBarOpen[segment.StartBar], endUtc, segment.Price, segment.IsResistance);
         }
 
         return new HhLlDrawable(labels, segments);
+    }
+
+    /// <summary>
+    /// The first bar, after a still-open segment's own pivot, whose CLOSE broke through its
+    /// level — above for resistance, below for support. Null when nothing has broken it yet,
+    /// in which case the line keeps extending right exactly as before this existed.
+    /// </summary>
+    private int? FindHhLlBreakBar(HhLlSegment segment)
+    {
+        var closes = this.hhllBarClose;
+
+        for (var i = Math.Max(segment.StartBar + 1, 0); i < closes.Count; i++)
+        {
+            if (segment.IsResistance ? closes[i] > segment.Price : closes[i] < segment.Price)
+                return i;
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -7195,22 +7724,24 @@ public sealed class OrbIxIndicator : Qt.Indicator
             }
         }
 
-        // The loud scalp/hold line — INDEPENDENT of DirectionPanelOn above, deliberately: this
-        // reads the same this.directionPanel the detail panel does, but the two are separate
-        // toggles so either can be on with the other off.
+        // The loud bias-line — INDEPENDENT of DirectionPanelOn above, deliberately: this reads
+        // the same this.directionPanel the detail panel does, but the two are separate toggles
+        // so either can be on with the other off. Fixed sentences, not a graded verdict: this
+        // line means "only trade this side while price is here", not "enter now".
         if (this.DirectionCalloutEnabled && paintWindow is not null)
         {
             try
             {
-                DirectionCalloutDraw? callout = this.directionCalloutSide != 0
-                    && this.directionPanel is { Callout.Kind: not DirectionCalloutKind.None } content
+                DirectionCalloutDraw? bias = this.directionCalloutSide != 0
                     && double.IsFinite(this.directionCalloutAnchorPrice)
                     ? new DirectionCalloutDraw(
-                        this.directionCalloutAnchorPrice, content.Callout.Text, content.Callout.IsLong)
+                        this.directionCalloutAnchorPrice,
+                        this.directionCalloutSide > 0 ? "ONLY LONG SCALPS ABOVE" : "ONLY SHORT SCALPS BELOW",
+                        this.directionCalloutSide > 0)
                     : null;
 
                 this.directionCalloutOverlay.Draw(
-                    graphics, paintWindow, callout,
+                    graphics, paintWindow, bias,
                     new DirectionCalloutOverlay.Options(
                         this.DirectionCalloutLongColor, this.DirectionCalloutShortColor,
                         (float)this.DirectionCalloutLineWidth),
@@ -7219,7 +7750,36 @@ public sealed class OrbIxIndicator : Qt.Indicator
             catch (Exception ex)
             {
                 this.overlayFault = PathDisplay.Redact(
-                    $"The direction callout failed to draw: {ex.GetType().Name}: {ex.Message}");
+                    $"The direction bias line failed to draw: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        // The companion reversal line: price has broken the bias regime above. Dashed, and
+        // drawn from the SAME overlay type (it only paints whatever it's handed) so it never
+        // needs its own pen/label machinery.
+        if (this.DirectionReversalEnabled && paintWindow is not null)
+        {
+            try
+            {
+                DirectionCalloutDraw? reversal = this.directionReversalSide != 0
+                    && double.IsFinite(this.directionReversalAnchorPrice)
+                    ? new DirectionCalloutDraw(
+                        this.directionReversalAnchorPrice,
+                        BuildReversalText(this.directionReversalSide, this.directionPanel),
+                        this.directionReversalSide > 0)
+                    : null;
+
+                this.directionCalloutOverlay.Draw(
+                    graphics, paintWindow, reversal,
+                    new DirectionCalloutOverlay.Options(
+                        this.DirectionCalloutLongColor, this.DirectionCalloutShortColor,
+                        (float)this.DirectionCalloutLineWidth, Dashed: true),
+                    registry);
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = PathDisplay.Redact(
+                    $"The direction reversal line failed to draw: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -7239,6 +7799,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
             this.DrawFib(graphics, registry);
             this.DrawHhLl(graphics, registry);
             this.DrawWickAbsorption(graphics, registry);
+            this.DrawAnchorGate(graphics, registry);
             this.DrawZones(graphics, registry);
             // BEFORE the ranges and the setup geometry: imbalance is tape context and must sit
             // under the decision lines, never over them.
@@ -7738,6 +8299,28 @@ public sealed class OrbIxIndicator : Qt.Indicator
         }
     }
 
+    private void DrawAnchorGate(Graphics graphics, List<RectangleF> labelRegistry)
+    {
+        var chart = this.CurrentChart;
+        var window = chart?.MainWindow;
+        var drawable = this.anchorGateDrawable;
+
+        if (window is null || chart is null || drawable.Zones.Length == 0 || !this.AnchorGateShowPanel)
+            return;
+
+        try
+        {
+            this.anchorGateOverlay.Draw(graphics, window, drawable,
+                new AnchorGateOverlay.Options(this.AnchorGateLongColor, this.AnchorGateShortColor),
+                labelRegistry);
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = PathDisplay.Redact(
+                $"The Anchor gate overlay failed to draw: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     /// <summary>
     /// The four level families absorbed from Aramid Flow.
     ///
@@ -7892,6 +8475,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
         this.overlay = null;
         this.hhllOverlay.Dispose();
         this.wickAbsorptionOverlay.Dispose();
+        this.anchorGateOverlay.Dispose();
         this.fibOverlay.Dispose();
         this.zoneOverlay.Dispose();
         this.deltaOverlay.Dispose();

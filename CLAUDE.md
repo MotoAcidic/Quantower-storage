@@ -209,6 +209,71 @@ fixed until the side changes again. A scalp read upgrading to a hold read (or th
 the SAME side updates the line's text and colour in place without relocating it, since that is
 still the same opportunity, only re-graded - only a side flip moves the level.
 
+**Same date - HH/LL support/resistance lines now visually stop at the bar that broke them**,
+instead of running to the pane's right edge until the Pine-faithful engine gets around to
+redrawing them. `HhLlSegment.EndBar` (in `HhLlEngine.cs`, the statement-for-statement Pine
+port) only freezes on `rechange`/`suchange` - a NEW opposing pivot redefining the level -
+which can lag well behind the bar that actually closed through it; drawing the still-open
+segment out to the chart's edge in the meantime read as a level still live long after price
+had broken it, which was the operator's exact complaint. Fixed entirely on the paint side
+(`BuildHhLlDrawable()`/`FindHhLlBreakBar()` in `OrbIxIndicator.cs`, new `hhllBarClose` array
+parallel to the existing `hhllBarOpen`/`High`/`Low`) - for a still-open segment, scans forward
+from its pivot bar for the first close beyond its price (above for resistance, below for
+support) and clips the DRAWN line there. `HhLlEngine.cs` itself, and `segment.EndBar`, are
+untouched - the Pine port's own fidelity to the reference script (tested against
+`tools/hhll_reference.py`) is not affected, only how an as-yet-unfrozen segment is rendered.
+
+**Added 2026-09-15 - Ocean's Anchor absorption gate, brought into the indicator to match the
+new `directionAbsorptionScalpStrategy`** (`AnchorGateOverlay.cs`, `FeedAnchorGate`/
+`FeedAnchorTape`/`RefreshAnchorZone`/`AdvanceAnchorZone` in `OrbIxIndicator.cs`,
+`InputParameter` indices 175-179/210-212, `"Anchor Gate: ..."`). Same engine as the strategy -
+Ocean's Anchor's Dormant->Armed->Triggered->Confirmed/Expired/Broken state machine, ported from
+a friend's ATAS suite at `Ported/src/oceans-anchor/`, compiled in by source (same `<Compile
+Include>` pattern and same Assembly.Load cache-collision reasoning as `OrbIx.Core` itself) -
+applied to THIS indicator's own HH/LL segments as the zone source, never Anchor's own
+footprint-based HVN detector (would hit the same historical-volume-analysis refusal documented
+above). Tape-based absorption (a large print showing no follow-through in a timed window) is
+fed per-tick from the existing drain loop; the bar-shape 3-of-4 fallback test runs per fold,
+bar-close only, and ONLY for the newest bar in a catch-up burst - older bars in a backfill burst
+get OHLC-only zone maintenance (arm/break/traverse), never a cluster score, since there is no
+buffered tick history to score them with. Drawn as a line at the zone's price, coloured/labelled
+by state, with the confirming print's stop reference shown once Confirmed.
+
+**Same date - three defaults changed to reduce clutter, all superseded-by-something-better
+rather than arbitrary:**
+- `WickAbsorptionEnabled` -> **false**. The Anchor gate above answers the same "is this
+  absorption" question with a real tested state machine instead of a single-bar threshold: one
+  primary absorption display instead of two. Still a settings-panel toggle away.
+- `DirectionPanelOn` -> **false**. The operator's own complaint: this detail box (structure/
+  location/flow/regime rows) sits on the chart and gets in the way of order management, and the
+  scalp/hold callout line already surfaces the same verdict in far less space. The detail rows
+  are one toggle away for anyone who wants to see exactly which inputs are voting.
+- (Recall from earlier the same session: `AbsorptionDrawEnabled`, `ShowAbsorptionShelves`,
+  `FlowAbsorption`, `FlowVolumeAbsorptionTier1/2` were already turned off for the same
+  "redundant absorption display" reason, when `WickAbsorptionEnabled` was still the primary one.
+  The Anchor gate is now the fourth and, so far, the last word on absorption redundancy - if a
+  FIFTH one shows up, that itself is worth noticing.)
+
+**Added 2026-09-16 - the callout line split into a bias line plus a reversal line, per the
+operator's own re-framing.** The single "POSSIBLE LONG SCALP" entry-call line was replaced with
+two independent lines, both still anchoring to a frozen PRICE rather than tracking live price
+(the earlier "stay at a level" fix is untouched):
+- **Bias line** (`DirectionCalloutEnabled`, still index 397, now `"Direction: show bias line"`)
+  - same mechanic as before (freezes at the price where `directionCalloutSide` last flipped,
+  scalp/hold grade changes update text in place without moving it) - but now reads as a fixed
+  regime statement, `"ONLY LONG SCALPS ABOVE"` / `"ONLY SHORT SCALPS BELOW"`, not a graded entry
+  call.
+- **Reversal line** (`DirectionReversalEnabled`, index 403, new): fires when price crosses to
+  the WRONG side of the FROZEN bias line - contradicting the regime that line established -
+  tracked independently of `directionCalloutSide` because price moves every tick while the bias
+  line does not, so a regime can be violated by price well before the full multi-input vote
+  catches up and re-flips the bias line to agree. Text borrows the bias line's own scalp/hold
+  wording once the fresh verdict agrees with the reversal direction (`"POSSIBLE REVERSAL — LONG
+  SCALP"`), falling back to a plain `"POSSIBLE REVERSAL — LONG"`/`"...SHORT"` until it does.
+  Drawn dashed, from the same `DirectionCalloutOverlay` (now takes a `Dashed` option) so no new
+  paint machinery was needed - it only paints whatever `PublishDirection` hands it, same
+  discipline as everything else here.
+
 ### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
 **Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show
 delta, DOM/resting orders, absorption, auto-drawn fib, and FRVP+AVP (higher/lower timeframe
@@ -714,6 +779,53 @@ the platform note already captured under EMA Cross Strategy above).
 - Demonstrates the enum-as-dropdown `variants: new object[] { "label", EnumValue, ... }`
   pattern other strategies in this repo could reuse instead of the `int`-with-a-comment
   workaround `emaCrossStrategy`/`emaTrendStrategy` use for their mode selectors.
+
+---
+
+### 12. Direction + Absorption Scalp Strategy (`directionAbsorptionScalpStrategy`) — added 2026-09-15
+
+**Files:** `Strategies/directionAbsorptionScalpStrategy/directionAbsorptionScalpStrategy/
+directionAbsorptionScalpStrategy.cs` (+ its own `readme.md` at the project root — read it first,
+it's more detailed than this entry)
+
+#### What it is
+The first strategy in this repo built by REUSING an indicator's logic library rather than
+writing detection math from scratch: trades ORB-IX's "possible long/short" direction callout
+(`OrbIx.Core.Direction.DirectionEngine`) against a real HH/LL support/resistance level, timed by
+**Ocean's Anchor**'s absorption state machine — an ATAS indicator from a friend's 18-indicator
+suite dropped into `Ported/src/oceans-anchor/` this same session (see `Ported/PORTING-GUIDE.md`).
+Zone lifecycle: Dormant (nothing near it) -> Armed (price is testing it) -> Triggered (a
+qualifying absorption print fired — either a tape-based test requiring NO follow-through within
+a timed window, or a bar-shape 3-of-4 test when no tape event fires) -> Confirmed (a later bar's
+delta flip or CVD divergence favours the trade, inside a bar-count clock) or Expired/Broken.
+**Entry fires only on the Confirmed transition, gated on DirectionEngine's current side agreeing
+with the zone's side** — two independent readings both required, directly matching the session's
+"keep an eye on absorption levels... and target areas for the scalp" request. Stop = the
+confirming print's own price extreme; target = nearest of (opposing HH/LL, VWAP, prior day/week
+level) ahead of price, clamped by a minimum distance.
+
+#### Two deliberate architecture decisions, both explained at length in the csproj/readme
+1. **`OrbIx.Core` AND Ocean's Anchor's absorption files are compiled in by source
+   (`<Compile Include>` glob), never referenced as separate DLLs** — mirrors
+   `OrbIx.Quantower.Indicator.csproj`'s own documented reasoning: Quantower's `Assembly.Load`
+   caches by FullName, so a shared DLL under two script folders collides on one cache key (a
+   defect already measured once in this repo for the indicator itself).
+2. **This strategy builds its OWN `Zone` objects from `HhLlEngine` segments — it does NOT port
+   Ocean's Anchor's footprint-based HVN zone detector** (`ZoneBuilder`/`AnchorProfile`). That
+   detector needs per-price volume data, which hits the SAME historical-volume-analysis refusal
+   already documented above for this Quantower connector. Only `AnchorModels.cs`, `AnchorState.
+   cs`'s `SignalEngine`/`ZoneMaintenance`/`SignalGate`, and `AnchorAbsorption.cs`'s
+   `TapeAbsorption`/`DisplacementWatch`/`ClusterAbsorption` are actually exercised; the rest of
+   `oceans-anchor` compiles in as harmless unused code for the same reason.
+
+#### Safety
+Two gates before any order can be sent: `ConfirmSimOrEvalAccount` (default **false** — a manual,
+auditable acknowledgment; there's no reliable SDK-level way to detect "is this a sim account")
+and `DryRun` (default **true** — logs the full decision, places nothing). Position isolation
+uses the `srChannelBreakStrategy`-style `StrategyTag`/`Comment` filter. **Not yet run against a
+live session** — see the readme's bring-up order (dry-run review, cross-check against the
+ORB-IX indicator on the same symbol, then sim/eval-only with `Quantity=1`) before trusting it
+with anything.
 
 ---
 

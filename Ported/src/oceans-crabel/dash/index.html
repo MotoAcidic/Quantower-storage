@@ -1,0 +1,3496 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ocean's Crabel</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:            #f9f9f7;
+    --surface-1:       #fcfcfb;
+    --text-primary:    #0b0b0b;
+    --text-secondary:  #52514e;
+    --text-muted:      #898781;
+    --gridline:        #e1e0d9;
+    --baseline:        #c3c2b7;
+    --border:          rgba(11,11,11,0.10);
+    --bar-plain:       #86b6ef;   /* blue 250 - ordinal low step */
+    --bar-flag:        #2a78d6;   /* blue 450 - ordinal high step */
+    --status-good:     #0ca30c;
+    --status-warning:  #fab219;
+    --status-critical: #d03b3b;
+    /* Trade roles. Target is aqua rather than green: green↔red measures ΔE 4.1
+       under deuteranopia, far below the floor, so a colourblind reader could not
+       tell a stop from a target. Aqua↔red clears it (9.9 light / 7.2 dark), and
+       every mark still carries its role as a word. */
+    --trade-entry:     #2a78d6;
+    --trade-stop:      #d03b3b;
+    --trade-target:    #1baf7a;
+    /* Elevation. Three planes only: page, card, inset. More than three and the
+       eye stops reading them as depth. */
+    --surface-2:       #ffffff;
+    --inset:           #f2f2ef;
+    --shadow:          0 1px 2px rgba(11,11,11,.05), 0 4px 14px rgba(11,11,11,.05);
+    --accent-soft:     rgba(42,120,214,.10);
+    --warn-soft:       rgba(250,178,25,.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page:           #0d0d0d;
+      --surface-1:      #1a1a19;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --gridline:       #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --bar-plain:      #184f95;  /* blue 600 */
+      --bar-flag:       #3987e5;  /* blue 400 */
+      --trade-entry:    #3987e5;
+      --trade-target:   #199e70;
+      --surface-2:      #232322;
+      --inset:          #131312;
+      --shadow:         0 1px 2px rgba(0,0,0,.40), 0 6px 20px rgba(0,0,0,.32);
+      --accent-soft:    rgba(57,135,229,.14);
+      --warn-soft:      rgba(250,178,25,.14);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface-1:      #1a1a19;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --gridline:       #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --bar-plain:      #184f95;
+    --bar-flag:       #3987e5;
+    --trade-entry:    #3987e5;
+    --trade-target:   #199e70;
+    --surface-2:      #232322;
+    --inset:          #131312;
+    --shadow:         0 1px 2px rgba(0,0,0,.40), 0 6px 20px rgba(0,0,0,.32);
+    --accent-soft:    rgba(57,135,229,.14);
+    --warn-soft:      rgba(250,178,25,.14);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 22px 20px 64px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; }
+
+  /* One consistent card. Every panel is this; nothing invents its own chrome. */
+  .panel, .verdict, .source, .touch, .brief, .side, .tile, .zchip, details.panel {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+  .panel, .verdict { padding: 20px 22px; margin-bottom: 16px; box-shadow: var(--shadow); }
+  .panel > h2:first-child { margin-top: 0; }
+
+  /* Section headings read as labels, not shouts. */
+  .panel h2 { font-size: 12.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--text-muted); margin: 0 0 4px; }
+  /* A headline is a title, not a section label — it opts out of the label style. */
+  .panel h2.headline { font-size: 21px; font-weight: 600; letter-spacing: -.02em;
+    text-transform: none; color: var(--text-primary); margin: 6px 0 2px; }
+  .panel .hint { color: var(--text-muted); font-size: 12.5px; margin: 0 0 14px; line-height: 1.5; }
+
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--text-muted); font-size: 13px; }
+  .live { margin-left: auto; display: flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 12px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--status-good); }
+  .dot.stale { background: var(--status-warning); }
+
+  /* Source banner: which feed is live, and whether its Stretch is tradable. */
+  .source {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 11px 14px; border-radius: 8px; margin-bottom: 16px;
+    border: 1px solid var(--border); background: var(--surface-1);
+    font-size: 13.5px;
+  }
+  .source .icon { font-size: 15px; line-height: 1.35; }
+  .source.warn { border-color: color-mix(in srgb, var(--status-warning) 55%, var(--border)); }
+  .source b { font-weight: 600; }
+  .source .why { color: var(--text-secondary); display: block; margin-top: 2px; }
+
+  .verdict {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px 20px; margin-bottom: 14px;
+  }
+  .verdict .label { color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .verdict .text { font-size: 25px; font-weight: 600; letter-spacing: -0.02em; margin-top: 5px; }
+  .chips { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 12px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--text-secondary);
+  }
+  .chip.on { border-color: transparent; background: var(--bar-flag); color: #fff; }
+  .chip.unknown { color: var(--text-muted); font-weight: 500; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); gap: 12px; margin-bottom: 14px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .tile .label { color: var(--text-muted); font-size: 12px; }
+  .tile .value { font-size: 26px; font-weight: 600; margin-top: 3px; letter-spacing: -0.02em; }
+  .tile .value.hero { font-size: 50px; line-height: 1.05; }
+  .tile .note { color: var(--text-secondary); font-size: 12px; margin-top: 3px; }
+  .tile .value.na { color: var(--text-muted); font-size: 19px; font-weight: 500; }
+
+  .panel { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; margin-bottom: 14px; }
+  .panel h2 { font-size: 13px; font-weight: 600; margin: 0 0 3px; }
+  .panel .hint { color: var(--text-muted); font-size: 12px; margin-bottom: 12px; }
+
+  .orb { display: flex; gap: 26px; flex-wrap: wrap; align-items: flex-end; }
+  .orb .leg .k { color: var(--text-muted); font-size: 12px; }
+  .orb .leg .v { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; }
+
+  .legend { display: flex; gap: 14px; align-items: center; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+  svg { display: block; width: 100%; overflow: visible; }
+  .axis { fill: var(--text-muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+
+  /* Every number in a column aligns; only display figures use proportional. */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  td { letter-spacing: .01em; }
+  th { text-align: right; color: var(--text-muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--gridline); font-size: 11.5px; }
+  th:first-child, td:first-child { text-align: left; }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--gridline); text-align: right; }
+  tbody tr:last-child td { border-bottom: none; }
+  .muted { color: var(--text-muted); }
+  .flagcell { color: var(--text-secondary); font-weight: 600; }
+
+  .tip {
+    position: fixed; pointer-events: none; opacity: 0; transition: opacity .1s;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 7px;
+    padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.16);
+    font-variant-numeric: tabular-nums; z-index: 10; max-width: 230px;
+  }
+  .tip b { display: block; margin-bottom: 3px; font-size: 12.5px; }
+  .err { border-color: color-mix(in srgb, var(--status-critical) 55%, var(--border)); }
+
+  .callout {
+    border-left: 3px solid var(--status-warning);
+    background: color-mix(in srgb, var(--status-warning) 8%, transparent);
+    padding: 10px 13px; border-radius: 0 7px 7px 0; font-size: 13px;
+    color: var(--text-secondary); margin-top: 4px;
+  }
+  .callout b { color: var(--text-primary); }
+  tr.baseline-row td { border-top: 1px solid var(--baseline); color: var(--text-secondary); }
+
+  .synth { margin: 10px 0 0; color: var(--text-secondary); font-size: 14px; max-width: 74ch; }
+  .synth b { color: var(--text-primary); }
+
+  /* Setup grade. A status, so it wears a status colour — always with an icon and
+     a word, never colour alone. */
+  .grade { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 700;
+           letter-spacing: .02em; text-transform: uppercase; margin-bottom: 8px; }
+  .grade .g-icon { font-size: 13px; }
+  .grade-good { color: var(--status-good); }
+  .grade-weak, .grade-unknown { color: var(--text-muted); }
+  .grade-none { color: var(--text-muted); }
+
+  .clock { font-variant-numeric: tabular-nums; color: var(--text-secondary); font-weight: 600;
+           margin-right: 12px; }
+
+  .alertbtn { appearance: none; font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer;
+    background: none; color: var(--text-muted); border: 1px solid var(--border);
+    border-radius: 999px; padding: 3px 11px; margin-right: 12px; }
+  .alertbtn:hover:not(:disabled) { color: var(--text-primary); }
+  .alertbtn.on { color: var(--status-good); border-color: color-mix(in srgb, var(--status-good) 45%, var(--border)); }
+  .alertbtn:disabled { cursor: default; opacity: .6; }
+  .pdfbtn { text-decoration: none; display: inline-block; }
+  .pdfbtn:hover { color: var(--text-primary); }
+  .pdfbtn.busy { opacity: .55; pointer-events: none; }
+
+  /* Bracket-touch state. A status, so icon + words carry it, not colour alone. */
+  .touch { display: flex; gap: 10px; align-items: flex-start; padding: 11px 14px; border-radius: 8px;
+    margin-bottom: 16px; border: 1px solid var(--border); background: var(--surface-1); font-size: 13.5px; }
+  .touch .icon { font-size: 13px; line-height: 1.45; }
+  .touch.hit { border-color: color-mix(in srgb, var(--status-good) 55%, var(--border)); }
+  .touch.hit .icon { color: var(--status-good); }
+  .touch.idle { color: var(--text-secondary); }
+
+  .ev-hero { display: flex; gap: 22px; align-items: center; padding: 14px 16px; border-radius: 9px;
+    background: color-mix(in srgb, var(--text-primary) 5%, transparent); border-left: 3px solid var(--bar-flag); }
+  .ev-hero.ev-in-session { border-left-color: var(--status-warning); }
+  .ev-when { display: flex; flex-direction: column; min-width: 132px; }
+  .ev-count { font-size: 27px; font-weight: 600; letter-spacing: -.02em; }
+  .ev-time { font-size: 11.5px; color: var(--text-muted); }
+  .ev-what { display: flex; flex-direction: column; gap: 2px; }
+  .ev-impact { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+               color: var(--status-warning); }
+  .ev-title { font-size: 15px; font-weight: 600; }
+  .ev-meta { font-size: 11.5px; color: var(--text-muted); }
+
+  /* Watch tab. */
+  .w-when { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .newslist { list-style: none; margin: 0; padding: 0; }
+  .newslist li { display: grid; grid-template-columns: 48px 1fr auto; gap: 12px; align-items: baseline;
+    padding: 9px 0; border-bottom: 1px solid var(--gridline); font-size: 13.5px; }
+  .newslist li:last-child { border-bottom: none; }
+  .n-age { color: var(--text-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .n-title { color: var(--text-secondary); }
+  .n-title a { color: var(--text-secondary); text-decoration: none; }
+  .n-title a:hover { color: var(--text-primary); text-decoration: underline; }
+  .n-pub { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+
+  /* Claim verdicts. Icon + word carry it; colour only reinforces. */
+  .stalebar { display: flex; align-items: center; gap: 11px; padding: 11px 14px; margin-bottom: 14px;
+    border-radius: 8px; font-size: 13.5px; background: var(--surface-1);
+    border: 1px solid color-mix(in srgb, var(--status-warning) 55%, var(--border)); }
+  .stalebar .icon { font-size: 15px; color: var(--status-warning); }
+  .stalebar b { color: var(--text-primary); }
+  .stalebar div { color: var(--text-secondary); }
+  .stalebar button { margin-left: auto; appearance: none; font: inherit; font-size: 12.5px;
+    font-weight: 600; cursor: pointer; padding: 5px 14px; border-radius: 6px;
+    border: 1px solid var(--border); background: none; color: var(--text-primary); }
+  .stalebar button:hover { border-color: var(--text-muted); }
+
+  /* Session countdown strip. */
+  .zstrip { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  .zstrip.closed { display: flex; align-items: baseline; gap: 12px; padding: 11px 14px;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--surface-1); }
+  .z-now { font-size: 14px; font-weight: 600; }
+  .z-sub { font-size: 13px; color: var(--text-secondary); }
+  .z-sub b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+
+  .zchip { display: flex; flex-direction: column; gap: 1px; padding: 7px 12px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface-1); min-width: 118px; }
+  .zchip.active { border-color: color-mix(in srgb, var(--status-good) 55%, var(--border));
+    background: color-mix(in srgb, var(--status-good) 9%, var(--surface-1)); }
+  .zc-label { font-size: 11.5px; font-weight: 600; }
+  .zc-time { font-size: 12.5px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .zchip.active .zc-time { color: var(--status-good); font-weight: 600; }
+  /* Concentration sits beside the countdown so it can never collide with a long
+     zone name. Earned by measurement, so it is stated as a number. */
+  .zc-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .zc-conc { font-size: 10.5px; font-weight: 700; color: var(--text-muted); }
+  .zchip.hot .zc-conc { color: var(--bar-flag); }
+  .zchip.hot { border-color: color-mix(in srgb, var(--bar-flag) 45%, var(--border)); }
+
+  /* Session brief — also the print target, so it is styled as a document. */
+  .brief { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+    padding: 30px 34px; max-width: 900px; }
+  .brief-head { display: flex; align-items: flex-start; gap: 20px; padding-bottom: 16px;
+    border-bottom: 2px solid var(--border); margin-bottom: 4px; }
+  .brief h1 { font-size: 23px; font-weight: 600; margin: 0; letter-spacing: -.02em; }
+  .brief-meta { font-size: 12px; color: var(--text-muted); margin: 4px 0 0; }
+  .brief-grade { margin-left: auto; font-size: 12px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .04em; white-space: nowrap; padding-top: 4px; }
+  .brief section { padding: 18px 0; border-bottom: 1px solid var(--gridline); }
+  .brief section:last-child { border-bottom: none; }
+  .brief h2 { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--text-muted); margin: 0 0 10px; }
+  .brief h3 { font-size: 13px; font-weight: 600; margin: 0 0 6px; }
+  .brief p { margin: 0 0 10px; font-size: 13.5px; color: var(--text-secondary); }
+  .brief p:last-child { margin-bottom: 0; }
+  .brief b { color: var(--text-primary); }
+  .brief .lead { font-size: 16px; color: var(--text-primary); font-weight: 500; }
+  .brief ul { margin: 0; padding-left: 20px; font-size: 13.5px; color: var(--text-secondary); }
+  .brief li { margin-bottom: 7px; }
+  .prov { font-size: 11.5px !important; color: var(--text-muted) !important; }
+  .warn-line { border-left: 3px solid var(--status-warning); padding-left: 11px; }
+  .briefkv { width: 100%; font-size: 13px; }
+  .briefkv td { padding: 5px 10px 5px 0; border-bottom: 1px solid var(--gridline); text-align: left; }
+  .briefkv td:first-child { color: var(--text-muted); width: 25%; }
+  .briefkv td:nth-child(2) { width: 25%; }
+
+  @media print {
+    body { background: #fff; color: #000; padding: 0; }
+    .tabs, .live, .zstrip, .stalebar, #pane-live, #pane-trade, #pane-cheat, header .live { display: none !important; }
+    #pane-brief { display: block !important; }
+    .brief { border: none; padding: 0; max-width: none; background: #fff; }
+    .brief section { break-inside: avoid; }
+    .brief h1, .brief h2, .brief h3, .brief b, .brief .lead { color: #000; }
+    .brief p, .brief li, .briefkv td { color: #222; }
+    svg { max-width: 100%; }
+  }
+
+  /* Trade tab. Entry / stop / target are semantic states, so they use the
+     status palette — always beside a word, never colour alone. */
+  .ladder-head { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+  .sideswitch { margin-left: auto; display: flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
+  .sideswitch button { appearance: none; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+    background: none; color: var(--text-muted); border: none; padding: 5px 16px; }
+  .sideswitch button[aria-pressed="true"] { background: var(--bar-flag); color: #fff; }
+  .sideswitch button:hover[aria-pressed="false"] { color: var(--text-primary); }
+
+  .keyrow { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 10px; font-size: 12px; color: var(--text-secondary); }
+  .key { display: inline-flex; align-items: center; gap: 6px; }
+  .key i { width: 13px; height: 3px; border-radius: 2px; display: inline-block; }
+  .sw-entry { background: var(--trade-entry); }
+  .sw-stop  { background: var(--trade-stop); }
+  .sw-tp    { background: var(--trade-target); }
+  .sw-risk  { background: color-mix(in srgb, var(--trade-stop) 30%, transparent); height: 10px !important; }
+  .sw-hot   { background: var(--bar-flag); height: 10px !important; }
+  .sw-cold  { background: var(--bar-plain); opacity: .3; height: 10px !important; }
+  .sw-high  { background: var(--status-warning); }
+  .sw-med   { background: var(--text-secondary); }
+  .sw-now   { background: var(--status-good); }
+
+  .dir-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: 1px; }
+  .dir-dot.long { background: var(--trade-target); }
+  .dir-dot.short { background: var(--trade-stop); }
+  .panel-dim { opacity: .55; }
+  .panel-active { border-color: color-mix(in srgb, var(--bar-flag) 40%, var(--border)); }
+
+  .tp-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--trade-target); margin-right: 7px; vertical-align: 1px; }
+  .r-good { color: var(--trade-target); font-weight: 700; }
+  tr.tp-hit td { background: color-mix(in srgb, var(--trade-target) 7%, transparent); }
+  .tradebar { display: flex; gap: 30px; flex-wrap: wrap; margin-top: 18px; padding-top: 16px;
+    border-top: 1px solid var(--border); }
+  .tb { display: flex; flex-direction: column; padding-left: 13px; border-left: 3px solid var(--border); }
+  .tb.up { border-left-color: var(--trade-target); }
+  .tb.dn { border-left-color: var(--trade-stop); }
+  .tb-k { font-size: 11.5px; color: var(--text-muted); letter-spacing: .01em; }
+  .tb-v { font-size: 30px; font-weight: 600; letter-spacing: -.025em; line-height: 1.2; margin-top: 1px; }
+  .tb-u { font-size: 14px; font-weight: 500; color: var(--text-muted); letter-spacing: 0; }
+  .tb-s { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
+
+  /* Plain-language entry line: the verb and the price, nothing between them. */
+  .sideline { display: flex; align-items: baseline; gap: 10px; margin: 2px 0 6px; }
+  .sl-act { font-size: 13px; color: var(--text-secondary); }
+  .sl-px { font-size: 30px; font-weight: 600; letter-spacing: -.025em;
+    font-variant-numeric: tabular-nums; }
+
+  /* Confidence rates the trade's shape, never its direction. */
+  .conf { margin: 12px 0 14px; padding: 12px 13px; border-radius: 9px; background: var(--inset); }
+  .conf-top { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+  .conf-band { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+    padding: 2px 9px; border-radius: 999px; }
+  .conf-band.conf-workable { color: var(--trade-target); background: color-mix(in srgb, var(--trade-target) 16%, transparent); }
+  .conf-band.conf-marginal { color: var(--status-warning); background: var(--warn-soft); }
+  .conf-band.conf-poor     { color: var(--trade-stop); background: color-mix(in srgb, var(--trade-stop) 14%, transparent); }
+  .conf-score { margin-left: auto; font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .conf-of { font-size: 12px; color: var(--text-muted); font-weight: 400; }
+  .conf-track { height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--text-primary) 8%, transparent); overflow: hidden; }
+  .conf-fill { height: 100%; border-radius: 3px; }
+  .conf-fill.conf-workable { background: var(--trade-target); }
+  .conf-fill.conf-marginal { background: var(--status-warning); }
+  .conf-fill.conf-poor     { background: var(--trade-stop); }
+  .conf-why { margin: 9px 0 0; padding-left: 16px; font-size: 12px; color: var(--text-secondary); }
+  .conf-why li { margin-bottom: 3px; }
+
+  .ev-clears { color: var(--trade-target); font-weight: 700; }
+  .ev-weak   { color: var(--status-warning); font-weight: 600; }
+  .ev-none   { color: var(--trade-stop); font-weight: 700; }
+  tr.ev-now td { background: var(--warn-soft); }
+  .ev-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--status-warning); border: 1px solid color-mix(in srgb, var(--status-warning) 45%, var(--border));
+    border-radius: 999px; padding: 1px 7px; margin-left: 6px; }
+  .tgt { font-size: 12.5px; }
+  .tgt td, .tgt th { padding: 5px 8px; }
+  .checks { margin: 6px 0 0; padding-left: 20px; font-size: 13.5px; color: var(--text-secondary); }
+  .checks li { margin-bottom: 8px; }
+  .checks b { color: var(--text-primary); }
+
+  /* Long vs short, side by side — the comparison is the point. */
+  .sides { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 760px) { .sides { grid-template-columns: 1fr; } }
+  .side { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; background: var(--surface-1); }
+  .side.roomy { border-color: color-mix(in srgb, var(--bar-flag) 50%, var(--border)); }
+  .side-head { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
+  .side-label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); font-weight: 600; }
+  .side-tag { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--bar-flag); border: 1px solid color-mix(in srgb, var(--bar-flag) 45%, var(--border));
+    border-radius: 999px; padding: 2px 8px; }
+  .side-air { display: flex; align-items: baseline; gap: 7px; }
+  .air-n { font-size: 34px; font-weight: 600; letter-spacing: -.02em; }
+  .air-u { font-size: 12px; color: var(--text-muted); }
+  .side-sub { font-size: 12.5px; color: var(--text-secondary); margin-top: 4px; }
+  .side-sub b { color: var(--text-primary); }
+  .side-tbl { margin-top: 10px; font-size: 12px; }
+  .side-tbl td { padding: 3px 6px; border-bottom: none; }
+
+  .conc { margin-top: 16px; }
+  .conc-head { font-size: 12.5px; color: var(--text-secondary); margin-bottom: 10px; }
+  .cmp-bar.hot { background: var(--bar-flag); }
+  .conc .cmp-bar { background: var(--bar-plain); }
+  .conc .cmp-bar.hot { background: var(--bar-flag); }
+
+  .claims { margin-top: 22px; }
+  .claims p { margin: 4px 0 16px; color: var(--text-secondary); font-size: 13.5px; max-width: 80ch; }
+  .claims p:last-child { margin-bottom: 0; }
+  .claims b { color: var(--text-primary); }
+  .verdict-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .03em; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--border); }
+  .verdict-chip.holds { color: var(--status-good);
+    border-color: color-mix(in srgb, var(--status-good) 45%, var(--border)); }
+  .verdict-chip.fails { color: var(--text-muted); }
+
+  /* Order plan — the translation layer between the read and the platform. */
+  .plan { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .plan-title { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+                color: var(--text-muted); margin-bottom: 10px; }
+  .plan-steps { margin: 0; padding-left: 20px; font-size: 13.5px; color: var(--text-secondary); }
+  .plan-steps li { margin-bottom: 6px; }
+  .plan-steps b { color: var(--text-primary); }
+  .plan-size { display: flex; gap: 26px; flex-wrap: wrap; margin-top: 14px; }
+  .sz { display: flex; align-items: baseline; gap: 7px; }
+  .szn { font-size: 25px; font-weight: 600; letter-spacing: -.02em; }
+  .szl { font-size: 12px; color: var(--text-muted); }
+
+  /* Bracket header — the two numbers acted on, plus the Stretch behind them. */
+  .orb-head { display: flex; gap: 34px; flex-wrap: wrap; align-items: flex-end; margin: 4px 0 18px; }
+  .stop { display: flex; flex-direction: column; }
+  .stop .k { color: var(--text-muted); font-size: 12px; }
+  .stop .v { font-size: 34px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; }
+  .stop .sub { color: var(--text-muted); font-size: 11.5px; margin-top: 1px; }
+  .stop.hero-stretch { margin-left: auto; text-align: right; }
+  .stop.hero-stretch .v { font-size: 50px; }
+
+  /* Cohort-vs-baseline comparison rows. */
+  .cmp-block { margin-top: 14px; }
+  .cmp-head { font-size: 13px; color: var(--text-secondary); margin-bottom: 10px; }
+  .cmp-head b { color: var(--text-primary); }
+  .cmp-key { float: right; color: var(--text-muted); font-size: 11.5px; }
+  .cmp { display: grid; grid-template-columns: 190px 1fr 130px; align-items: center; gap: 12px; margin-bottom: 9px; }
+  .cmp-label { font-size: 12.5px; color: var(--text-secondary); }
+  .cmp-track { position: relative; height: 16px; background: color-mix(in srgb, var(--text-primary) 6%, transparent); border-radius: 4px; }
+  .cmp-bar { height: 100%; background: var(--bar-flag); border-radius: 4px; }
+  /* Baseline is a marker, not a second bar — it is a reference, not a rival. */
+  .cmp-bar + .cmp-base { position: absolute; top: -3px; width: 2px; height: 22px; background: var(--text-muted); }
+  .cmp-val { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .cmp-vs { display: block; font-size: 11px; font-weight: 400; color: var(--text-muted); }
+
+  details { border-top: 1px solid var(--border); padding-top: 12px; }
+  details.panel { border: 1px solid var(--border); padding: 14px 18px; }
+  summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text-secondary); list-style-position: outside; }
+  summary:hover { color: var(--text-primary); }
+  summary::marker { color: var(--text-muted); }
+
+  .legend i.ghost { background: var(--bar-plain); opacity: .35; box-shadow: inset 0 0 0 1px var(--bar-flag); }
+  .sig-label { font-size: 11.5px; }
+  /* Refetch holds the previous render rather than flashing — no layout jump. */
+  .pane { transition: opacity .12s; }
+  .pane.refreshing { opacity: .72; }
+
+  /* Tabs read as a route through the work: act, then why, then the document.
+     Numbered so the order is a sequence rather than a menu. */
+  .tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid var(--border); }
+  .tabs button {
+    appearance: none; background: none; border: none; cursor: pointer;
+    font: inherit; font-size: 13.5px; font-weight: 600; color: var(--text-muted);
+    padding: 10px 16px; border-bottom: 2px solid transparent; margin-bottom: -1px;
+    display: inline-flex; align-items: baseline; gap: 8px; transition: color .12s;
+  }
+  .tabs button .tnum { font-size: 10.5px; font-weight: 700; opacity: .5; }
+  .tabs button:hover { color: var(--text-secondary); }
+  .tabs button[aria-selected="true"] { color: var(--text-primary); border-bottom-color: var(--trade-entry); }
+  .tabs button[aria-selected="true"] .tnum { opacity: 1; color: var(--trade-entry); }
+  .tabs .spacer { flex: 1; }
+  .pane[hidden] { display: none; }
+
+  .cheat h3 { font-size: 13px; font-weight: 600; margin: 0 0 3px; }
+  .cheat p { margin: 0 0 10px; color: var(--text-secondary); font-size: 13.5px; }
+  .cheat p:last-child { margin-bottom: 0; }
+  .cheat code {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px;
+    background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+    padding: 1.5px 5px; border-radius: 4px;
+  }
+  .cheat .formula {
+    display: block; padding: 11px 13px; margin: 8px 0 12px; border-radius: 7px;
+    background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+    border-left: 3px solid var(--bar-flag);
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px;
+    color: var(--text-primary); line-height: 1.6;
+    white-space: pre-wrap;   /* the formulas are written as multi-line source */
+    overflow-x: auto;
+  }
+  .cheat table { margin-top: 4px; }
+  .cheat td:first-child { font-weight: 600; white-space: nowrap; }
+  .cheat .def td:not(:first-child) { text-align: left; color: var(--text-secondary); }
+  .live-val { color: var(--bar-flag); font-weight: 600; }
+  /* Marks a figure that clears two standard errors of its baseline. Paired with
+     the sigma value beside it, so significance is never colour-only. */
+  .sig { color: var(--text-primary); font-weight: 700; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 760px) { .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Ocean's Crabel</h1>
+    <span class="sub" id="sub">loading…</span>
+    <span class="live"><span class="clock" id="clock">—</span>
+      <a class="alertbtn pdfbtn" id="pdfbtn" href="/brief.pdf" download>download PDF</a>
+      <button class="alertbtn" id="alertbtn" type="button">enable alerts</button>
+      <span class="dot" id="dot"></span><span id="updated">—</span></span>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="trade" aria-selected="true"><span class="tnum">01</span>Plan</button>
+    <button role="tab" data-tab="live" aria-selected="false"><span class="tnum">02</span>Evidence</button>
+    <button role="tab" data-tab="watch" aria-selected="false"><span class="tnum">03</span>Watch</button>
+    <button role="tab" data-tab="brief" aria-selected="false"><span class="tnum">04</span>Brief</button>
+    <button role="tab" data-tab="cheat" aria-selected="false"><span class="tnum">05</span>Method</button>
+  </nav>
+
+  <div id="stalebar" hidden></div>
+  <div id="zonestrip"></div>
+  <div class="pane" id="pane-live"></div>
+  <div class="pane" id="pane-trade" hidden></div>
+  <div class="pane" id="pane-watch" hidden></div>
+  <div class="pane" id="pane-brief" hidden></div>
+  <div class="pane cheat" id="pane-cheat" hidden></div>
+</div>
+
+<div class="tip" id="tip"></div>
+
+<script type="module">
+// ?theme=dark / ?theme=light pins the theme; without it the page follows the OS.
+const forced = new URLSearchParams(location.search).get('theme');
+if (forced === 'dark' || forced === 'light') document.documentElement.dataset.theme = forced;
+
+const $ = (s) => document.querySelector(s);
+const app = $('#pane-live'), cheat = $('#pane-cheat'), tip = $('#tip');
+
+// Tab state lives outside render() so the 5-second refresh never yanks you back
+// to the live pane while you are reading the cheat sheet.
+// Which direction the trade tab is showing. ?side= wins so a view can be linked;
+// otherwise the last choice persists across reloads.
+const sideParam = new URLSearchParams(location.search).get('side');
+let tradeSide = sideParam === 'short' || sideParam === 'long'
+  ? sideParam
+  : (localStorage.getItem('oceans-crabel-side') === 'short' ? 'short' : 'long');
+
+// Plan first: the tool exists to answer "what do I do", not "what happened".
+const TABS = ['trade', 'live', 'watch', 'brief', 'cheat'];
+let activeTab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'trade';
+
+function applyTab() {
+  document.querySelectorAll('.tabs button').forEach((b) => {
+    const on = b.dataset.tab === activeTab;
+    b.setAttribute('aria-selected', String(on));
+  });
+  $('#pane-live').hidden = activeTab !== 'live';
+  $('#pane-trade').hidden = activeTab !== 'trade';
+  $('#pane-watch').hidden = activeTab !== 'watch';
+  $('#pane-brief').hidden = activeTab !== 'brief';
+  $('#pane-cheat').hidden = activeTab !== 'cheat';
+}
+
+document.querySelectorAll('.tabs button').forEach((b) => {
+  b.addEventListener('click', () => {
+    activeTab = b.dataset.tab;
+    history.replaceState(null, '', activeTab === 'trade' ? '#' : `#${activeTab}`);
+    applyTab();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+});
+
+const n1 = (v) => v == null ? '—' : v.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const n0 = (v) => v == null ? '—' : Math.round(v).toLocaleString('en-US');
+
+// A null flag means "not enough history", which is not the same as "no".
+function chip(name, val) {
+  if (val === null || val === undefined) return `<span class="chip unknown" title="not enough history to evaluate">${name} —</span>`;
+  return val ? `<span class="chip on">${name}</span>` : `<span class="chip">${name}</span>`;
+}
+
+function sourceBanner(d) {
+  const m = d.meta;
+  const live = m.sessionInProgress;
+  const rejected = m.rejectedSessions?.length ?? 0;
+
+  const why = [
+    `${d.sessionCount} complete sessions, ${m.barsPerSession ?? '—'} bars each`,
+    live
+      ? `<b>session in progress</b> — bracket is anchored to today's 8:30 CT open`
+      : 'no session in progress — bracket is provisional off the last RTH close',
+    rejected
+      ? `${rejected} session${rejected === 1 ? '' : 's'} excluded for not starting at 08:30 CT`
+      : 'every session started cleanly at 08:30 CT',
+  ].join(' · ');
+
+  return `<div class="source">
+    <span class="icon">●</span>
+    <div><b>RTH — tradable</b> · ${m.label}
+    <span class="why">${why}</span></div>
+  </div>`;
+}
+
+function barChart(rows, projection) {
+  const W = 1000, H = 215, padB = 30, padT = 22, padR = 96;
+  const proj = projection?.available ? projection : null;
+
+  // The 20-session average is the bar every base rate is quoted against, so it
+  // belongs on the chart rather than only in prose.
+  const recent = rows.slice(-20).map(r => r.range);
+  const avg20 = recent.reduce((a, b) => a + b, 0) / recent.length;
+
+  const max = Math.max(...rows.map(r => r.range), avg20, proj ? proj.p75 : 0);
+  const plotW = W - padR;
+  const slots = rows.length + (proj ? 1 : 0);
+  const band = plotW / slots;
+  const bw = Math.min(24, band - 2);           // cap thickness; 2px surface gap
+  const y = (v) => padT + (H - padT - padB) * (1 - v / max);
+
+  const bars = rows.map((r, i) => {
+    const x = i * band + (band - bw) / 2;
+    const yy = y(r.range), h = H - padB - yy;
+    const fill = r.nr7 === true ? 'var(--bar-flag)' : 'var(--bar-plain)';
+    const rr = Math.min(4, h);
+    const d = `M${x},${H - padB} L${x},${yy + rr} Q${x},${yy} ${x + rr},${yy} L${x + bw - rr},${yy} Q${x + bw},${yy} ${x + bw},${yy + rr} L${x + bw},${H - padB} Z`;
+    return `<path d="${d}" fill="${fill}" data-i="${i}"/>`;
+  }).join('');
+
+  // Forward slot: where the next session's range is projected to land, drawn as
+  // an outline so it never reads as an observation.
+  let ghost = '';
+  if (proj) {
+    const i = rows.length;
+    const x = i * band + (band - bw) / 2;
+    ghost = `
+      <rect x="${x}" y="${y(proj.p75)}" width="${bw}" height="${y(proj.p25) - y(proj.p75)}"
+            fill="var(--bar-plain)" opacity="0.28" rx="3"/>
+      <line x1="${x - 2}" y1="${y(proj.median)}" x2="${x + bw + 2}" y2="${y(proj.median)}"
+            stroke="var(--bar-flag)" stroke-width="2"/>
+      <text class="axis" x="${x + bw / 2}" y="${H - padB + 14}" text-anchor="middle">next</text>`;
+  }
+
+  const lastI = rows.length - 1;
+  const ticks = rows.map((r, i) => {
+    const periodic = i % 3 === 0 && lastI - i > 1;
+    if (!periodic && i !== lastI) return '';
+    return `<text class="axis" x="${i * band + band / 2}" y="${H - padB + 14}" text-anchor="middle">${r.date.slice(5)}</text>`;
+  }).join('');
+
+  return `<svg viewBox="0 0 ${W} ${H}" id="chart" role="img" aria-label="Session ranges with NR7 sessions emphasised">
+    <line x1="0" y1="${y(avg20)}" x2="${plotW}" y2="${y(avg20)}" stroke="var(--baseline)" stroke-width="1"/>
+    <text class="axis" x="${plotW + 10}" y="${y(avg20) + 4}" style="font-size:11px">20-session avg ${n0(avg20)}</text>
+    <line x1="0" y1="${H - padB}" x2="${plotW}" y2="${H - padB}" stroke="var(--baseline)" stroke-width="1"/>
+    ${bars}${ghost}${ticks}
+  </svg>`;
+}
+
+/**
+ * One price axis, three intervals stacked on it, brackets drawn through all of
+ * them. Identity comes from the row label, so every bar wears the same hue and
+ * no legend is needed — the accent is reserved for the two lines you act on.
+ */
+function priceMap(d) {
+  const { orb, expectedMove: em, projection: pj, last } = d;
+  if (!orb?.available) return '';
+
+  const ref = orb.reference;
+  const rows = [
+    { key: 'prior', label: `${last.date} RTH range`, lo: last.low, hi: last.high,
+      note: `${n0(last.range)} pts` },
+  ];
+  if (pj?.available) {
+    rows.push({ key: 'proj', label: 'Projected next session', lo: ref - pj.median / 2, hi: ref + pj.median / 2,
+      spreadLo: ref - pj.p75 / 2, spreadHi: ref + pj.p75 / 2, note: `${n0(pj.median)} pts median` });
+  }
+  if (em?.available) {
+    rows.push({ key: 'em', label: 'Expected move ±1σ', lo: em.lower, hi: em.upper,
+      note: `±${n0(em.points)} pts` });
+  }
+
+  const W = 1000, LEFT = 186, RIGHT = W - 96, ROW_H = 42, TOP = 16;
+  const H = TOP + rows.length * ROW_H + 42;
+
+  const all = rows.flatMap(r => [r.lo, r.hi, r.spreadLo, r.spreadHi]).filter(v => v != null)
+    .concat([orb.buyStop, orb.sellStop, ref]);
+  const lo = Math.min(...all), hi = Math.max(...all);
+  const pad = (hi - lo) * 0.06 || 1;
+  const x = (v) => LEFT + ((v - (lo - pad)) / ((hi + pad) - (lo - pad))) * (RIGHT - LEFT);
+
+  const BAR = 15;
+  const bars = rows.map((r, i) => {
+    const y = TOP + i * ROW_H;
+    const spread = r.spreadLo != null
+      ? `<rect x="${x(r.spreadLo)}" y="${y + 4}" width="${x(r.spreadHi) - x(r.spreadLo)}" height="${BAR}"
+               rx="4" fill="var(--bar-plain)" opacity="0.22"/>`
+      : '';
+    return `${spread}
+      <rect x="${x(r.lo)}" y="${y + 4}" width="${Math.max(2, x(r.hi) - x(r.lo))}" height="${BAR}"
+            rx="4" fill="var(--bar-plain)" opacity="0.62"/>
+      <text class="axis" x="${LEFT - 14}" y="${y + 16}" text-anchor="end" style="font-size:11.5px">${r.label}</text>
+      <text class="axis" x="${RIGHT + 12}" y="${y + 16}" style="font-size:11px">${r.note}</text>`;
+  }).join('');
+
+  // Gamma levels as ticks on the same price axis. Drawn behind the brackets so
+  // the two lines you act on stay dominant.
+  const g = d.gamma;
+  const gammaTicks = g?.available
+    ? g.map.filter((l) => l.value >= lo - pad && l.value <= hi + pad).map((l) => {
+        const major = /Gamma Wall|Call Resistance|Put Support|HVL/i.test(l.name);
+        return `<line x1="${x(l.value)}" y1="${TOP - 4}" x2="${x(l.value)}" y2="${TOP + rows.length * ROW_H}"
+                  stroke="var(--text-muted)" stroke-width="${major ? 1.5 : 1}"
+                  opacity="${major ? 0.55 : 0.22}"><title>${l.name} · ${n1(l.value)}</title></line>`;
+      }).join('')
+    : '';
+
+  const bracketTop = TOP, bracketBot = TOP + rows.length * ROW_H + 2;
+  const mark = (v, label) => `
+    <line x1="${x(v)}" y1="${bracketTop}" x2="${x(v)}" y2="${bracketBot}" stroke="var(--bar-flag)" stroke-width="2"/>
+    <text class="axis sig-label" x="${x(v)}" y="${bracketBot + 15}" text-anchor="middle">${label}</text>
+    <text class="axis" x="${x(v)}" y="${bracketBot + 29}" text-anchor="middle" style="font-size:11px">${n1(v)}</text>`;
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Price map of brackets against prior range, projection and expected move">
+    ${gammaTicks}
+    <line x1="${x(ref)}" y1="${bracketTop - 6}" x2="${x(ref)}" y2="${bracketBot}" stroke="var(--baseline)" stroke-width="1"/>
+    ${bars}
+    ${mark(orb.sellStop, 'sell stop')}
+    ${mark(orb.buyStop, 'buy stop')}
+  </svg>`;
+}
+
+function pct(v, digits = 0) {
+  return v == null ? '—' : (v * 100).toFixed(digits) + '%';
+}
+
+/**
+ * Does this cohort's direction differ from the market's own drift?
+ *
+ * Measured against the baseline up-close rate, NOT against 50%. Equities close
+ * up more often than they close down, so a coin-flip yardstick would credit a
+ * setup for the market's general rise and manufacture an edge that isn't there.
+ */
+function directionDiffers(cohort, baselineRate) {
+  if (!cohort || baselineRate == null || cohort.upCloseStdErr == null) return false;
+  return Math.abs(cohort.upCloseRate - baselineRate) >= 2 * cohort.upCloseStdErr;
+}
+
+/**
+ * The one-paragraph answer. Everything else on this tab is evidence for it, and
+ * a trader glancing pre-market should be able to stop reading here.
+ */
+function synthesis(d) {
+  const L = d.last, pj = d.projection, st = d.stats;
+  const q = st?.available ? (st.current.insufficient ? st.nearestUsable : st.current) : null;
+  const parts = [];
+
+  if (pj?.available) {
+    const vsPrior = pj.median > L.range ? 'wider than' : 'narrower than';
+    parts.push(`Expect roughly <b>${n0(pj.median)} points</b>, ${vsPrior} ${L.date.slice(5)}'s ${n0(L.range)}`);
+  }
+  if (q && st.baseline && q.expansionRate < st.baseline.expansionRate) {
+    parts.push(`still below the 20-session average more often than not (${pct(q.expansionRate)} beat it, vs ${pct(st.baseline.expansionRate)} normally)`);
+  } else if (q) {
+    parts.push(`${pct(q.expansionRate)} of these beat the 20-session average`);
+  }
+
+  const differs = q && directionDiffers(q, st.baseline?.upCloseRate);
+  parts.push(!q ? ''
+    : differs
+      ? `direction leans ${q.upCloseRate > st.baseline.upCloseRate ? 'up' : 'down'} — ${pct(q.upCloseRate)} vs ${pct(st.baseline.upCloseRate)} normally`
+      : 'no directional edge beyond the market\'s usual drift — <b>bracket both sides</b>');
+
+  // Each clause is written to stand alone, so sentence-case them on the way out
+  // rather than authoring three variants of every fragment.
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  let out = parts.filter(Boolean).map(cap).join('. ') + '.';
+
+  // The headline names the setup you are actually in. When that setup is too rare
+  // to quote, every number above it came from a different, broader cohort — and a
+  // figure printed under the wrong label is the one failure mode that discredits
+  // the rest of the page. Say whose numbers these are, in the same breath.
+  if (st?.available && st.current.insufficient && st.nearestUsable) {
+    out += ` <b>These figures are not ${st.current.label}'s.</b> That setup has only
+      ${st.current.n} occurrence${st.current.n === 1 ? '' : 's'} here — too few to quote — so the numbers above
+      are the broader <b>${st.nearestUsable.label}</b> cohort (n=${st.nearestUsable.n}). The rarity is itself
+      the finding: you are in a setup the sample cannot price.`;
+  }
+  return out;
+}
+
+// Contract sizing. Prices come from NQ=F, but every dollar figure on this page
+// is MNQ. The two differ by 10x, so the instrument is stated wherever money is,
+// never left to be inferred from the NQ=F in the header.
+const CONTRACT = { symbol: 'MNQ', pointValue: 2.0, tickValue: 0.5, tick: 0.25 };
+const MNQ_PT = CONTRACT.pointValue;
+const usd = (pts) => `$${(pts * CONTRACT.pointValue).toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+/** The same points on the E-mini, for contrast — the mistake worth preventing. */
+const usdEmini = (pts) => `$${(pts * 20).toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+
+/** 1st, 2nd, 3rd, 52nd — "52th" was reaching the page. */
+function ordinal(n) {
+  const s = ['th', 'st', 'nd', 'rd'], v = n % 100;
+  return n + (s[(v - 20) % 10] ?? s[v] ?? s[0]);
+}
+
+const until = (epoch) => {
+  const m = Math.max(0, Math.round((epoch - Date.now()) / 60000));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return h < 24 ? `${h}h ${String(m % 60).padStart(2, '0')}m` : `${Math.floor(h / 24)}d ${h % 24}h`;
+};
+
+const IMPACT_ORDER = { High: 3, Medium: 2, Low: 1, Holiday: 0 };
+
+const toMin = (hm) => { const [h, m] = hm.split(':').map(Number); return h * 60 + m; };
+
+// Houston runs on Central. The exchange defines its session in ET, so times are
+// computed in ET and displayed in CT. Both zones shift for DST on the same dates,
+// so the gap is a constant hour.
+const ct = (hm) => {
+  const t = (toMin(hm) - 60 + 1440) % 1440;
+  return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+};
+/** Central time-of-day now, in minutes past midnight. */
+function ctNowMinutes() {
+  const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }));
+  return d.getHours() * 60 + d.getMinutes();
+}
+const dayName = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+
+/** Concentration of the opening window, used in prose above the roadmap. */
+const zones0 = (d) => d.meta?.zones?.zones?.[0]?.concentration ?? null;
+
+/** Current ET time-of-day in minutes. */
+function etNowMinutes() {
+  const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  return et.getHours() * 60 + et.getMinutes();
+}
+
+function etNow() {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+}
+
+// The full 24-hour cycle, gapless, so "what's next" always has an answer.
+// Asia wraps midnight and is handled as a single window rather than split.
+const ZONE_SEQ = [
+  { key: 'asia',   label: 'Asia',                from: '20:00', to: '02:00' },
+  { key: 'euPos',  label: 'Europe positioning',  from: '02:00', to: '05:00' },
+  { key: 'euCont', label: 'Europe continuation', from: '05:00', to: '07:00' },
+  { key: 'premkt', label: 'NY premarket',        from: '07:00', to: '09:30' },
+  { key: 'nyOpen', label: 'NY open / repricing', from: '09:30', to: '10:00' },
+  { key: 'amRev',  label: 'AM reversal zone',    from: '10:00', to: '11:00' },
+  { key: 'lateAm', label: 'Late morning',        from: '11:00', to: '12:00' },
+  { key: 'lunch',  label: 'Lunch',               from: '12:00', to: '13:00' },
+  { key: 'pm',     label: 'PM trend',            from: '13:00', to: '15:00' },
+  { key: 'close',  label: 'Close',               from: '15:00', to: '16:00' },
+  { key: 'post',   label: 'Post-close',          from: '16:00', to: '20:00' },
+];
+
+const hhmm = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+// Every chart positions marks by ET minutes, because ET is what defines the
+// session. These two only relabel — they never move anything. Use them for any
+// tick, tooltip, or caption a person reads.
+const hhmmCt = (m) => hhmm((m - 60 + 1440) % 1440);
+/** An ET range as it reads in Houston: "09:30–10:00" -> "08:30–09:00". */
+const ctRange = (from, to) => `${ct(from)}–${ct(to)}`;
+const countdown = (m) => m >= 1440
+  ? `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`
+  : m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m` : `${m}m`;
+
+/**
+ * Where we are in the 24-hour cycle and what is next.
+ *
+ * Over the weekend the zones are meaningless — Globex is shut — so rather than
+ * counting down to an "Asia session" that will not happen, it counts down to the
+ * Sunday 18:00 ET reopen and says the market is closed.
+ */
+function zoneSchedule() {
+  const et = etNow();
+  const nowM = et.getHours() * 60 + et.getMinutes();
+  const dow = et.getDay();
+  const REOPEN = 18 * 60;
+
+  const closed =
+    dow === 6 ||                                  // all Saturday
+    (dow === 0 && nowM < REOPEN) ||               // Sunday before the reopen
+    (dow === 5 && nowM >= 17 * 60);               // Friday after the 17:00 close
+
+  if (closed) {
+    let days = dow === 5 ? 2 : dow === 6 ? 1 : 0;
+    const mins = days * 1440 - nowM + REOPEN;
+    return { closed: true, reopenIn: Math.max(0, mins), zones: [] };
+  }
+
+  const inZone = (z) => {
+    const a = toMin(z.from), b = toMin(z.to);
+    return a < b ? nowM >= a && nowM < b : nowM >= a || nowM < b;   // wrap-aware
+  };
+
+  const zones = ZONE_SEQ.map((z) => {
+    const a = toMin(z.from), b = toMin(z.to);
+    const active = inZone(z);
+    const startsIn = (a - nowM + 1440) % 1440;
+    const endsIn = (b - nowM + 1440) % 1440;
+    return { ...z, active, startsIn, endsIn };
+  });
+
+  const current = zones.find((z) => z.active) ?? null;
+  const upcoming = zones.filter((z) => !z.active).sort((a, b) => a.startsIn - b.startsIn);
+
+  return { closed: false, current, upcoming, zones };
+}
+
+/** The countdown strip. Text only, so it can tick without re-rendering the page. */
+function zoneStripHtml(measured) {
+  const s = zoneSchedule();
+  const conc = new Map((measured?.zones ?? []).map((z) => [z.key, z.concentration]));
+
+  if (s.closed) {
+    return `<div class="zstrip closed">
+      <span class="z-now">Market closed</span>
+      <span class="z-sub">Globex reopens in <b>${countdown(s.reopenIn)}</b> · Sunday 17:00 CT</span>
+    </div>`;
+  }
+
+  const chip = (z) => {
+    const c = conc.get(z.key);
+    const hot = c != null && c >= 1.5;
+    return `<span class="zchip${z.active ? ' active' : ''}${hot ? ' hot' : ''}" title="${ctRange(z.from, z.to)} CT${
+      c != null ? ` · ${c.toFixed(2)}× extreme concentration` : ''}">
+      <span class="zc-label">${z.label}</span>
+      <span class="zc-row">
+        <span class="zc-time">${z.active ? `${countdown(z.endsIn)} left` : `in ${countdown(z.startsIn)}`}</span>
+        ${c != null ? `<span class="zc-conc">${c.toFixed(1)}×</span>` : ''}
+      </span>
+    </span>`;
+  };
+
+  const order = s.current ? [s.current, ...s.upcoming] : s.upcoming;
+  return `<div class="zstrip">${order.slice(0, 6).map(chip).join('')}</div>`;
+}
+
+/**
+ * Session structure, measured rather than asserted.
+ *
+ * The zone names come from how the day is commonly traded; the percentages come
+ * from this instrument's own sessions. Where the two disagree, the panel says so
+ * — that is the entire point of putting numbers on it.
+ */
+/**
+ * The mirrored intraday profile, extracted so the brief can print the same
+ * chart the Evidence tab shows rather than a second, drifting copy.
+ */
+function zoneProfileSvg(z) {
+  const prof = z.profile ?? [];
+  const W = 1000, LEFT = 52, RIGHT = W - 12;
+  const ZONEBAR = 20, AX = 150, ARM = 96, PAD_T = 26;
+  const H = PAD_T + ZONEBAR + 8 + ARM * 2 + 34;
+  const t0 = toMin('09:30'), t1 = toMin('16:00');
+  const x = (hm) => LEFT + ((toMin(hm) - t0) / (t1 - t0)) * (RIGHT - LEFT);
+
+  const nowM = etNowMinutes();
+  // Clock time inside RTH is not enough — on a Sunday afternoon it is 12:08 in
+  // New York and the market is shut. Drawing "now" on a session that is not
+  // running implies a live read that does not exist.
+  const nowIn = nowM >= t0 && nowM < t1 && !zoneSchedule().closed;
+  const axisY = PAD_T + ZONEBAR + 8 + ARM;
+
+  // Mirrored profile: highs grow up from the time axis, lows grow down. One
+  // shared clock, so the shape of the day reads directly — the two arms are
+  // the same measure on opposite sides, not two competing series.
+  const peak = Math.max(...prof.flatMap((p) => [p.highPct, p.lowPct]), 0.02);
+  const bw = prof.length ? ((RIGHT - LEFT) / prof.length) - 3 : 0;
+
+  const bars2 = prof.map((p, i) => {
+    const xa = LEFT + i * ((RIGHT - LEFT) / prof.length) + 1.5;
+    const hh = (p.highPct / peak) * ARM;
+    const lh = (p.lowPct / peak) * ARM;
+    const hot = p.concentration >= 2;
+    const fill = hot ? 'var(--bar-flag)' : 'var(--bar-plain)';
+    return `
+      <rect x="${xa}" y="${axisY - hh}" width="${bw}" height="${Math.max(0.8, hh)}" rx="3" fill="${fill}" opacity="0.9"/>
+      <rect x="${xa}" y="${axisY}" width="${bw}" height="${Math.max(0.8, lh)}" rx="3" fill="${fill}" opacity="0.5"/>
+      <rect class="hitzone" x="${xa - 1.5}" y="${PAD_T}" width="${bw + 3}" height="${ARM * 2 + 20}"
+            fill="transparent" data-b="${i}"/>`;
+  }).join('');
+
+  // The named windows ride above the profile so the framework stays legible
+  // without the labels fighting the data for space.
+  const zbands = z.zones.map((zz) => {
+    const xa = x(zz.from), xb = x(zz.to), w = xb - xa;
+    const hot = zz.concentration >= 1.5;
+    // Pick the longest label that actually fits: a clipped zone name is worse
+    // than a short one, and worse still than just the multiplier.
+    const fs = w < 100 ? 9 : 10;
+    const fits = (s) => s.length * fs * 0.56 < w - 8;
+    const text = fits(zz.label) ? zz.label
+      : fits(zz.short) ? zz.short
+      : fits(zz.concentration.toFixed(1) + '×') ? zz.concentration.toFixed(1) + '×' : '';
+    return `
+      <rect x="${xa + 1}" y="${PAD_T}" width="${Math.max(2, w - 2)}" height="${ZONEBAR}" rx="4"
+            fill="${hot ? 'var(--bar-flag)' : 'var(--bar-plain)'}" opacity="${hot ? 0.5 : 0.22}"/>
+      <title>${zz.label} · ${ctRange(zz.from, zz.to)} CT · ${zz.concentration.toFixed(2)}×</title>
+      <text class="axis" x="${(xa + xb) / 2}" y="${PAD_T + 14}" text-anchor="middle"
+            style="font-size:${fs}px">${text}</text>`;
+  }).join('');
+
+  // Placed at their ET position, labelled in CT.
+  const ticks = ['09:30', '10:30', '11:30', '12:30', '13:30', '14:30', '15:30'].map((t) =>
+    `<text class="axis" x="${x(t)}" y="${axisY + 15}" text-anchor="middle" style="font-size:10px">${ct(t)}</text>`).join('');
+
+  const nowMark = nowIn ? `
+    <line x1="${x(hhmm(nowM))}" y1="${PAD_T}" x2="${x(hhmm(nowM))}" y2="${axisY + ARM}"
+          stroke="var(--trade-target)" stroke-width="2"/>
+    <text class="axis" x="${x(hhmm(nowM))}" y="${PAD_T - 6}" text-anchor="middle"
+          style="font-size:10px;fill:var(--status-good)">now</text>` : '';
+
+  return `<svg viewBox="0 0 ${W} ${H}" id="profile"
+       role="img" aria-label="Intraday profile: when session highs and lows form, in 30-minute buckets">
+      ${zbands}
+      <line x1="${LEFT}" y1="${axisY}" x2="${RIGHT}" y2="${axisY}" stroke="var(--baseline)" stroke-width="1"/>
+      ${bars2}
+      <text class="axis" x="${LEFT - 8}" y="${axisY - ARM + 10}" text-anchor="end" style="font-size:10.5px">highs</text>
+      <text class="axis" x="${LEFT - 8}" y="${axisY + ARM - 2}" text-anchor="end" style="font-size:10.5px">lows</text>
+      ${ticks}${nowMark}
+    </svg>`;
+}
+
+function zonePanel(z) {
+  if (!z?.available) {
+    return `<div class="panel"><h2>Session map</h2>
+      <p class="hint" style="margin:0">Unavailable — ${z?.reason ?? 'no intraday data'}</p></div>`;
+  }
+  const f = z.findings, prof = z.profile ?? [];
+  const claim = (verdict, ok) =>
+    `<span class="verdict-chip ${ok ? 'holds' : 'fails'}">${ok ? '✓' : '✕'} ${verdict}</span>`;
+
+  return `<div class="panel">
+    <h2>Session map — where the day's extremes actually form</h2>
+    <p class="hint">Measured on <b>${z.sessions.toLocaleString()}</b> complete RTH sessions ·
+      ${z.sampleSource}.</p>
+
+    ${zoneProfileSvg(z)}
+    <p class="hint" style="margin:2px 0 0">Each bar is a ${z.bucketMinutes}-minute window; above the line
+      are session highs, below are lows. Every session contributes one high and one low, so the two arms
+      each total 100% — a bucket's share of <em>all</em> extremes is the average of its two bars.
+      The opening ${z.bucketMinutes} minutes alone holds
+      <b>${pct(((prof[0]?.highPct ?? 0) + (prof[0]?.lowPct ?? 0)) / 2, 0)}</b> of them, and the closing
+      ${z.bucketMinutes} another
+      <b>${pct(((prof.at(-1)?.highPct ?? 0) + (prof.at(-1)?.lowPct ?? 0)) / 2, 0)}</b>.
+      Hover any bar for its numbers.</p>
+
+    <div class="conc">
+      <div class="conc-head">Concentration — extremes formed vs the share of the clock each window owns.
+        <span class="muted">1.0× = no better than chance</span></div>
+      ${z.zones.slice().sort((a, b) => b.concentration - a.concentration).map((zz) => {
+        const c = zz.concentration;
+        const w = Math.min(100, (c / 4) * 100);
+        return `<div class="cmp">
+          <div class="cmp-label">${zz.label} <span class="muted">${zz.minutes}m</span></div>
+          <div class="cmp-track">
+            <div class="cmp-bar${c >= 1.5 ? ' hot' : ''}" style="width:${Math.max(1.5, w)}%"></div>
+            <div class="cmp-base" style="left:25%" title="1.0x = chance"></div>
+          </div>
+          <div class="cmp-val">${c.toFixed(2)}×<span class="cmp-vs">${pct(zz.extremePct)} of extremes</span></div>
+        </div>`;
+      }).join('')}
+    </div>
+
+    <div class="claims">
+      ${claim('First hour defines the day', true)}
+      <p><b>${pct(f.earlyExtremeRate)}</b> of sessions place <em>at least one</em> of their two extremes
+        before 09:30 CT — counted once per session, not the sum of the two shares.
+        Only ${pct(f.bothEarlyRate)} put <em>both</em> there, which is why the figure is far below the
+        ${pct((f.earlyExtremeRate + f.bothEarlyRate))} you would get by adding them. The
+        <b>${z.zones[0].label.toLowerCase()}</b> window owns only ${pct(z.zones[0].expectedPct)} of the
+        clock but produces <b>${pct(z.zones[0].extremePct)}</b> of all extremes —
+        <b>${z.zones[0].concentration.toFixed(1)}× chance</b>. That concentration is the strongest
+        thing in the map, and it is why the ORB bracket belongs at the open rather than later.</p>
+
+      ${claim('Opening move is a Judas trap', false)}
+      <p>The first 30 minutes points <em>opposite</em> to the session only <b>${pct(f.judasRate)}</b>
+        of the time (n=${f.judasN}), so it <b>continues about ${pct(1 - f.judasRate)}</b> of the time.
+        ${f.judasSignificant
+          ? 'That is significantly below a coin flip — on this instrument the opening move persists more often than it traps.'
+          : 'That is within noise of a coin flip on this sample.'}
+        ${f.judasExcluded ? `<span class="muted">(${f.judasExcluded} sessions closed exactly flat over one
+          leg or the other and carry no direction, so they are excluded — hence n=${f.judasN} against
+          ${z.sessions.toLocaleString()} sessions.)</span>` : ''}
+        Treating the open as a default trap would have you fading the more likely direction.</p>
+
+      ${claim('Premarket liquidity gets engineered', false)}
+      <p>True but useless as a signal: RTH runs the premarket high or low in <b>${pct(f.sweptEitherRate)}</b>
+        of sessions (high ${pct(f.sweptHighRate)}, low ${pct(f.sweptLowRate)}). Something that happens
+        almost every session cannot discriminate between them — same problem as the 99% bracket-touch
+        rate on Globex bars. <span class="muted">Measured on ${z.premarketSessions} sessions from the
+        NQ=F 5-minute feed, which is fetched with pre-market bars included — the 78-bars-per-session
+        figure quoted elsewhere counts RTH bars only. The deep NAS100 history is RTH-only and cannot
+        answer this question at all.</span></p>
+    </div>
+  </div>`;
+}
+
+/**
+ * Scheduled catalysts. Compression tells you a move is stored up; the calendar
+ * tells you what might release it and when.
+ */
+function eventsPanel(cal) {
+  if (!cal?.available) {
+    return `<div class="panel"><h2>Scheduled events</h2>
+      <p class="hint" style="margin:0">Unavailable — ${cal?.reason ?? 'no calendar source'}</p></div>`;
+  }
+
+  const body = cal.exhausted
+    ? `<div class="callout">No events left in this feed. ForexFactory publishes a
+         <b>current-week</b> file only — there is no next-week endpoint — so once the week's
+         releases have passed it is empty until the new file appears. This is a limit of the
+         feed, not a quiet week.</div>`
+    : `${cal.nextHigh ? `
+        <div class="ev-hero ev-${cal.nextHigh.window}">
+          <div class="ev-when">
+            <span class="ev-count">${until(cal.nextHigh.epoch)}</span>
+            <span class="ev-time">${cal.nextHigh.ctTime ?? ct(cal.nextHigh.etTime)} CT · ${cal.nextHigh.window.replace('-', ' ')}</span>
+          </div>
+          <div class="ev-what">
+            <span class="ev-impact">High impact</span>
+            <span class="ev-title">${cal.nextHigh.title}</span>
+            ${cal.nextHigh.forecast ? `<span class="ev-meta">forecast ${cal.nextHigh.forecast}${
+              cal.nextHigh.previous ? ` · previous ${cal.nextHigh.previous}` : ''}</span>` : ''}
+          </div>
+        </div>
+        ${cal.nextHigh.window === 'in-session'
+          ? `<p class="hint" style="margin:10px 0 0"><b>This lands mid-session.</b> A bracket touched
+             before it is a different trade from one touched after — the release, not the pattern,
+             is driving the second one.</p>`
+          : cal.nextHigh.window === 'pre-open'
+            ? `<p class="hint" style="margin:10px 0 0">Lands before the bell, so it will be priced
+               into the 8:30 CT open. Recompute the bracket off that open, not off tonight's estimate.</p>`
+            : ''}` : '<p class="hint" style="margin:0 0 10px">No high-impact events left this week.</p>'}
+
+      <table style="margin-top:14px">
+        <thead><tr><th style="text-align:left">When</th><th style="text-align:left">Event</th>
+          <th style="text-align:left">Impact</th><th>Session</th></tr></thead>
+        <tbody>${cal.upcoming.map((e) => `<tr>
+          <td>${until(e.epoch)} <span class="muted">(${e.ctTime ?? ct(e.etTime)} CT)</span></td>
+          <td style="text-align:left">${e.title}</td>
+          <td style="text-align:left" class="${e.impact === 'High' ? 'sig' : 'muted'}">${e.impact}</td>
+          <td>${e.window.replace('-', ' ')}</td></tr>`).join('')}
+        </tbody>
+      </table>`;
+
+  return `<div class="panel">
+    <h2>Scheduled events</h2>
+    <p class="hint">${cal.source} · ${cal.coverage}${
+      cal.stale ? ` · <b>showing a cached copy from ${cal.ageMinutes} min ago</b> — ${cal.staleNote}` : ''}</p>
+    ${body}
+    <p class="hint" style="margin:12px 0 0">${cal.financialJuice}</p>
+  </div>`;
+}
+
+/**
+ * Is this setup worth trading, and by how much?
+ *
+ * Graded on the one thing the evidence actually supports: how much more range
+ * this cohort produces than an ordinary session. Not on how many flags happen
+ * to be lit — six chips lighting up is not six times the edge.
+ */
+function setupGrade(d) {
+  const L = d.last, st = d.stats;
+  const flags = [L.nr7, L.nr4, L.insideDay, L.twoBarNr20, L.nr20].filter((v) => v === true).length;
+
+  if (!flags) {
+    return { level: 'none', icon: '○', label: 'No setup',
+      detail: 'No contraction pattern. This is an ordinary session — the ORB here is the baseline, not an edge.' };
+  }
+
+  const q = st?.available ? (st.current.insufficient ? st.nearestUsable : st.current) : null;
+  const b = st?.baseline;
+  if (!q || !b?.medianRangeMultiple) {
+    return { level: 'unknown', icon: '?', label: 'Setup present, unquantified',
+      detail: 'Contraction flags are lit but there is no usable base rate to size the edge.' };
+  }
+
+  const lift = q.medianRangeMultiple / b.medianRangeMultiple;
+  const pctMore = Math.round((lift - 1) * 100);
+
+  if (lift >= 1.3) {
+    return { level: 'good', icon: '●', label: 'Tradable setup', lift,
+      detail: `After ${q.label}, the next session's range runs about <b>${pctMore}% larger</b> than a typical session (${q.medianRangeMultiple.toFixed(2)}× vs ${b.medianRangeMultiple.toFixed(2)}×, n=${q.n}).` };
+  }
+  if (lift >= 1.12) {
+    return { level: 'weak', icon: '◐', label: 'Marginal setup', lift,
+      detail: `Only about ${pctMore}% more range than a typical session after ${q.label} — thin edge for the risk.` };
+  }
+  return { level: 'weak', icon: '○', label: 'Flags lit, no measurable edge', lift,
+    detail: `${q.label} produces a range within ${Math.abs(pctMore)}% of an ordinary session. The pattern is present; the edge is not.` };
+}
+
+/** The exact orders, sized. Removes the arithmetic between reading and acting. */
+function orderPlan(d) {
+  const orb = d.orb;
+  if (!orb?.available) return '';
+
+  const stretch = d.nextStretch;
+  const stopPts = 2 * stretch;                 // opposite bracket = Crabel's reverse point
+  const riskPerContract = stopPts * MNQ_PT;
+  const budgets = [250, 500, 1000];
+
+  return `<div class="plan">
+    <div class="plan-title">What you are actually doing</div>
+    <ol class="plan-steps">
+      <li><b>Go long if price trades above ${n1(orb.buyStop)}</b>, or
+          <b>go short if it trades below ${n1(orb.sellStop)}</b>. Both orders wait; you take whichever
+          the market reaches first${orb.live ? '' : ', recomputed off the 8:30 CT open'}.</li>
+      <li><b>Once one triggers, cancel the other</b> — or leave it in place as your exit, which turns
+          the pair into a stop-and-reverse. Those are two different strategies; pick one.</li>
+      <li><b>Exit the loser at the opposite level.</b> That is
+          <b>${n0(stopPts)} points against you</b> —
+          <b>$${riskPerContract.toFixed(2)} per <span class="ctr">MNQ</span></b> contract
+          <span class="muted">(${usdEmini(stopPts)} on the full-size E-mini)</span>.</li>
+      <li><b>Close the position before the bell.</b> This is a one-session pattern; carrying it
+          overnight throws away the premise it rests on.</li>
+    </ol>
+    <div class="plan-size">
+      ${budgets.map((b) => `<div class="sz"><span class="szn">${Math.floor(b / riskPerContract)}</span>
+        <span class="szl">MNQ @ $${b} risk</span></div>`).join('')}
+    </div>
+    <p class="hint" style="margin:10px 0 0"><b>Every dollar figure on this page is MNQ</b>
+      ($${CONTRACT.pointValue.toFixed(2)}/point). Prices come from NQ=F, but the E-mini is 10× the size —
+      on NQ this stop is ${usdEmini(stopPts)} and these contract counts would be wrong by a factor of ten.
+      Sizes are <code>floor(budget ÷ risk)</code> only; they ignore your prop firm's daily loss limit
+      and trailing drawdown. Size down from these, never up.</p>
+  </div>`;
+}
+
+/**
+ * Minutes until the next RTH open, or until the close if one is running.
+ * Weekends are skipped; market holidays are NOT known here, so the label says
+ * "next weekday open" rather than claiming the market will actually be open.
+ */
+function sessionClock(d) {
+  const now = new Date();
+  const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const mins = et.getHours() * 60 + et.getMinutes();
+  const dow = et.getDay();
+  const OPEN = 9 * 60 + 30, CLOSE = 16 * 60;
+
+  // The countdowns below are zone-agnostic, but the wall clock is not: prefix
+  // every state with the time it actually is in Houston, so nothing on the page
+  // has to be mentally shifted.
+  const stamp = `${hhmm(ctNowMinutes())} CT`;
+
+  if (d?.meta?.sessionInProgress && mins >= OPEN && mins < CLOSE) {
+    const left = CLOSE - mins;
+    return { live: true, text: `${stamp} · ${Math.floor(left / 60)}h ${String(left % 60).padStart(2, '0')}m left in session` };
+  }
+
+  // Inside RTH but the feed has not produced an in-progress session yet — say so
+  // rather than counting down to an open that has already happened.
+  if (dow >= 1 && dow <= 5 && mins >= OPEN && mins < CLOSE) {
+    return { live: false, text: `${stamp} · session open — awaiting data` };
+  }
+
+  let days = 0;
+  if (dow === 0) days = 1;
+  else if (dow === 6) days = 2;
+  else if (mins >= CLOSE) days = dow === 5 ? 3 : 1;
+
+  const delta = days === 0 ? OPEN - mins : days * 1440 - mins + OPEN;
+  const m = Math.max(0, delta);
+  const h = Math.floor(m / 60);
+  return { live: false, text: `${stamp} · ` + (h >= 24 ? `opens in ${Math.floor(h / 24)}d ${h % 24}h` : `opens in ${h}h ${String(m % 60).padStart(2, '0')}m`) };
+}
+
+/**
+ * Trade breakdown — the bracket read against options positioning.
+ *
+ * The useful question is not where the levels are but which way has room. A
+ * breakout with 60 points to a gamma wall is a different trade from one with
+ * 250 points of open ground, and that asymmetry is the whole panel.
+ */
+function tradeBreakdown(d) {
+  const g = d.gamma;
+  if (!g?.available) {
+    return `<div class="panel"><h2>Trade breakdown</h2>
+      <p class="hint" style="margin:0">Gamma levels unavailable — ${g?.reason ?? 'no data'}.
+      The bracket read above still stands; only the positioning overlay is missing.</p></div>`;
+  }
+
+  const orb = d.orb, pj = d.projection;
+  const side = (label, dir, air, pctProj, first, list, stop) => {
+    const roomy = g.roomier === dir;
+    return `<div class="side ${roomy ? 'roomy' : ''}">
+      <div class="side-head">
+        <span class="side-label">${label}</span>
+        ${roomy ? '<span class="side-tag">more room</span>' : ''}
+      </div>
+      <div class="side-air">
+        <span class="air-n">${air == null ? '—' : n0(air)}</span>
+        <span class="air-u">pts clear air</span>
+      </div>
+      <div class="side-sub">${air == null ? 'no level within the projection'
+        : `${pct(pctProj, 0)} of the ${n0(pj.median)}-pt projection, then <b>${first.names.join(' / ')}</b> at ${n1(first.value)}`}</div>
+      <table class="side-tbl"><tbody>${list.slice(0, 5).map((l) => `<tr>
+        <td>${n1(l.value)}</td>
+        <td class="muted">${dir === 'long' ? '+' : '−'}${n0(Math.abs(l.value - stop))}</td>
+        <td style="text-align:left">${l.names.join(' / ')}</td></tr>`).join('')}
+      </tbody></table>
+    </div>`;
+  };
+
+  const verdict = g.roomier === 'neither'
+    ? 'Both sides run into positioning at a similar distance — the level map does not favour either direction.'
+    : `<b>The ${g.roomier} side has materially more room.</b> ${
+        g.roomier === 'long'
+          ? `A break above ${n1(orb.buyStop)} has ${n0(g.airLong)} points before the first level; a break below ${n1(orb.sellStop)} meets one after only ${n0(g.airShort)}.`
+          : `A break below ${n1(orb.sellStop)} has ${n0(g.airShort)} points before the first level; a break above ${n1(orb.buyStop)} meets one after only ${n0(g.airLong)}.`}`;
+
+  return `<div class="panel">
+    <h2>Trade breakdown — bracket against gamma positioning</h2>
+    <p class="hint">${g.ticker} · ${g.levelCount} levels · computed ${g.dates.join(' and ')}${
+      g.stale ? ` · <b>cached copy</b> (${g.staleReason})` : ''}</p>
+
+    <p class="synth" style="margin:12px 0 16px">${verdict}</p>
+
+    <div class="sides">
+      ${side('Long break', 'long', g.airLong, g.airLongPctOfProjection, g.firstAboveBuy, g.above, orb.buyStop)}
+      ${side('Short break', 'short', g.airShort, g.airShortPctOfProjection, g.firstBelowSell, g.below, orb.sellStop)}
+    </div>
+
+    <h3 style="font-size:12.5px;margin:20px 0 6px">Inside the bracket — met before either stop fires</h3>
+    ${g.inside.length
+      ? `<table><thead><tr><th style="text-align:left">Level</th><th>Price</th>
+           <th>From sell stop</th><th>From buy stop</th></tr></thead>
+         <tbody>${g.inside.map((l) => `<tr>
+           <td style="text-align:left">${l.names.join(' / ')}</td>
+           <td>${n1(l.value)}</td>
+           <td class="muted">+${n0(l.value - orb.sellStop)}</td>
+           <td class="muted">−${n0(orb.buyStop - l.value)}</td></tr>`).join('')}
+         </tbody></table>
+         <p class="hint" style="margin:8px 0 0">${g.inside.length} levels sit inside a
+           ${n0(orb.buyStop - orb.sellStop)}-point bracket. Price transacts through these before either
+           order triggers, so the bracket is not firing into clean space.</p>`
+      : '<p class="hint" style="margin:0">Nothing between the stops — the bracket spans clear ground.</p>'}
+
+    ${g.stale0dteCount ? `<div class="callout" style="margin-top:16px">
+      <b>${g.stale0dteCount} levels are 0DTE from a prior session</b> and expire with the options that
+      produced them. They are excluded from the price map and from the clear-air figures above, but they
+      are the reason a wall you saw on Friday may simply not exist today. Re-pull after the open.</div>` : ''}
+  </div>`;
+}
+
+/** Cohort vs baseline on one metric. Same hue; identity comes from the labels. */
+function compareRow(label, value, baseline, format, scaleMax) {
+  const w = (v) => Math.max(1.5, Math.min(100, (v / scaleMax) * 100));
+  return `<div class="cmp">
+    <div class="cmp-label">${label}</div>
+    <div class="cmp-track">
+      <div class="cmp-bar" style="width:${w(value)}%"></div>
+      <div class="cmp-base" style="left:${w(baseline)}%" title="baseline ${format(baseline)}"></div>
+    </div>
+    <div class="cmp-val">${format(value)}<span class="cmp-vs">vs ${format(baseline)}</span></div>
+  </div>`;
+}
+
+function statsPanel(st, source) {
+  if (!st?.available) {
+    return `<div class="panel"><h2>Base rates</h2><p class="hint" style="margin:0">Unavailable — ${st?.reason ?? 'no history'}</p></div>`;
+  }
+
+  const c = st.current, b = st.baseline, u = st.nearestUsable;
+
+  // The cohort actually quoted for the headline: the current setup if it has a
+  // sample, otherwise the nearest broader one, always named.
+  const q = c.insufficient ? u : c;
+
+  // Too few to quote a rate, but the individual outcomes are still evidence.
+  const analogues = c.insufficient && c.observations?.length
+    ? `<h3 style="font-size:12.5px;margin:16px 0 6px">Every occurrence of ${c.label} in this sample</h3>
+       <table>
+         <thead><tr><th style="text-align:left">Setup day</th><th>Setup range</th>
+           <th>Next range</th><th>Multiple</th><th>Next close</th></tr></thead>
+         <tbody>${c.observations.map((o) => `<tr>
+           <td>${o.date}</td><td>${n0(o.setupRange)}</td><td>${n0(o.nextRange)}</td>
+           <td>${o.multiple.toFixed(2)}×</td>
+           <td>${o.nextUp ? 'up' : 'down'} ${n0(Math.abs(o.nextChange))}</td></tr>`).join('')}
+         </tbody>
+       </table>
+       <p class="hint" style="margin:8px 0 0">${
+         c.observations.filter((o) => o.multiple > 1).length} of ${c.observations.length} expanded.
+         Read these as anecdotes, not a rate — four observations cannot support a percentage.</p>`
+    : '';
+
+  const head = c.insufficient
+    ? `<div class="callout">
+         <b>${c.label}</b> has only <b>${c.n}</b> occurrence${c.n === 1 ? '' : 's'} in this sample —
+         too few to quote a rate (minimum ${c.minSample}). That rarity is itself the finding.
+         ${u ? `Aggregate figures below are for the broader <b>${u.label}</b> cohort instead.` : 'No broader cohort has a sample either.'}
+       </div>${analogues}`
+    : '';
+
+  const opening = st.openingRates?.length
+    ? `<h3 style="font-size:12.5px;margin:20px 0 4px">Crabel's second axis — where the session opens</h3>
+       <p class="hint" style="margin:0 0 8px">Same patterns, different expectancy depending on where the
+         open lands relative to the prior session. Outcome is that same session, so this becomes live at 8:30 CT.</p>
+       <table>
+         <thead><tr><th style="text-align:left">Open</th><th>n</th><th>Closes up</th>
+           <th>&gt; 20d avg range</th><th>Median range</th></tr></thead>
+         <tbody>${st.openingRates.map((o) => `<tr>
+           <td>${o.label}${o.insufficient ? ' <span class="muted" style="font-weight:400">(thin)</span>' : ''}</td>
+           <td>${o.n}</td>
+           <td>${o.upCloseSignificant
+                 ? `<b class="sig">${pct(o.upCloseRate)}</b> <span class="muted" style="font-size:11px">${o.upCloseZ > 0 ? '+' : ''}${o.upCloseZ.toFixed(1)}σ</span>`
+                 : `<span class="muted">${pct(o.upCloseRate)}</span>`}</td>
+           <td>${o.expansionSignificant
+                 ? `<b class="sig">${pct(o.expansionRate)}</b> <span class="muted" style="font-size:11px">${o.expansionZ > 0 ? '+' : ''}${o.expansionZ.toFixed(1)}σ</span>`
+                 : `<span class="muted">${pct(o.expansionRate)}</span>`}</td>
+           <td>${o.medianRangeVs20d.toFixed(2)}×</td></tr>`).join('')}
+         </tbody>
+       </table>
+       <p class="hint" style="margin:8px 0 0">Everything greyed is inside two standard errors of its own
+         baseline — the pooled ${pct(st.openingRates[0].pooledUpCloseRate)} up-close drift for direction,
+         the pooled ${pct(st.openingRates[0].pooledExpansionRate)} for expansion. Direction is judged
+         against that drift rather than against 50%, so a setup gets no credit for the market simply rising.</p>`
+    : '';
+
+  // Bars rather than three more number tiles: the whole question is "how does
+  // this setup differ from an ordinary session", which is a comparison, and a
+  // comparison reads faster as length than as digits.
+  const x2 = (v) => v.toFixed(2) + '×';
+  const cmp = q ? `
+    <div class="cmp-block">
+      <div class="cmp-head">After <b>${q.label}</b> <span class="muted">n=${q.n}</span>
+        <span class="cmp-key">marker = all sessions</span></div>
+      ${compareRow('Next-session range', q.medianRangeMultiple, b.medianRangeMultiple, x2,
+                   Math.max(q.p75RangeMultiple, b.medianRangeMultiple * 1.6))}
+      ${compareRow('Beats 20-session avg range', q.expansionRate, b.expansionRate, (v) => pct(v), 1)}
+      ${compareRow('Closes up', q.upCloseRate, b.upCloseRate, (v) => pct(v), 1)}
+      <p class="hint" style="margin:10px 0 0">${
+        directionDiffers(q, b.upCloseRate)
+          ? 'The direction figure clears two standard errors of the baseline drift — weak, but real.'
+          : `The direction figure is within two standard errors of the ${pct(b.upCloseRate)} baseline drift — no edge.`}
+        Middle half of outcomes ran ${x2(q.p25RangeMultiple)}–${x2(q.p75RangeMultiple)}.</p>
+    </div>` : '';
+
+  const rows = st.cohorts.map((x) => x.insufficient
+    ? `<tr><td>${x.label}</td><td>${x.n}</td>
+         <td>${x.medianRangeMultiple != null ? x.medianRangeMultiple.toFixed(2) + '×' : '—'}</td>
+         <td colspan="2" class="muted" style="text-align:left">sample too small for rates</td></tr>`
+    : `<tr><td>${x.label}</td><td>${x.n}</td><td>${x.medianRangeMultiple.toFixed(2)}×</td>
+         <td>${directionDiffers(x, b.upCloseRate)
+               ? `<b class="sig">${pct(x.upCloseRate)}</b>` : `<span class="muted">${pct(x.upCloseRate)}</span>`}</td>
+         <td>${pct(x.expansionRate)}</td></tr>`).join('');
+
+  return `<div class="panel">
+    <h2>Base rates — what happened the session after</h2>
+    <p class="hint">${st.source} · ${st.sampleSessions.toLocaleString()} sessions · ${st.from} → ${st.to}
+      ${st.proxyNote ? `<br>${st.proxyNote}` : ''}</p>
+    ${head}${cmp}
+
+    <details style="margin-top:16px">
+      <summary>Every setup compared</summary>
+      <table style="margin-top:12px">
+        <thead><tr><th style="text-align:left">Setup</th><th>n</th><th>Median range ×</th><th>Up close</th><th>&gt; 20d avg</th></tr></thead>
+        <tbody>${rows}
+          <tr class="baseline-row"><td>All sessions</td><td>${b.n}</td><td>${b.medianRangeMultiple.toFixed(2)}×</td>
+              <td>${pct(b.upCloseRate)}</td><td>${pct(b.expansionRate)}</td></tr>
+        </tbody>
+      </table>
+      <p class="hint" style="margin:8px 0 0">Median rather than mean — a handful of violent expansions drags
+        the average well above the typical session (${q ? `${q.label}: mean ${q.avgRangeMultiple.toFixed(2)}× vs median ${q.medianRangeMultiple.toFixed(2)}×` : ''}).</p>
+    </details>
+
+    <details style="margin-top:10px">
+      <summary>Where the session opens — Crabel's second axis</summary>
+      ${opening}
+    </details>
+
+    <p class="hint" style="margin:16px 0 0">${st.triggerRateNote}</p>
+  </div>`;
+}
+
+// MNQ (Micro E-mini Nasdaq-100, CME). One index point = $2.00; one tick = 0.25 pt = $0.50.
+const MNQ_POINT = 2.0;
+
+function renderCheat(d) {
+  const st = d?.nextStretch, em = d?.expectedMove;
+  const has = st != null;
+  const S = (v, dp = 1) => v == null ? '—' : v.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  const money = (v) => v == null ? '—' : '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  // Risk per contract at each candidate stop distance, from the live Stretch.
+  const stops = has ? [
+    ['Opposite bracket', 2 * st, 'Crabel\'s reverse point — you are stopped and flipped'],
+    ['Back to the reference', st, 'Bracket failed and price returned to the open'],
+    ['Half the Stretch', st / 2, 'Tighter; more stop-outs on noise'],
+  ] : [];
+
+  const budgets = [250, 500, 1000];
+
+  const sizing = has ? `
+    <table>
+      <thead><tr><th style="text-align:left">Stop placement</th><th>Points</th><th>Risk / contract</th>
+        ${budgets.map((b) => `<th>@ $${b}</th>`).join('')}</tr></thead>
+      <tbody>${stops.map(([label, pts, why]) => `
+        <tr><td>${label}<div class="muted" style="font-weight:400;font-size:11.5px">${why}</div></td>
+        <td>${S(pts)}</td><td>${money(pts * MNQ_POINT)}</td>
+        ${budgets.map((b) => `<td>${Math.floor(b / (pts * MNQ_POINT))}</td>`).join('')}</tr>`).join('')}
+      </tbody>
+    </table>
+    <p class="hint" style="margin:10px 0 0">Contract counts are <code>floor(budget ÷ risk)</code> — the raw arithmetic only.
+      They take no account of your prop firm's daily loss limit, trailing drawdown, or how many
+      positions you already hold. Size down from these, never up.</p>`
+    : `<p>Sizing needs a Stretch. ${d?.orb?.reason ?? 'Not enough session history yet.'}</p>`;
+
+  const rates = d?.stats?.available
+    ? (() => {
+        const q = d.stats.current.insufficient ? d.stats.nearestUsable : d.stats.current;
+        if (!q) return '<p>No cohort in this sample has enough observations to quote.</p>';
+        return `<p>Over ${d.stats.sampleSessions.toLocaleString()} sessions (${d.stats.from} → ${d.stats.to}),
+          the session after a <b>${q.label}</b> ran a median range of
+          <span class="live-val">${q.medianRangeMultiple.toFixed(2)}×</span> the setup day's range,
+          against <span class="live-val">${d.stats.baseline.medianRangeMultiple.toFixed(2)}×</span> for all sessions.
+          Direction after the setup was ${pct(q.upCloseRate)} up-close —
+          ${Math.abs(q.upCloseRate - 0.5) < 2 * q.upCloseStdErr
+            ? '<b>inside the noise</b>, so the pattern says nothing about which way'
+            : `versus ${pct(d.stats.baseline.upCloseRate)} baseline`}.</p>`;
+      })()
+    : '<p>Base rates unavailable.</p>';
+
+  cheat.innerHTML = `
+    <div class="panel">
+      <h2>The thesis</h2>
+      <p>Volatility alternates between contraction and expansion. Narrow ranges are stored energy;
+        the market resolves them with a directional move. You do not predict the direction — you
+        set brackets either side and let the expansion pick one.</p>
+      <p>Crabel's patterns identify the contraction. The Stretch sizes the bracket. Everything else
+        is execution.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Setup patterns</h2>
+      <table class="def">
+        <tbody>
+          <tr><td>NR4</td><td>Narrowest daily range of the last 4 sessions.</td></tr>
+          <tr><td>NR7</td><td>Narrowest of the last 7. Stronger signal than NR4.</td></tr>
+          <tr><td>NR20</td><td>Narrowest of the last 20. Rare and significant.</td></tr>
+          <tr><td>Inside day (ID)</td><td>High ≤ prior high <em>and</em> low ≥ prior low. Range fully contained.</td></tr>
+          <tr><td>ID/NR4</td><td>Inside day that is also NR4. Crabel's highest-expectancy setup.</td></tr>
+          <tr><td>2BarNR20</td><td>Narrowest combined 2-session range in 20. Catches compression a single-day flag misses.</td></tr>
+          <tr><td>Hook day</td><td>Opens beyond the prior high/low, reverses back inside, closes with a narrower range than the prior day.</td></tr>
+          <tr><td>WS day</td><td>Wide-spread day — the expansion counterpart. Often <em>ends</em> a contraction sequence rather than starting one.</td></tr>
+        </tbody>
+      </table>
+      <p class="hint" style="margin-top:10px">These stack. Three consecutive NR7s means more than one NR7.
+        The Live read tab shows which are active right now.</p>
+    </div>
+
+    <div class="panel">
+      <h2>The Stretch</h2>
+      <p>The volatility-adaptive trigger distance. For each of the last 10 sessions take the
+        <em>smaller</em> of the two open-to-extreme distances, then average them.</p>
+      <code class="formula">for each of the last 10 sessions:
+    d(i) = min( high(i) − open(i) , open(i) − low(i) )
+
+Stretch = mean( d(1) … d(10) )${has ? `
+
+current Stretch = ${S(st)} pts  =  ${money(st * MNQ_POINT)} per MNQ contract` : ''}</code>
+      <p>It adapts automatically: quiet markets shrink it, volatile markets widen it. It is
+        <em>not</em> a percentage of range and not a fixed tick count.</p>
+      <p><b>The open it uses is the whole game.</b> Crabel used the cash open — 8:30 CT, 9:30 in New York —
+        which sits near a session extreme far more often than a mid-session price does. Compute the Stretch
+        off the 17:00 CT Globex open and the number inflates into meaninglessness — which is exactly what the
+        banner on the Live read tab is warning you about when it shows GLOBEX.</p>
+    </div>
+
+    <div class="panel">
+      <h2>ORB execution</h2>
+      <table class="def">
+        <tbody>
+          <tr><td>Entry</td><td>Resting stop orders at <code>open + Stretch</code> and <code>open − Stretch</code>. Whichever fills first is the trade.</td></tr>
+          <tr><td>First signal only</td><td>Take the first bracket touched. Re-entering after a failure is a different system with different statistics.</td></tr>
+          <tr><td>The other side</td><td>Cancel it, or leave it as the stop-and-reverse. Pick one and keep it — they are not the same strategy.</td></tr>
+          <tr><td>Exit</td><td>On the close. This is a day-trade pattern; holding overnight discards the premise.</td></tr>
+          <tr><td>Filter</td><td>The setup is the contraction pattern. Firing an ORB on an ordinary day is the baseline, not the edge.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h2>Position sizing${has ? ` — at the current ${S(st)} pt Stretch` : ''}</h2>
+      ${sizing}
+    </div>
+
+    <div class="panel">
+      <h2>What the base rates say</h2>
+      ${rates}
+      <p>Read that as: the pattern reliably predicts a <b>bigger range</b>, and reliably says
+        <b>nothing about direction</b>. Any strategy built on it has to make its money from the
+        expansion, not from picking the side.</p>
+      <p><b>Median, not mean.</b> Range multiples have a long right tail — a few sessions expand three
+        or four fold and drag the average above anything typical. The median is what an ordinary
+        occurrence looks like; the gap between the two is the tail you are exposed to.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Where the session opens</h2>
+      <p>Crabel's second axis. The contraction pattern tells you a move is coming; the opening
+        relationship conditions what kind. Four classifications, all knowable at 8:30 CT:</p>
+      <table class="def">
+        <tbody>
+          <tr><td>Above prior high</td><td>Gap up beyond yesterday's range entirely.</td></tr>
+          <tr><td>Below prior low</td><td>Gap down beyond it. Historically the strongest expansion signal of the four.</td></tr>
+          <tr><td>Inside, above close</td><td>Opens within yesterday's range but above its close. The common case.</td></tr>
+          <tr><td>Inside, below close</td><td>Within the range, below the close. Also common.</td></tr>
+        </tbody>
+      </table>
+      ${(() => {
+        // Computed, not asserted. An earlier hand-written "roughly 93% inside"
+        // was carried over from a 50-session sample and was 34 points wrong
+        // against the current 2,637-session one — it also inverted the
+        // conclusion, calling the gap cases rare when they are 41% of sessions.
+        const o = d?.stats?.openingRates;
+        if (!o?.length) return '';
+        const tot = o.reduce((a, b) => a + b.n, 0);
+        const ins = o.filter((x) => /inside prior range/.test(x.label)).reduce((a, b) => a + b.n, 0);
+        const gap = o.filter((x) => /above prior high|below prior low/.test(x.label)).reduce((a, b) => a + b.n, 0);
+        return `<p class="hint" style="margin-top:10px">Across ${tot.toLocaleString()} sessions the split is
+          <b>${pct(ins / tot, 0)} opening inside</b> the prior range and <b>${pct(gap / tot, 0)} gapping
+          beyond it</b> — gaps are common, not rare. Measured rates are on the Live read tab.</p>`;
+      })()}
+    </div>
+
+    <div class="panel">
+      <h2>Reading the projection</h2>
+      <p>The projected range takes the setup day's range and multiplies it by the historical median
+        for that setup, with the 25th–75th percentile band around it. It is a <b>distribution, not a
+        target</b>: a quarter of occurrences came in under the low end and a quarter ran past the high end.</p>
+      <p>Its practical use is sanity-checking a stop. If your stop distance is small relative to the
+        projected range, expect to be taken out by ordinary movement rather than by being wrong.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Expected move</h2>
+      <p>Derived from VXN, the Nasdaq-100 volatility index:</p>
+      <code class="formula">EM(1 session) = spot × (VXN ÷ 100) ÷ √252${em?.available ? `
+
+  = ${S(em.spot ?? 0, 0)} × (${em.iv.toFixed(2)} ÷ 100) ÷ 15.87
+  = ${S(em.points)} pts   (±${em.pct.toFixed(2)}%)` : ''}</code>
+      <p>This is <b>one standard deviation</b> — roughly 68% of sessions finish inside it. It is not a
+        boundary and price trades outside it about one session in three. VXN measures index vol,
+        not NQ futures vol; they track closely but are different instruments.</p>
+      <p>Its use here is as a yardstick: the Stretch as a fraction of the expected move tells you
+        whether your bracket is a routine touch or a genuine outlier.</p>
+    </div>
+
+    <div class="two">
+      <div class="panel">
+        <h2>MNQ contract</h2>
+        <table class="def">
+          <tbody>
+            <tr><td>Point value</td><td>$2.00</td></tr>
+            <tr><td>Tick</td><td>0.25 pt = $0.50</td></tr>
+            <tr><td>RTH</td><td>08:30 – 15:00 CT <span class="muted">(09:30 – 16:00 ET)</span></td></tr>
+            <tr><td>Globex</td><td>17:00 – 16:00 CT next day <span class="muted">(18:00 – 17:00 ET)</span></td></tr>
+            <tr><td>vs E-mini NQ</td><td>MNQ is 1/10 the size ($20/pt)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="panel">
+        <h2>Caveats worth keeping</h2>
+        <p>Crabel published this in 1990 and later said the edge decayed sharply afterwards — he
+          reportedly tried to buy back copies. The <em>framework</em> holds; the 1990 hit rates do not.
+          Refit on current data, which is what the base rates panel is for.</p>
+        <p>Everything here assumes the RTH session. Anything computed off Globex bars is labelled as
+          such, and the Stretch in particular is not tradable in that mode.</p>
+      </div>
+    </div>`;
+}
+
+/**
+ * "Expansion overdue" was wrong. The base rates say a contraction expands
+ * relative to its own setup day while still producing a session that is
+ * BELOW the 20-day average more often than an ordinary day does. Both halves
+ * have to be said, or the card promises a big session the data doesn't support.
+ */
+function nr7StreakNote(d) {
+  if (!d.nr7Streak) return 'no streak';
+
+  const st = d.stats;
+  const q = st?.available ? (st.current.insufficient ? st.nearestUsable : st.current) : null;
+  if (!q || !st.baseline) return 'contracting';
+
+  const belowBaseline = q.expansionRate < st.baseline.expansionRate;
+  return belowBaseline
+    ? 'expands off the setup day, but still a below-average session'
+    : 'expands off the setup day and beats the average session';
+}
+
+/**
+ * The trade tab: every variable on one price axis, plus the mechanics.
+ *
+ * Price runs vertically because that is how a ladder is read. Bands (expected
+ * move, projection, prior range) sit left of centre; gamma levels label to the
+ * right; the two orders cut across everything. Nothing here is new data — it is
+ * the same numbers as the Live read, arranged for the moment of acting.
+ */
+function priceLadder(d, side) {
+  const orb = d.orb, em = d.expectedMove, pj = d.projection, L = d.last, g = d.gamma;
+  if (!orb?.available) return '<p class="hint">No bracket to plot.</p>';
+
+  // Role depends on direction: the buy stop is the entry on a long and the stop
+  // loss on a short. Colour follows the role, never the price level, so the two
+  // views cannot be confused for one another.
+  const long = side === 'long';
+  const entryPx = long ? orb.buyStop : orb.sellStop;
+  const stopPx = long ? orb.sellStop : orb.buyStop;
+  const targets = (long ? g?.above : g?.below) ?? [];
+
+  const ref = orb.reference;
+  const pts = [orb.buyStop, orb.sellStop, ref, L.high, L.low];
+  if (em?.available) pts.push(em.upper, em.lower);
+  if (pj?.available) pts.push(ref + pj.median / 2, ref - pj.median / 2, ref + pj.p75 / 2, ref - pj.p75 / 2);
+  const gl = g?.available ? g.map.filter((l) => Math.abs(l.value - ref) <= (pj?.p75 ?? 500)) : [];
+  gl.forEach((l) => pts.push(l.value));
+
+  const lo = Math.min(...pts), hi = Math.max(...pts);
+  const pad = (hi - lo) * 0.05 || 1;
+  const TOP = 26, H = 620, BOT = H - 26;
+  const y = (v) => BOT - ((v - (lo - pad)) / ((hi + pad) - (lo - pad))) * (BOT - TOP);
+
+  const W = 1000, AXIS = 74, COL = 150, GAMMA_X = 470;
+
+  // Price gridlines on clean increments.
+  const span = (hi + pad) - (lo - pad);
+  const step = span > 900 ? 200 : span > 450 ? 100 : 50;
+  const ticks = [];
+  for (let p = Math.ceil((lo - pad) / step) * step; p <= hi + pad; p += step) {
+    ticks.push(`<line x1="${AXIS}" y1="${y(p)}" x2="${W - 8}" y2="${y(p)}" stroke="var(--gridline)" stroke-width="1"/>
+      <text class="axis" x="${AXIS - 8}" y="${y(p) + 3.5}" text-anchor="end">${n0(p)}</text>`);
+  }
+
+  // Vertical bands: each is a price interval, drawn as a column.
+  const band = (x, w, a, b, fill, op, label) => `
+    <rect x="${x}" y="${y(b)}" width="${w}" height="${Math.max(2, y(a) - y(b))}" rx="4" fill="${fill}" opacity="${op}"/>
+    <text class="axis" x="${x + w / 2}" y="${TOP - 10}" text-anchor="middle" style="font-size:10.5px">${label}</text>`;
+
+  // The sigma band and the projected range are not peers: ±1σ is a two-sided
+  // span around the reference (2 × the figure quoted), while the projection is
+  // a high-to-low range. Drawn adjacent without saying so they read as agreeing
+  // when they differ about 2:1, so the label carries the span.
+  // Labels are short so three columns 78px apart cannot collide, and each states
+  // its own span — the sigma band is two-sided and would otherwise read as a
+  // peer of the projected range when it is roughly twice it.
+  let bands = '';
+  if (em?.available) bands += band(AXIS + 22, 62, em.lower, em.upper, 'var(--bar-plain)', 0.3,
+    `±1σ ${n0(em.points * 2)}`);
+  if (pj?.available) {
+    bands += band(AXIS + 100, 62, ref - pj.p75 / 2, ref + pj.p75 / 2, 'var(--bar-plain)', 0.22, '');
+    bands += band(AXIS + 100, 62, ref - pj.median / 2, ref + pj.median / 2, 'var(--bar-plain)', 0.55,
+      `proj ${n0(pj.median)}`);
+  }
+  bands += band(AXIS + 178, 62, L.low, L.high, 'var(--bar-plain)', 0.7, `${L.date.slice(5)} ${n0(L.range)}`);
+
+  // Gamma levels, right side, de-collided so labels never overlap.
+  const majors = /Gamma Wall|Call Resistance|Put Support|HVL|1D M/i;
+  const sorted = [...gl].sort((a, b) => b.value - a.value);
+  const merged = [];
+  for (const l of sorted) {
+    const prev = merged.at(-1);
+    if (prev && Math.abs(y(prev.value) - y(l.value)) < 13) prev.names.push(l.name);
+    else merged.push({ value: l.value, names: [l.name] });
+  }
+  // A level is a target only if it lies beyond the entry in the trade's direction.
+  const isTarget = (v) => targets.some((t) => Math.abs(t.value - v) < 0.01);
+
+  const gamma = merged.map((l) => {
+    const major = l.names.some((n) => majors.test(n));
+    const tgt = isTarget(l.value);
+    const stroke = tgt ? 'var(--trade-target)' : 'var(--text-muted)';
+    const op = tgt ? 0.75 : major ? 0.55 : 0.25;
+    return `<line x1="${GAMMA_X}" y1="${y(l.value)}" x2="${W - 250}" y2="${y(l.value)}"
+              stroke="${stroke}" stroke-width="${tgt ? 1.75 : major ? 1.5 : 1}" opacity="${op}"/>
+      <text class="axis" x="${W - 244}" y="${y(l.value) + 3.5}"
+            style="font-size:${major || tgt ? 10.5 : 9.5}px;${tgt ? 'fill:var(--trade-target)' : major ? 'fill:var(--text-secondary)' : ''}">${tgt ? '▸ ' : ''}${l.names.slice(0, 3).join(' / ')}</text>`;
+  }).join('');
+
+  // Colour carries the role; the word on the tag carries it too, so neither is
+  // load-bearing alone.
+  const order = (v, role, color) => `
+    <line x1="${AXIS}" y1="${y(v)}" x2="${W - 250}" y2="${y(v)}" stroke="${color}" stroke-width="2.5"/>
+    <rect x="${AXIS + 2}" y="${y(v) - 17}" width="150" height="15" rx="3" fill="${color}"/>
+    <text x="${AXIS + 8}" y="${y(v) - 5.5}" style="font-size:10.5px;font-weight:700;fill:#fff">${role} ${n1(v)}</text>`;
+
+  // Shade the risk band between entry and stop — the money actually at hazard.
+  const riskBand = `<rect x="${AXIS}" y="${y(Math.max(entryPx, stopPx))}" width="${W - 250 - AXIS}"
+      height="${Math.abs(y(stopPx) - y(entryPx))}" fill="var(--trade-stop)" opacity="0.09"/>`;
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="img"
+       aria-label="Price ladder: entry, stop loss, targets, bands and gamma levels for the ${side} trade">
+    ${ticks.join('')}
+    ${riskBand}
+    ${bands}
+    ${gamma}
+    <line x1="${AXIS}" y1="${y(ref)}" x2="${W - 250}" y2="${y(ref)}" stroke="var(--baseline)" stroke-width="1"/>
+    <text class="axis" x="${AXIS + 4}" y="${y(ref) + 12}" style="font-size:10px">reference ${n1(ref)}</text>
+    ${order(stopPx, 'EXIT IF WRONG', 'var(--trade-stop)')}
+    ${order(entryPx, long ? 'BUY ABOVE' : 'SELL BELOW', 'var(--trade-entry)')}
+  </svg>`;
+}
+
+/**
+ * The day roadmap: one left-to-right time axis from the European open to the
+ * bell, carrying the session zones, their measured concentration, and every
+ * scheduled release.
+ *
+ * Colour is ordinal, not decorative. Zones shade by how often the day's extreme
+ * forms in them; events shade by impact. Both scales carry their number or word
+ * beside the mark so neither depends on hue.
+ */
+function dayRoadmap(d) {
+  const zones = d.meta?.zones;
+  const cal = d.calendar;
+  const prof = zones?.profile ?? [];
+  const T0 = toMin('02:00'), T1 = toMin('16:00');
+
+  const W = 1000, LEFT = 46, RIGHT = W - 8;
+  // Five stacked lanes sharing one time axis. Deliberately not a Pareto chart:
+  // the histogram and the cumulative curve get their own lanes rather than two
+  // y-scales on one plot, which would invent a relationship between them.
+  const EV_H = 58;                       // events
+  const ZONE_Y = EV_H, ZONE_H = 26;      // named windows
+  const HIST_Y = ZONE_Y + ZONE_H + 12, HIST_H = 74;   // extremes per 30 min
+  const CUM_Y = HIST_Y + HIST_H + 22, CUM_H = 62;     // cumulative share
+  const AXIS_Y = CUM_Y + CUM_H + 6;
+  const ACT_Y = AXIS_Y + 24, ACT_H = 26;
+  const H = ACT_Y + ACT_H + 8;
+  const x = (m) => LEFT + ((Math.min(Math.max(m, T0), T1) - T0) / (T1 - T0)) * (RIGHT - LEFT);
+
+  const conc = new Map((zones?.zones ?? []).map((z) => [z.key, z.concentration]));
+
+  // Every window on the clock, including the overnight ones we do not measure.
+  const LANES = [
+    { key: 'euPos', label: 'Europe positioning', from: '02:00', to: '05:00' },
+    { key: 'euCont', label: 'Europe continuation', from: '05:00', to: '07:00' },
+    { key: 'premkt', label: 'NY premarket', from: '07:00', to: '09:30' },
+    { key: 'nyOpen', label: 'NY open', short: 'open', from: '09:30', to: '10:00' },
+    { key: 'amRev', label: 'AM reversal', short: 'AM rev', from: '10:00', to: '11:00' },
+    { key: 'lateAm', label: 'Late morning', from: '11:00', to: '12:00' },
+    { key: 'lunch', label: 'Lunch', from: '12:00', to: '13:00' },
+    { key: 'pm', label: 'PM trend', from: '13:00', to: '15:00' },
+    { key: 'close', label: 'Close', from: '15:00', to: '16:00' },
+  ];
+
+  const bands = LANES.map((z) => {
+    const xa = x(toMin(z.from)), xb = x(toMin(z.to)), w = xb - xa;
+    const c = conc.get(z.key);
+    // Opacity tracks concentration: the hot windows are visibly heavier.
+    const op = c == null ? 0.12 : Math.max(0.12, Math.min(0.8, c / 4.2));
+    const hot = c != null && c >= 1.5;
+    const fs = w < 96 ? 9 : 10;
+    const fits = (s, size = fs) => s.length * size * 0.56 < w - 6;
+
+    // The 09:30 window is thirty minutes wide and the most important band on the
+    // chart. Rather than truncate it, its label moves below the axis on a leader.
+    const inside = fits(z.label) ? z.label : fits(z.short ?? z.label) ? (z.short ?? z.label) : null;
+    const below = inside ? '' : `
+      <line x1="${xa + w / 2}" y1="${ZONE_Y + ZONE_H}" x2="${xa + w / 2}" y2="${AXIS_Y + 26}"
+            stroke="var(--bar-flag)" stroke-width="1" opacity="0.5"/>
+      <text class="axis" x="${xa + w / 2}" y="${AXIS_Y + 38}" text-anchor="middle"
+            style="font-size:10px;font-weight:700;fill:var(--bar-flag)">${z.label}${c != null ? ` ${c.toFixed(1)}×` : ''}</text>`;
+
+    return `
+      <rect x="${xa + 1}" y="${ZONE_Y}" width="${Math.max(2, w - 2)}" height="${ZONE_H}" rx="4"
+            fill="${hot ? 'var(--bar-flag)' : 'var(--bar-plain)'}" opacity="${op}"/>
+      <title>${z.label} · ${ctRange(z.from, z.to)} CT${c != null ? ` · ${c.toFixed(2)}× extreme concentration` : ' · not measured'}</title>
+      ${inside ? `<text class="axis" x="${xa + w / 2}" y="${ZONE_Y + 14}" text-anchor="middle" style="font-size:${fs}px">${inside}</text>
+        ${c != null ? `<text class="axis" x="${xa + w / 2}" y="${ZONE_Y + 28}" text-anchor="middle"
+          style="font-size:10.5px;font-weight:700;${hot ? 'fill:var(--bar-flag)' : ''}">${c.toFixed(1)}×</text>` : ''}` : ''}
+      ${below}`;
+  }).join('');
+
+  // Hour ticks along the bottom. Positioned by ET minutes, labelled in CT.
+  const hours = [];
+  for (let m = T0; m <= T1; m += 60) {
+    hours.push(`<line x1="${x(m)}" y1="${AXIS_Y}" x2="${x(m)}" y2="${AXIS_Y + 5}" stroke="var(--baseline)" stroke-width="1"/>
+      <text class="axis" x="${x(m)}" y="${AXIS_Y + 18}" text-anchor="middle" style="font-size:9.5px">${hhmmCt(m)}</text>`);
+  }
+
+  // --- Lane 3: where the day's extremes actually form, per 30 minutes --------
+  const peak = Math.max(...prof.map((p) => (p.highPct + p.lowPct) / 2), 0.02);
+  const hist = prof.map((p) => {
+    const xa = x(toMin(p.from)), xb = x(toMin(p.to));
+    const share = (p.highPct + p.lowPct) / 2;
+    const h = (share / peak) * HIST_H;
+    const hot = p.concentration >= 2;
+    return `<rect x="${xa + 1}" y="${HIST_Y + HIST_H - h}" width="${Math.max(2, xb - xa - 2)}" height="${Math.max(1, h)}"
+              rx="3" fill="${hot ? 'var(--bar-flag)' : 'var(--bar-plain)'}" opacity="${hot ? 0.9 : 0.6}">
+              <title>${ctRange(p.from, p.to)} CT · ${pct(share, 1)} of all session extremes · ${p.concentration.toFixed(2)}× chance</title></rect>
+            ${hot ? `<text class="axis" x="${(xa + xb) / 2}" y="${HIST_Y + HIST_H - h - 5}" text-anchor="middle"
+              style="font-size:10px;font-weight:700;fill:var(--bar-flag)">${pct(share, 0)}</text>` : ''}`;
+  }).join('');
+
+  // --- Lane 4: cumulative share of extremes already set ---------------------
+  let run = 0;
+  const cum = prof.map((p) => { run += (p.highPct + p.lowPct) / 2; return { m: toMin(p.to), v: run }; });
+  const cumPts = [{ m: toMin('09:30'), v: 0 }, ...cum]
+    .map((c) => `${x(c.m)},${CUM_Y + CUM_H - c.v * CUM_H}`).join(' ');
+  const half = cum.find((c) => c.v >= 0.5);
+  const cumGrid = [0, 0.5, 1].map((v) => `
+    <line x1="${LEFT}" y1="${CUM_Y + CUM_H - v * CUM_H}" x2="${RIGHT}" y2="${CUM_Y + CUM_H - v * CUM_H}"
+          stroke="var(--gridline)" stroke-width="1"/>
+    <text class="axis" x="${LEFT - 6}" y="${CUM_Y + CUM_H - v * CUM_H + 3.5}" text-anchor="end" style="font-size:9px">${v * 100}%</text>`).join('');
+  const cumLine = `<polyline points="${cumPts}" fill="none" stroke="var(--bar-flag)" stroke-width="2"
+      stroke-linejoin="round" stroke-linecap="round"/>
+    ${half ? `<line x1="${x(half.m)}" y1="${CUM_Y}" x2="${x(half.m)}" y2="${CUM_Y + CUM_H}"
+        stroke="var(--text-muted)" stroke-width="1" opacity="0.6"/>
+      <text class="axis" x="${x(half.m) + 5}" y="${CUM_Y + 11}" style="font-size:9.5px">half the day's extremes are in by ${hhmmCt(half.m)}</text>` : ''}`;
+
+  // --- Lane 5: what you are doing, derived from the measured concentration ---
+  const ACTIONS = [
+    { from: '02:00', to: '09:30', text: 'watch — bracket not valid until the 8:30 CT open', tone: 'idle' },
+    { from: '09:30', to: '10:00', text: 'orders live · first signal only', tone: 'act' },
+    { from: '10:00', to: '11:00', text: 'manage', tone: 'manage' },
+    { from: '11:00', to: '15:00', text: 'low expansion — the day is mostly decided', tone: 'idle' },
+    { from: '15:00', to: '16:00', text: 'close out', tone: 'manage' },
+  ];
+  const actions = ACTIONS.map((a) => {
+    const xa = x(toMin(a.from)), xb = x(toMin(a.to)), w = xb - xa;
+    const fill = a.tone === 'act' ? 'var(--trade-entry)' : a.tone === 'manage' ? 'var(--bar-plain)' : 'transparent';
+    const op = a.tone === 'act' ? 0.85 : a.tone === 'manage' ? 0.35 : 0;
+    const fits = a.text.length * 9 * 0.55 < w - 8;
+    return `<rect x="${xa + 1}" y="${ACT_Y}" width="${Math.max(2, w - 2)}" height="${ACT_H}" rx="4"
+              fill="${fill}" opacity="${op}" ${a.tone === 'idle' ? 'stroke="var(--border)"' : ''}/>
+            <title>${ctRange(a.from, a.to)} CT · ${a.text}</title>
+            ${fits ? `<text class="axis" x="${xa + w / 2}" y="${ACT_Y + 17}" text-anchor="middle"
+              style="font-size:9.5px;${a.tone === 'act' ? 'fill:#fff;font-weight:700' : ''}">${a.text}</text>` : ''}`;
+  }).join('');
+
+  // Events, stacked into rows so labels never collide.
+  const IMPACT = {
+    High: { color: 'var(--status-warning)', w: 2.5, op: 1 },
+    Medium: { color: 'var(--text-secondary)', w: 1.5, op: 0.8 },
+    Low: { color: 'var(--text-muted)', w: 1, op: 0.5 },
+    Holiday: { color: 'var(--text-muted)', w: 1, op: 0.5 },
+  };
+  const evs = (cal?.upcoming ?? [])
+    .map((e) => ({ ...e, m: toMin(e.etTime) }))
+    .filter((e) => e.m >= T0 && e.m <= T1)
+    .sort((a, b) => a.m - b.m);
+
+  const rows = [];
+  const marks = evs.map((e) => {
+    const st = IMPACT[e.impact] ?? IMPACT.Low;
+    const label = `${e.ctTime ?? ct(e.etTime)} ${e.title}`;
+    const wpx = label.length * 5.1;
+    let row = 0;
+    while (rows[row] != null && rows[row] > x(e.m) - 4) row++;
+    rows[row] = x(e.m) + wpx;
+    const yy = EV_H - 14 - row * 14;
+
+    // High-impact releases get a blast radius: the minutes either side where the
+    // tape is reacting to the print rather than to the pattern.
+    const blast = e.impact === 'High'
+      ? `<rect x="${x(e.m - 5)}" y="${ZONE_Y}" width="${x(e.m + 15) - x(e.m - 5)}" height="${CUM_Y + CUM_H - ZONE_Y}"
+             fill="var(--status-warning)" opacity="0.09"/>`
+      : '';
+
+    return `${blast}
+      <line x1="${x(e.m)}" y1="${yy}" x2="${x(e.m)}" y2="${ZONE_Y + ZONE_H}" stroke="${st.color}"
+            stroke-width="${st.w}" opacity="${st.op}"/>
+      <circle cx="${x(e.m)}" cy="${yy}" r="3" fill="${st.color}" opacity="${st.op}"/>
+      <text class="axis" x="${x(e.m) + 6}" y="${yy + 3.5}"
+            style="font-size:10px;${e.impact === 'High' ? 'fill:var(--status-warning);font-weight:700' : ''}">${label}</text>`;
+  }).join('');
+
+  const nowM = etNowMinutes();
+  const nowIn = nowM >= T0 && nowM <= T1 && !zoneSchedule().closed;
+  const nowMark = nowIn ? `
+    <line x1="${x(nowM)}" y1="6" x2="${x(nowM)}" y2="${ACT_Y + ACT_H}" stroke="var(--status-good)" stroke-width="2"/>
+    <text class="axis" x="${x(nowM) + 5}" y="14" style="font-size:10px;fill:var(--status-good);font-weight:700">now</text>` : '';
+
+  const laneLabel = (y, t) => `<text class="axis" x="${LEFT - 6}" y="${y}" text-anchor="end"
+      style="font-size:9px;fill:var(--text-muted)">${t}</text>`;
+
+  const note = !cal?.available
+    ? `Calendar unavailable — ${cal?.reason ?? 'no source'}.`
+    : evs.length
+      ? `${evs.length} scheduled release${evs.length === 1 ? '' : 's'} in this window. High-impact releases are amber.`
+      : cal.exhausted
+        ? 'No releases left in this week\'s feed — ForexFactory publishes a current-week file only, so it empties out until the new one lands. This is a feed limit, not a clear calendar.'
+        : 'No releases fall inside 01:00–15:00 CT.';
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="img"
+       aria-label="Day roadmap: releases, session windows, where extremes form, cumulative share, and what to do, on one time axis">
+    ${marks}
+    ${bands}
+    ${laneLabel(HIST_Y + 10, 'extremes')}
+    ${laneLabel(HIST_Y + 21, 'per 30m')}
+    <text class="axis" x="${(LEFT + x(toMin('09:30'))) / 2}" y="${HIST_Y + HIST_H / 2}" text-anchor="middle"
+          style="font-size:9.5px;fill:var(--text-muted)">overnight not measured — these are RTH extremes</text>
+    ${hist}
+    ${cumGrid}${cumLine}
+    ${laneLabel(CUM_Y - 4, 'set by now')}
+    <line x1="${LEFT}" y1="${AXIS_Y}" x2="${RIGHT}" y2="${AXIS_Y}" stroke="var(--baseline)" stroke-width="1"/>
+    ${hours.join('')}
+    ${laneLabel(ACT_Y + 17, 'do')}
+    ${actions}
+    ${nowMark}
+  </svg>
+  <p class="hint" style="margin:2px 0 0">${note}</p>`;
+}
+
+/**
+ * How good is the geometry of one side of this trade?
+ *
+ * This rates the SHAPE of the trade, never its direction. Direction has no
+ * measured edge in 2,637 sessions, so a confidence score that implied one would
+ * be inventing information. What it does measure is answerable: how much of the
+ * projected day you must capture to make 1R, how much clear ground there is
+ * before the first level, and how many levels sit in the way.
+ */
+function sideConfidence(d, dir) {
+  const orb = d.orb, g = d.gamma, pj = d.projection;
+  if (!orb?.available || !pj?.available) return null;
+
+  const risk = 2 * d.nextStretch;
+  const entry = dir === 'long' ? orb.buyStop : orb.sellStop;
+  const levels = ((dir === 'long' ? g?.above : g?.below) ?? []);
+
+  // The single most decision-relevant ratio: 1R expressed as a share of the
+  // range the session is projected to cover at all.
+  const costOfR = risk / pj.median;
+
+  const air = dir === 'long' ? g?.airLong : g?.airShort;
+  const airShare = air != null ? air / pj.median : null;
+
+  // Where does the first target paying 1R sit, and what is in front of it?
+  const oneR = levels.find((l) => Math.abs(l.value - entry) / risk >= 1);
+  const obstructions = oneR
+    ? levels.filter((l) => Math.abs(l.value - entry) < Math.abs(oneR.value - entry)).length
+    : levels.length;
+
+  let score = 100;
+  const reasons = [];
+
+  if (costOfR >= 0.45) { score -= 40; reasons.push(`1R needs ${pct(costOfR, 0)} of the projected range`); }
+  else if (costOfR >= 0.3) { score -= 20; reasons.push(`1R needs ${pct(costOfR, 0)} of the projected range`); }
+  else reasons.push(`1R is only ${pct(costOfR, 0)} of the projected range`);
+
+  if (!oneR) { score -= 25; reasons.push('no level pays 1R inside the projection'); }
+  else if (obstructions >= 3) { score -= 15; reasons.push(`${obstructions} levels before the first 1R target`); }
+  else if (obstructions > 0) { score -= 7; reasons.push(`${obstructions} level${obstructions === 1 ? '' : 's'} before 1R`); }
+
+  if (airShare != null && airShare < 0.08) { score -= 20; reasons.push(`only ${n0(air)} pts of clear ground`); }
+  else if (airShare != null && airShare < 0.15) { score -= 10; reasons.push(`${n0(air)} pts of clear ground`); }
+  else if (air != null) reasons.push(`${n0(air)} pts of clear ground`);
+
+  score = Math.max(0, Math.min(100, score));
+  const band = score >= 65 ? 'workable' : score >= 40 ? 'marginal' : 'poor';
+
+  return { score, band, costOfR, air, airShare, obstructions, oneR, reasons };
+}
+
+/** Targets expressed in R, where R is the bracket-to-bracket stop. */
+function targetTable(d, dir) {
+  const g = d.gamma, orb = d.orb;
+  if (!g?.available) return '<p class="hint" style="margin:0">No levels to target.</p>';
+
+  const entry = dir === 'long' ? orb.buyStop : orb.sellStop;
+  const risk = 2 * d.nextStretch;                 // stop at the opposite bracket
+  const list = (dir === 'long' ? g.above : g.below).slice(0, 5);
+  if (!list.length) return '<p class="hint" style="margin:0">No levels within the projection on this side.</p>';
+
+  return `<table class="tgt">
+    <thead><tr><th style="text-align:left">Target</th><th>Price</th><th>Points</th><th>R</th><th>$ / contract</th></tr></thead>
+    <tbody>${list.map((l) => {
+      const move = Math.abs(l.value - entry);
+      const r = move / risk;
+      // 1D Min / 1D Max are MenthorQ's expected-move band, not dealer
+      // positioning. They are still price levels worth targeting, but the panel
+      // is titled "gamma positioning" so they are marked rather than implied.
+      const volBand = (l.families ?? []).includes('vol-band');
+      return `<tr class="${r >= 1 ? 'tp-hit' : ''}">
+        <td style="text-align:left"><span class="tp-dot"></span>${l.names.slice(0, 2).join(' / ')}${
+          volBand ? ' <span class="muted" style="font-size:10.5px">vol band, not gamma</span>' : ''}</td>
+        <td>${n1(l.value)}</td>
+        <td>${n0(move)}</td>
+        <td class="${r >= 1 ? 'r-good' : 'muted'}">${r.toFixed(2)}R</td>
+        <td>$${(move * MNQ_PT).toFixed(0)}</td></tr>`;
+    }).join('')}</tbody>
+  </table>`;
+}
+
+/**
+ * Open interest we computed, next to levels we were handed.
+ *
+ * CBOE publishes every listed strike with its open interest and gamma, free.
+ * MenthorQ sells levels derived from the same raw material. Showing both is the
+ * point: where an independently computed wall lands on a level someone else sold
+ * you, that level is real. Where they disagree, one of them is wrong and you now
+ * know to distrust it. Averaging the two would erase exactly that.
+ */
+function oiPanel(d) {
+  const oi = d.openInterest;
+  if (!oi?.available) {
+    return `<div class="panel"><h2>Open interest — CBOE</h2>
+      <p class="hint" style="margin:0">Unavailable — ${oi?.reason ?? 'not pulled'}.</p></div>`;
+  }
+
+  const gx = (v) => `${v >= 0 ? '+' : '−'}${Math.abs(v / 1e9).toFixed(2)}B`;
+  const spot = oi.spot;
+
+  // QQQ carries roughly ten times the open interest of the index book, so it is
+  // the primary read; NDX is shown beside it as the native-strike cross-check.
+  const books = [
+    oi.qqq && !oi.qqq.unavailable ? { ...oi.qqq, title: 'QQQ book', lead: true } : null,
+    oi.ndx ? { ...oi.ndx, title: 'NDX book' } : null,
+  ].filter(Boolean);
+
+  const row = (b) => {
+    const dist = (p) => `${p > spot ? '+' : '−'}${n0(Math.abs(p - spot))}`;
+    const wall = (w) => !w ? '—'
+      : `${n0(w.price)} <span class="muted">${dist(w.price)}</span>${
+          w.atMoney ? '<br><span class="muted" style="font-size:10.5px">at the money — not a target</span>' : ''}`;
+    return `<tr>
+      <td style="text-align:left"><b>${b.title}</b>${b.lead ? ' <span class="muted">primary</span>' : ''}</td>
+      <td>${b.totalOi.toLocaleString()}</td>
+      <td>${b.flip == null ? '<span class="muted">no crossing</span>'
+        : `${n0(b.flip)} <span class="muted">${dist(b.flip)}</span>`}</td>
+      <td>${wall(b.callWall)}</td>
+      <td>${wall(b.putWall)}</td>
+    </tr>`;
+  };
+
+  // Which side of the flip price sits on is the regime, and it is what the flip
+  // number is actually for. Both books have to agree before it is stated as one.
+  const sides = books.map((b) => b.belowFlip).filter((v) => v != null);
+  const regime = sides.length && sides.every((v) => v === true) ? 'below'
+    : sides.length && sides.every((v) => v === false) ? 'above' : 'split';
+
+  // Where the two independent sources land on the same price, within a tick band
+  // that is meaningful for NQ rather than an arbitrary tolerance.
+  const TOL = 25;
+  const mine = books.flatMap((b) => [
+    b.callWall && { price: b.callWall.price, what: `${b.title} call wall` },
+    b.putWall && { price: b.putWall.price, what: `${b.title} put wall` },
+    b.flip != null && { price: b.flip, what: `${b.title} gamma flip` },
+  ].filter(Boolean));
+  const theirs = (d.gamma?.available ? [...(d.gamma.above ?? []), ...(d.gamma.below ?? [])] : []);
+  // Every cross-source pair, nearest first. Reporting only the ones that clear
+  // the bar makes a near-miss indistinguishable from nothing in the book, and
+  // the distance is the informative part — so the closest pair is always shown
+  // and the threshold only decides what it gets called.
+  const pairs = mine.flatMap((m) => theirs.map((t) => ({
+    ...m, their: t.names?.[0] ?? 'level', theirPrice: t.value, gap: Math.abs(t.value - m.price),
+  }))).sort((a, b) => a.gap - b.gap);
+  const agree = pairs.filter((p) => p.gap <= TOL);
+  const closest = pairs[0] ?? null;
+
+  const flips = books.map((b) => b.flip).filter((f) => f != null);
+  const flipSpread = flips.length === 2 ? Math.abs(flips[0] - flips[1]) : null;
+
+  return `<div class="panel">
+    <h2>Open interest — computed from CBOE</h2>
+    <p class="hint">Every listed strike with its open interest and gamma, pulled once a day and kept.
+      This is the raw positioning, not someone's read of it — and it is the same material MenthorQ's
+      levels are built from, so the two can be checked against each other.</p>
+
+    <table>
+      <thead><tr><th style="text-align:left">Book</th><th>Open interest</th><th>Gamma flip</th>
+        <th>Call wall above</th><th>Put wall below</th></tr></thead>
+      <tbody>${books.map(row).join('')}</tbody>
+    </table>
+
+    ${regime === 'split' ? `<p class="hint" style="margin:10px 0 0">
+      <b>The two books put price on opposite sides of their flip.</b> There is no single regime to state — one
+      says hedging amplifies from here, the other says it damps. Neither reading earns any weight today.</p>`
+    : regime === 'below' ? `<p class="hint" style="margin:10px 0 0">
+      <b>Price is below the flip on both books — the negative-gamma side.</b> Hedging there runs with the move
+      rather than against it: dealers sell into weakness and buy into strength, which is the condition that
+      lets a range expand instead of getting pinned. It says nothing about direction, and it is a regime read
+      off an end-of-day book, not a live one.</p>`
+    : `<p class="hint" style="margin:10px 0 0">
+      <b>Price is above the flip on both books — the positive-gamma side.</b> Hedging leans against the move,
+      which damps range. That is the condition breakouts fail in, and it is worth knowing before sizing an
+      expansion trade.</p>`}
+
+    ${flipSpread != null && flipSpread > 200 ? `<p class="hint" style="margin:10px 0 0">
+      <b>The two books disagree on the flip by ${n0(flipSpread)} points.</b> The ETF and index books are
+      hedged by different desks and do not have to agree. Treat the flip as a wide zone today, not a line.</p>` : ''}
+
+    ${agree.length ? `<p class="hint" style="margin:10px 0 0">
+      <b>${agree.length} independent confirmation${agree.length === 1 ? '' : 's'}:</b>
+      ${agree.map((a) => `${a.what} at ${n0(a.price)} sits on MenthorQ's ${a.their} (${n1(a.theirPrice)}),
+        ${n0(a.gap)} point${Math.round(a.gap) === 1 ? '' : 's'} apart`).join('; ')}.
+      Two sources computed separately landing within ${TOL} points is the strongest read on this page.</p>`
+    : closest ? `<p class="hint" style="margin:10px 0 0">
+      <b>Nothing clears the ${TOL}-point bar.</b> The closest pair is ${closest.what} at ${n0(closest.price)}
+      against MenthorQ's ${closest.their} (${n1(closest.theirPrice)}) — <b>${n0(closest.gap)} points</b> apart.
+      ${closest.gap <= TOL * 1.5
+        ? 'That is a near miss rather than a contradiction: the two sources are looking at the same area but do '
+          + 'not pin the same price, so treat it as a zone and not a line.'
+        : 'The two sources are pointing at genuinely different prices today, so neither set of levels deserves '
+          + 'the weight a confirmed one would get.'}</p>`
+    : ''}
+
+    ${(() => {
+      const dec = (oi.qqq && !oi.qqq.unavailable ? oi.qqq.decay : oi.ndx?.decay);
+      if (!dec?.buckets?.length) return '';
+      const near = dec.buckets.filter((b) => b.bucket === '0dte' || b.bucket === '1d')
+        .reduce((a, b) => a + b.shareOfOi, 0);
+      return `
+      <h3 style="font-size:12.5px;margin:18px 0 6px">Delta decay — what expires, and when</h3>
+      <p class="hint">Options that finish out of the money bleed their delta to zero, and the hedge behind
+        that delta has to unwind. The unwind is mechanical and its timing is known in advance — which makes
+        it the one genuinely scheduled flow on this page.</p>
+      <table>
+        <thead><tr><th style="text-align:left">Expires</th><th>Open interest</th><th>Share of live book</th>
+          <th>Net delta</th></tr></thead>
+        <tbody>${dec.buckets.map((b) => `<tr>
+          <td style="text-align:left">${b.label}</td>
+          <td>${b.oi.toLocaleString()}</td>
+          <td class="${b.shareOfOi > 0.1 ? 'sig' : ''}">${pct(b.shareOfOi, 1)}</td>
+          <td>${(b.netDelta >= 0 ? '+' : '−') + Math.abs(b.netDelta / 1e6).toFixed(0)}M</td></tr>`).join('')}</tbody>
+      </table>
+      <p class="hint" style="margin:8px 0 0">${near > 0.12
+        ? `<b>${pct(near, 0)} of the live book expires within a day.</b> That is a large scheduled unwind. It says
+           when hedging flow arrives, not which way it pushes — that depends on where price sits relative to the
+           strikes, which the walls above describe.`
+        : `<b>${pct(near, 0)} of the live book expires within a day</b> — a small near-dated tail, so there is no
+           large scheduled unwind pending.`}</p>
+      ${dec.expiredOi > 0 ? `<p class="hint" style="margin:6px 0 0">${dec.expiredOi.toLocaleString()} contracts
+        in the file have already expired and are excluded — their hedges unwound before this snapshot.</p>` : ''}
+      <p class="prov" style="margin:6px 0 0">Net delta is exposure in underlying terms under the same
+        long-calls / short-puts convention as the gamma figures. True charm needs a pricing model and an
+        implied-vol surface; this measures the quantity exposed to decay, not the rate of it.</p>`;
+    })()}
+
+    ${(() => {
+      const c = oi.correlation;
+      if (!c || c.cor1m == null) return '';
+      const row = (label, v, sub) => `<tr><td style="text-align:left">${label}</td>
+        <td><b>${v == null ? '—' : v.toFixed(2)}</b></td>
+        <td style="text-align:left" class="muted">${sub}</td></tr>`;
+      return `
+      <h3 style="font-size:12.5px;margin:18px 0 6px">Implied correlation — the dispersion regime</h3>
+      <table>
+        <tbody>
+          ${row('COR1M', c.cor1m, 'What the option market prices for co-movement over the next month')}
+          ${row('COR3M', c.cor3m, 'Same, three months out')}
+          ${row('VIX1D', c.vix1d, 'One-day S&P implied volatility')}
+          ${row('VXN', c.vxn, 'Nasdaq-100 implied volatility — the one the expected move uses')}
+        </tbody>
+      </table>
+      <p class="hint" style="margin:8px 0 0">${c.inverted
+        ? '<b>One-month correlation is above three-month.</b> The market is pricing more co-movement near '
+          + 'term than far — stocks moving together is what a shock looks like, and index range tends to '
+          + 'come with it.'
+        : '<b>One-month correlation sits below three-month.</b> Near-term dispersion: the index is damped '
+          + 'relative to the stocks inside it, because their moves partly cancel. An index breakout has to '
+          + 'fight that, which is a reason a trigger can be touched and go nowhere.'}</p>
+      <p class="prov" style="margin:6px 0 0">${c.note}</p>`;
+    })()}
+
+    ${oi.qqq?.note ? `<p class="hint" style="margin:8px 0 0">${oi.qqq.note}</p>` : ''}
+    <p class="prov" style="margin:8px 0 0">${oi.source} · snapshot ${oi.date}${
+      oi.stale ? ` · <b>stale by ${oi.ageDays} day${oi.ageDays === 1 ? '' : 's'}</b> — ${oi.staleReason}` : ''}.
+      ${oi.caveats.join(' ')}</p>
+  </div>`;
+}
+
+/**
+ * Prior-session value area, drawn as the profile it actually is.
+ *
+ * The horizontal bars are time spent at each price. The shaded band is the 70%
+ * value area and the marked line is the point of control. The bracket levels are
+ * drawn on the same price scale, because the only question worth asking here is
+ * whether a trigger fires into value or away from it — a breakout into the
+ * middle of yesterday's agreed price is not a breakout.
+ */
+function auctionPanel(d) {
+  const a = d.meta?.auction;
+  if (!a?.available) {
+    return `<div class="panel"><h2>Value area — prior session</h2>
+      <p class="hint" style="margin:0">Unavailable — ${a?.reason ?? 'no intraday bars'}.</p></div>`;
+  }
+
+  const p = a.prior, orb = d.orb;
+  const W = 1000, H = 300, PAD_L = 70, PAD_R = 210, PAD_T = 16, PAD_B = 28;
+  const lo = Math.min(p.low, orb?.available ? orb.sellStop : p.low) - p.step;
+  const hi = Math.max(p.high, orb?.available ? orb.buyStop : p.high) + p.step;
+  const y = (v) => PAD_T + ((hi - v) / (hi - lo)) * (H - PAD_T - PAD_B);
+  const peak = Math.max(...p.buckets.map((b) => b.tpo), 1);
+  const barW = (t) => (t / peak) * (W - PAD_L - PAD_R);
+  const rowH = Math.max(2, (H - PAD_T - PAD_B) / ((hi - lo) / p.step) - 1);
+
+  const bars = p.buckets.map((b) => `
+    <rect x="${PAD_L}" y="${y(b.price) - rowH / 2}" width="${Math.max(1, barW(b.tpo))}" height="${rowH}"
+          fill="${b.isPoc ? 'var(--bar-flag)' : b.inValue ? 'var(--bar-plain)' : 'var(--text-muted)'}"
+          opacity="${b.isPoc ? 0.95 : b.inValue ? 0.55 : 0.22}">
+      <title>${n1(b.price)} · ${b.tpo} TPO${b.isPoc ? ' · point of control' : b.inValue ? ' · inside value' : ' · outside value'}</title>
+    </rect>`).join('');
+
+  // POC and a trigger can sit fifteen points apart, which is ten pixels here —
+  // close enough that the two labels print on top of each other. The line stays
+  // at its true price; only the text is nudged, and a leader connects the two so
+  // a shifted label can never be read as a shifted level.
+  const placed = [];
+  const mark = (v, label, color, dash = '') => {
+    if (v == null) return '';
+    const ly = y(v);
+    let ty = ly;
+    while (placed.some((q) => Math.abs(q - ty) < 13)) ty += 13;
+    placed.push(ty);
+    const lead = Math.abs(ty - ly) > 1
+      ? `<line x1="${W - PAD_R}" y1="${ly}" x2="${W - PAD_R + 7}" y2="${ty}" stroke="${color}"
+               stroke-width="1" opacity="0.5"/>` : '';
+    return `
+    <line x1="${PAD_L}" y1="${ly}" x2="${W - PAD_R}" y2="${ly}" stroke="${color}"
+          stroke-width="1.5" ${dash ? `stroke-dasharray="${dash}"` : ''}/>
+    ${lead}
+    <text x="${W - PAD_R + 10}" y="${ty + 4}" style="font-size:11px;font-weight:700;fill:${color}">${label} ${n1(v)}</text>`;
+  };
+
+  // Does the bracket fire into value or out of it? This is the whole reason the
+  // two are drawn on one scale.
+  const inValue = (v) => v != null && v >= p.val && v <= p.vah;
+  const buyInside = orb?.available && inValue(orb.buyStop);
+  const sellInside = orb?.available && inValue(orb.sellStop);
+
+  return `<div class="panel">
+    <h2>Value area — prior session</h2>
+    <p class="hint">Time spent at each price on ${dayName(p.date)}, in ${p.step}-point buckets. The shaded
+      band holds ${pct(p.valueAreaPct, 1)} of it. Bracket levels are on the same scale.</p>
+
+    <svg viewBox="0 0 ${W} ${H}" role="img"
+         aria-label="Prior session time-at-price profile with value area, point of control and today's bracket levels">
+      <rect x="${PAD_L}" y="${y(p.vah)}" width="${W - PAD_L - PAD_R}" height="${Math.max(1, y(p.val) - y(p.vah))}"
+            fill="var(--bar-plain)" opacity="0.10"/>
+      ${bars}
+      ${mark(p.vah, 'VAH', 'var(--text-secondary)', '4 3')}
+      ${mark(p.poc, 'POC', 'var(--bar-flag)')}
+      ${mark(p.val, 'VAL', 'var(--text-secondary)', '4 3')}
+      ${orb?.available ? mark(orb.buyStop, 'long trigger', 'var(--trade-entry)') : ''}
+      ${orb?.available ? mark(orb.sellStop, 'short trigger', 'var(--trade-stop)') : ''}
+    </svg>
+
+    <table style="margin-top:10px">
+      <thead><tr><th style="text-align:left">Level</th><th>Price</th><th style="text-align:left">What it is</th></tr></thead>
+      <tbody>
+        <tr><td style="text-align:left"><b>POC</b></td><td>${n1(p.poc)}</td>
+          <td style="text-align:left">Most time spent here. The price the auction kept returning to.</td></tr>
+        <tr><td style="text-align:left">VAH</td><td>${n1(p.vah)}</td>
+          <td style="text-align:left">Top of value. Above it, yesterday's participants were not agreeing.</td></tr>
+        <tr><td style="text-align:left">VAL</td><td>${n1(p.val)}</td>
+          <td style="text-align:left">Bottom of value.</td></tr>
+        ${p.ib ? `<tr><td style="text-align:left">Initial balance</td>
+          <td>${n1(p.ib.low)} – ${n1(p.ib.high)}</td>
+          <td style="text-align:left">First hour's range. The reference the rest of the session extends from.</td></tr>` : ''}
+      </tbody>
+    </table>
+
+    ${buyInside || sellInside ? `<p class="hint" style="margin:10px 0 0">
+      <b>${buyInside && sellInside ? 'Both triggers sit' : buyInside ? 'The long trigger sits' : 'The short trigger sits'}
+      inside prior value.</b> A break into the band where yesterday's auction spent
+      ${pct(p.valueAreaPct, 0)} of its time is firing into agreement, not away from it. Auction theory expects
+      rotation there rather than continuation — which does not make the trigger invalid, but it does mean the
+      cleaner side of this bracket is the one pointing out of value.</p>`
+    : orb?.available ? `<p class="hint" style="margin:10px 0 0">Both triggers sit outside prior value — the
+      bracket is positioned where yesterday's auction found no agreement, which is where an expansion has room
+      to run rather than rotate.</p>` : ''}
+
+    ${a.openVsValue ? `<p class="hint" style="margin:8px 0 0"><b>Today opened
+      ${a.openVsValue.state} value${a.openVsValue.state !== 'inside' ? ` by ${n0(a.openVsValue.distanceToValue)} points` : ''}.</b>
+      ${a.openVsValue.note}</p>` : ''}
+
+    <p class="prov" style="margin:8px 0 0">${a.method}. ${a.caveats.join(' ')}</p>
+  </div>`;
+}
+
+/**
+ * The expiry calendar, and whether it actually does anything.
+ *
+ * Every date here is derived from exchange rules, so the calendar half never
+ * fails. The measured half exists because "OPEX means volatility" is repeated
+ * constantly and, on this sample, is backwards — expiry days are *quieter*. A
+ * calendar that showed the dates without that number would be teaching the
+ * wrong lesson, which is the one thing this page is built not to do.
+ */
+function expiryPanel(d) {
+  const x = d.expiry;
+  if (!x?.calendar?.length) return '';
+
+  const next = x.calendar.filter((e) => !e.past).slice(0, 4);
+  const eff = x.effect;
+
+  const KIND = {
+    'triple-witching': 'var(--status-warning)',
+    'monthly-opex': 'var(--trade-entry)',
+    'vix-expiry': 'var(--text-secondary)',
+    'month-end': 'var(--text-muted)',
+  };
+
+  const cards = next.map((e) => `
+    <div class="tile" style="border-left:3px solid ${KIND[e.kind] ?? 'var(--border)'}">
+      <div class="label">${e.label}</div>
+      <div class="value">${e.isToday ? 'today' : `${e.days}d`}</div>
+      <div class="note">${dayName(e.date)}</div>
+    </div>`).join('');
+
+  // The bar used everywhere else on this page. Two sigma is suggestive; the
+  // Harvey-Liu threshold for a claimed edge is three, and neither cohort reaches
+  // it. Saying so here is the whole point of measuring.
+  const verdict = (c) => {
+    if (!c) return '<span class="muted">too few sessions</span>';
+    const z = Math.abs(c.z);
+    return z >= 3 ? '<b class="sig">clears the t≥3 bar</b>'
+      : z >= 2 ? '<span class="muted">2σ, below the t≥3 bar</span>'
+      : '<span class="muted">nothing</span>';
+  };
+
+  const rows = eff?.available ? [
+    ['Expiry day', eff.cohorts.opexDay],
+    ['Expiry week', eff.cohorts.opexWeek],
+    ['Triple witching', eff.cohorts.quarterly],
+    ['VIX expiry', eff.cohorts.vixExpiry],
+  ].map(([label, c]) => `<tr>
+      <td style="text-align:left">${label}</td>
+      <td>${c ? c.n.toLocaleString() : '—'}</td>
+      <td>${c ? c.meanRangePct.toFixed(1) + '%' : '—'}</td>
+      <td class="${c && c.vsBaseline < 0 ? '' : 'muted'}">${c ? (c.vsBaseline >= 0 ? '+' : '') + c.vsBaseline.toFixed(1) + 'pp' : '—'}</td>
+      <td>${c ? c.z.toFixed(2) : '—'}</td>
+      <td style="text-align:left">${verdict(c)}</td>
+    </tr>`).join('') : '';
+
+  return `<div class="panel">
+    <h2>Expiry calendar — and what it measures</h2>
+    <p class="hint">Dates are derived from exchange rules, not fetched, so this cannot go stale.
+      VIX settles 30 days before <em>next</em> month's third Friday, which is why it never lines up
+      with equity expiry.</p>
+    <div class="grid">${cards}</div>
+
+    ${next.map((e) => `<p class="hint" style="margin:10px 0 0"><b>${e.label} · ${dayName(e.date)}.</b> ${e.note}</p>`).join('')}
+
+    ${eff?.available ? `
+      <h3 style="font-size:12.5px;margin:18px 0 6px">Does it actually change the range?</h3>
+      <p class="hint">Range as a percentage of the trailing 20-session average, over
+        ${eff.sessions.toLocaleString()} sessions. Baseline is
+        <b>${eff.baseline.meanRangePct.toFixed(1)}%</b>.</p>
+      <table>
+        <thead><tr><th style="text-align:left">Cohort</th><th>n</th><th>Mean range</th>
+          <th>vs baseline</th><th>z</th><th style="text-align:left">Verdict</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p class="hint" style="margin:10px 0 0"><b>This runs the opposite way to the folklore.</b>
+        Expiry days and expiry weeks are <em>quieter</em> than an ordinary session, not wilder — which is
+        what pinning predicts: open interest concentrated at nearby strikes pulls price toward them and
+        damps the range. Triple witching, the day with the biggest reputation, measures nothing at all
+        (n=${eff.cohorts.quarterly?.n ?? '—'}, z=${eff.cohorts.quarterly?.z.toFixed(2) ?? '—'}).</p>
+      <p class="hint" style="margin:8px 0 0"><b>Do not size off this.</b> Two cohorts clear 2σ, neither
+        clears the t≥3 bar this page uses to call something an edge, and four cohorts were tested — which
+        raises the bar further. Treat it as a reason to expect compression on those days, not as a trade.</p>`
+      : `<p class="hint" style="margin:10px 0 0">Effect not measured — ${eff?.reason ?? 'no deep history'}.</p>`}
+  </div>`;
+}
+
+/**
+ * The master chart: price on the vertical, the session clock on the horizontal.
+ *
+ * Levels are prices and events are times, so they only coexist on a 2-D plane.
+ * Everything else has been stripped — no histogram, no cumulative curve, no
+ * action lane. Those live on their own panels. What remains is the three things
+ * you asked for and nothing competing with them:
+ *
+ *   the Crabel expectation   a horizontal band, the range the session should cover
+ *   the levels              horizontal hairlines, labelled at the right edge
+ *   the events              vertical lines at their scheduled minute
+ */
+function masterChart(d, side) {
+  const orb = d.orb, pj = d.projection, em = d.expectedMove, g = d.gamma, L = d.last;
+  if (!orb?.available || !pj?.available) return '<p class="hint">Not enough data to plot.</p>';
+
+  const W = 1000, H = 470;
+  const PAD_L = 58, PAD_R = 210, PAD_T = 34, PAD_B = 34;
+  const T0 = toMin('09:30'), T1 = toMin('16:00');
+  const ref = orb.reference;
+
+  const long = side === 'long';
+  const entryPx = long ? orb.buyStop : orb.sellStop;
+  const exitPx = long ? orb.sellStop : orb.buyStop;
+  const targets = (long ? g?.above : g?.below) ?? [];
+  const isTarget = (v) => targets.some((t) => Math.abs(t.value - v) < 0.01);
+
+  // Vertical extent: the Crabel range plus whatever levels fall near it. The
+  // sigma band is deliberately allowed to overflow rather than dominate.
+  const lvls = (g?.map ?? []).filter((l) => Math.abs(l.value - ref) <= pj.p75 * 0.75);
+  const pts = [ref + pj.median / 2, ref - pj.median / 2, entryPx, exitPx, L.high, L.low,
+    ...lvls.map((l) => l.value)];
+  const lo = Math.min(...pts), hi = Math.max(...pts);
+  const pad = (hi - lo) * 0.09;
+  const y = (v) => PAD_T + (H - PAD_T - PAD_B) * (1 - (v - (lo - pad)) / ((hi + pad) - (lo - pad)));
+  const x = (m) => PAD_L + ((Math.min(Math.max(m, T0), T1) - T0) / (T1 - T0)) * (W - PAD_L - PAD_R);
+
+  // Price grid on a round step near span/5 — enough to read a price off, not
+  // enough to become texture.
+  const span = (hi + pad) - (lo - pad);
+  const step = [10, 25, 50, 100, 150, 200, 250, 500, 1000]
+    .reduce((best, s) => Math.abs(s - span / 5) < Math.abs(best - span / 5) ? s : best, 1000);
+  const grid = [];
+  for (let p = Math.ceil((lo - pad) / step) * step; p <= hi + pad; p += step) {
+    grid.push(`<line x1="${PAD_L}" y1="${y(p)}" x2="${W - PAD_R}" y2="${y(p)}" stroke="var(--gridline)" stroke-width="1"/>
+      <text class="axis" x="${PAD_L - 8}" y="${y(p) + 3.5}" text-anchor="end" style="font-size:10px">${n0(p)}</text>`);
+  }
+
+  const hours = [];
+  for (let m = T0 + 30; m < T1; m += 60) {
+    hours.push(`<text class="axis" x="${x(m)}" y="${H - 12}" text-anchor="middle" style="font-size:10px">${hhmmCt(m)}</text>`);
+  }
+
+  // 1 — the Crabel expectation.
+  const crabel = `
+    <rect x="${PAD_L}" y="${y(ref + pj.median / 2)}" width="${W - PAD_R - PAD_L}"
+          height="${y(ref - pj.median / 2) - y(ref + pj.median / 2)}"
+          fill="var(--bar-plain)" opacity="0.13"/>
+    <text class="axis" x="${PAD_L + 8}" y="${y(ref + pj.median / 2) + 13}" style="font-size:10.5px">
+      expected range ${n0(pj.median)} pts</text>`;
+
+  // 2 — the levels. Only targets and the majors earn a label.
+  const majors = /Gamma Wall|Call Resistance|Put Support|HVL/i;
+  // Seed the label ledger with the two order lines. They are drawn last and must
+  // never be overwritten, so level labels lay themselves out around them rather
+  // than colliding — which is what put "Put Support" on top of "EXIT".
+  const rows = [y(entryPx), y(exitPx)];
+  const levels = lvls.map((l) => {
+    const tgt = isTarget(l.value);
+    const major = majors.test(l.name);
+    const show = tgt || major;
+    let label = '';
+    if (show) {
+      let yy = y(l.value);
+      while (rows.some((r) => Math.abs(r - yy) < 12)) yy += 12;
+      rows.push(yy);
+      label = `<text class="axis" x="${W - PAD_R + 10}" y="${yy + 3.5}"
+        style="font-size:10.5px;${tgt ? 'fill:var(--trade-target)' : 'fill:var(--text-secondary)'}">${tgt ? '▸ ' : ''}${l.name}</text>`;
+    }
+    return `<line x1="${PAD_L}" y1="${y(l.value)}" x2="${W - PAD_R}" y2="${y(l.value)}"
+              stroke="${tgt ? 'var(--trade-target)' : 'var(--text-muted)'}"
+              stroke-width="1" opacity="${tgt ? 0.65 : major ? 0.4 : 0.16}"/>${label}`;
+  }).join('');
+
+  // 3 — the events, on the clock.
+  const evs = (d.calendar?.upcoming ?? [])
+    .map((e) => ({ ...e, m: toMin(e.etTime) }))
+    .filter((e) => e.m >= T0 && e.m <= T1);
+  // Only high-impact releases are named. The rest are faint ticks — five
+  // clustered labels around 10:00 became an unreadable pile, and the low-impact
+  // ones were never going to change what you do. Their times stay on the
+  // Evidence tab in full.
+  const evLabelled = [];
+  const events = evs.map((e) => {
+    const high = e.impact === 'High';
+    let label = '';
+    if (high) {
+      let lx = x(e.m) + 5;
+      while (evLabelled.some((p) => Math.abs(p - lx) < 150)) lx += 14;
+      evLabelled.push(lx);
+      label = `<text class="axis" x="${x(e.m) + 5}" y="${PAD_T - 22 + (evLabelled.length - 1) * 12}"
+        style="font-size:10px;fill:var(--status-warning);font-weight:700">${e.ctTime ?? ct(e.etTime)} ${e.title}</text>`;
+    }
+    return `<line x1="${x(e.m)}" y1="${PAD_T}" x2="${x(e.m)}" y2="${H - PAD_B}"
+              stroke="${high ? 'var(--status-warning)' : 'var(--text-muted)'}"
+              stroke-width="${high ? 1.5 : 1}" opacity="${high ? 0.55 : 0.14}"/>${label}`;
+  }).join('');
+  const quiet = evs.filter((e) => e.impact !== 'High').length;
+
+  // The two lines you act on, drawn last so nothing crosses them.
+  const orderLine = (v, label, color) => `
+    <line x1="${PAD_L}" y1="${y(v)}" x2="${W - PAD_R}" y2="${y(v)}" stroke="${color}" stroke-width="2"/>
+    <text x="${W - PAD_R + 10}" y="${y(v) + 4}" style="font-size:11px;font-weight:700;fill:${color}">${label} ${n1(v)}</text>`;
+
+  const nowM = etNowMinutes();
+  const nowIn = nowM >= T0 && nowM < T1 && !zoneSchedule().closed;
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="img"
+      aria-label="Session plan: expected range, levels and scheduled events on one price and time chart">
+    ${grid.join('')}
+    ${crabel}
+    ${levels}
+    ${events}
+    <line x1="${PAD_L}" y1="${y(ref)}" x2="${W - PAD_R}" y2="${y(ref)}" stroke="var(--baseline)" stroke-width="1"/>
+    ${orderLine(exitPx, long ? 'EXIT' : 'EXIT', 'var(--trade-stop)')}
+    ${orderLine(entryPx, long ? 'BUY ABOVE' : 'SELL BELOW', 'var(--trade-entry)')}
+    ${nowIn ? `<line x1="${x(nowM)}" y1="${PAD_T}" x2="${x(nowM)}" y2="${H - PAD_B}"
+        stroke="var(--status-good)" stroke-width="2"/>` : ''}
+    ${hours.join('')}
+    <line x1="${PAD_L}" y1="${H - PAD_B}" x2="${W - PAD_R}" y2="${H - PAD_B}" stroke="var(--baseline)" stroke-width="1"/>
+    ${quiet ? `<text class="axis" x="${W - PAD_R + 10}" y="${H - PAD_B - 2}"
+      style="font-size:9.5px">${quiet} lower-impact<tspan x="${W - PAD_R + 10}" dy="11">release${quiet === 1 ? '' : 's'} unlabelled</tspan></text>` : ''}
+  </svg>`;
+}
+
+/**
+ * Measured expectancy of the trigger this bracket uses, against the alternatives
+ * — net of friction, which every earlier version of this dashboard ignored.
+ *
+ * The bracket above is a fixed Crabel Stretch. On 2,636 sessions that construction
+ * fails a t>=3 hurdle once realistic MNQ costs are applied, and conditioning it on
+ * NR7 makes it worse. A volatility-scaled trigger on the same data clears the bar
+ * out-of-sample. That is uncomfortable to print above a bracket built the other
+ * way, which is exactly why it belongs here.
+ */
+function edgePanel(d) {
+  const e = d.meta?.edge, band = d.meta?.band, cost = d.meta?.costPts;
+  if (!e) return '';
+
+  const row = (v) => {
+    const isCurrent = v.key === 'nr7c';
+    const t = v.tLow;
+    const verdict = t >= e.hurdle ? 'clears' : t >= 2 ? 'weak' : 'no edge';
+    const cls = t >= e.hurdle ? 'ev-clears' : t >= 2 ? 'ev-weak' : 'ev-none';
+    return `<tr class="${isCurrent ? 'ev-now' : ''}">
+      <td style="text-align:left">${v.label}${isCurrent ? ' <span class="ev-tag">today</span>' : ''}${
+        v.oos ? ' <span class="muted" style="font-size:11px">out-of-sample</span>' : ''}</td>
+      <td>${v.n.toLocaleString()}</td>
+      <td>+${v.expLow.toFixed(3)}R</td>
+      <td>${v.tLow.toFixed(2)}</td>
+      <td>${v.expHigh != null ? `+${v.expHigh.toFixed(3)}R` : '—'}</td>
+      <td class="${cls}">${verdict}</td>
+    </tr>`;
+  };
+
+  return `<div class="panel">
+    <h2>Measured edge — net of costs</h2>
+    <p class="hint">${e.sample}. Entry on first touch, stop at 2× the trigger distance, exit at the close.
+      Friction is charged at <b>${cost.low} pts ($${(cost.low * 2).toFixed(2)})</b> and
+      <b>${cost.high} pts ($${(cost.high * 2).toFixed(2)})</b> per round trip on MNQ.
+      The hurdle is <b>t ≥ ${e.hurdle}</b> — Harvey–Liu's t≥3 for a new factor, adjusted for the ~21 variants tested.</p>
+
+    <table>
+      <thead><tr><th style="text-align:left">Trigger</th><th>n</th>
+        <th>exp @ ${cost.low}pt</th><th>t</th><th>exp @ ${cost.high}pt</th><th>verdict</th></tr></thead>
+      <tbody>${e.variants.map(row).join('')}</tbody>
+    </table>
+
+    <p class="hint" style="margin:14px 0 0"><b>Read this honestly.</b> The bracket above uses the fixed
+      Stretch, and today's NR7 conditioning is the weakest row in the table — <b>t = 0.67, indistinguishable
+      from zero</b>. The volatility-scaled trigger is the only construction that clears the hurdle, and it
+      does so out-of-sample across 11 of 11 years. The bracket has not been rebuilt on it yet; that is a
+      change to how you trade, not a display setting.</p>
+
+    ${band?.available ? `
+      <h3 style="font-size:12.5px;margin:18px 0 6px">What the volatility-scaled trigger looks like today</h3>
+      <p class="hint">Rebuilt live from the same ${band.lookback}-session window at ${band.mult}×. Unlike the
+        Stretch — one distance fixed before the bell — it widens as the session ages:</p>
+      <table><tbody>
+        <tr><td>08:35 CT</td><td><b>${band.at0935 != null ? n0(band.at0935) : '—'}</b> pts from the open</td>
+            <td class="muted">vs Stretch ${n0(d.nextStretch)} pts, fixed all day</td></tr>
+        <tr><td>09:00 CT</td><td><b>${band.at1000 != null ? n0(band.at1000) : '—'}</b> pts</td><td></td></tr>
+        <tr><td>09:30 CT</td><td><b>${band.at1030 != null ? n0(band.at1030) : '—'}</b> pts</td><td></td></tr>
+        <tr><td>11:00 CT</td><td><b>${band.at1200 != null ? n0(band.at1200) : '—'}</b> pts</td><td></td></tr>
+      </tbody></table>` : ''}
+
+    <p class="hint" style="margin:14px 0 0">Caveats that travel with these numbers: the sample is the
+      NAS100 index as a stand-in for NQ; stops are assumed to fill at their price, which real ones do not;
+      and the 0.75× band triggers on roughly 95% of sessions, so it is closer to trading most days with an
+      adaptive trigger than to a selective setup.</p>
+  </div>`;
+}
+
+/** One side of the trade: what it is in plain terms, how good its shape is, targets. */
+function sidePanel(d, dir, active) {
+  const orb = d.orb, risk = 2 * d.nextStretch, riskUsd = risk * MNQ_PT;
+  const entry = dir === 'long' ? orb.buyStop : orb.sellStop;
+  const exit = dir === 'long' ? orb.sellStop : orb.buyStop;
+  const c = sideConfidence(d, dir);
+
+  const meter = c ? `
+    <div class="conf">
+      <div class="conf-top">
+        <span class="conf-band conf-${c.band}">${c.band}</span>
+        <span class="conf-score">${c.score}<span class="conf-of">/100</span></span>
+      </div>
+      <div class="conf-track"><div class="conf-fill conf-${c.band}" style="width:${c.score}%"></div></div>
+      <ul class="conf-why">${c.reasons.map((r) => `<li>${r}</li>`).join('')}</ul>
+    </div>` : '';
+
+  return `<div class="panel ${active ? 'panel-active' : 'panel-dim'}">
+    <h2><span class="dir-dot ${dir}"></span>${dir === 'long' ? 'Buy a break upward' : 'Sell a break downward'}</h2>
+    <p class="sideline">
+      <span class="sl-act">${dir === 'long' ? 'Buy above' : 'Sell below'}</span>
+      <span class="sl-px">${n1(entry)}</span>
+    </p>
+    <p class="hint" style="margin:0 0 12px">Exit if it trades back to <b>${n1(exit)}</b> —
+      ${n0(risk)} points against you, $${riskUsd.toFixed(0)} per MNQ contract.</p>
+    ${meter}
+    ${targetTable(d, dir)}
+  </div>`;
+}
+
+function renderTrade(d) {
+  const pane = $('#pane-trade');
+  if (!d || d.error) { pane.innerHTML = '<div class="panel"><p class="hint">No data.</p></div>'; return; }
+
+  const orb = d.orb, g = d.gamma, pj = d.projection, gr = setupGrade(d);
+  if (!orb?.available) { pane.innerHTML = '<div class="panel"><p class="hint">No bracket available.</p></div>'; return; }
+
+  const risk = 2 * d.nextStretch;
+  const riskUsd = risk * MNQ_PT;
+  const firstLongR = g?.available && g.firstAboveBuy ? (g.firstAboveBuy.value - orb.buyStop) / risk : null;
+  const firstShortR = g?.available && g.firstBelowSell ? (orb.sellStop - g.firstBelowSell.value) / risk : null;
+  const entry = tradeSide === 'long' ? orb.buyStop : orb.sellStop;
+  const stop = tradeSide === 'long' ? orb.sellStop : orb.buyStop;
+
+  pane.innerHTML = `
+    <div class="panel">
+      <div class="grade grade-${gr.level}"><span class="g-icon">${gr.icon}</span><span class="g-label">${gr.label}</span></div>
+      <h2 class="headline">${d.verdict} — ${orb.live ? "today's" : "next"} session</h2>
+      <!-- The grade's own sentence belongs here, not only in the brief. Without it
+           a "no setup" badge sits above two large trigger tiles with nothing saying
+           the bracket below is the baseline rather than an edge — and the tiles are
+           what the eye lands on. -->
+      <p class="synth"><b>${gr.detail}</b></p>
+      <p class="synth">${orb.referenceLabel}. ${synthesis(d)}</p>
+
+      <div class="tradebar">
+        <div class="tb up"><span class="tb-k">Go long above</span>
+          <span class="tb-v">${n1(orb.buyStop)}</span><span class="tb-s">${n0(d.nextStretch)} pts over the open</span></div>
+        <div class="tb dn"><span class="tb-k">Go short below</span>
+          <span class="tb-v">${n1(orb.sellStop)}</span><span class="tb-s">${n0(d.nextStretch)} pts under the open</span></div>
+        <div class="tb"><span class="tb-k">Risk if wrong</span>
+          <span class="tb-v">${n0(risk)} <span class="tb-u">pts</span></span><span class="tb-s">$${riskUsd.toFixed(0)} per MNQ · this is 1R</span></div>
+        <div class="tb"><span class="tb-k">Range expected</span>
+          <span class="tb-v">${n0(pj.median)} <span class="tb-u">pts</span></span><span class="tb-s">${n0(pj.p25)}–${n0(pj.p75)} middle half</span></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="ladder-head">
+        <h2 style="margin:0">The session</h2>
+        <div class="sideswitch" role="group" aria-label="Trade direction">
+          <button type="button" data-side="long" aria-pressed="${tradeSide === 'long'}">Long</button>
+          <button type="button" data-side="short" aria-pressed="${tradeSide === 'short'}">Short</button>
+        </div>
+      </div>
+      <p class="hint">Price up the side, the session clock along the bottom. The shaded band is the range
+        Crabel expects; horizontal lines are levels; vertical lines are scheduled releases.</p>
+      ${masterChart(d, tradeSide)}
+    </div>
+
+    <div class="two">
+      ${sidePanel(d, 'long', tradeSide === 'long')}
+      ${sidePanel(d, 'short', tradeSide === 'short')}
+    </div>
+
+    ${edgePanel(d)}
+
+    <div class="panel">
+      <h2>What the rating means</h2>
+      <p class="hint" style="margin:0">It scores the <b>shape</b> of each side — how much of the projected
+        day you must capture to make 1R, how much clear ground sits in front of the entry, and how many
+        levels are in the way. <b>It says nothing about which way price will go.</b> No cohort in
+        ${d.stats?.sampleSessions?.toLocaleString() ?? '—'} sessions shows a directional edge, so a
+        confidence number that leaned long or short would be inventing information. Both sides can be
+        poor at once, and today they nearly are.</p>
+    </div>
+
+    <div class="panel">
+      <h2>The day, left to right</h2>
+      <div class="keyrow">
+        <span class="key"><i class="sw-hot"></i>Window where extremes cluster</span>
+        <span class="key"><i class="sw-cold"></i>Quiet window</span>
+        <span class="key"><i class="sw-high"></i>High-impact release</span>
+        <span class="key"><i class="sw-med"></i>Medium / low</span>
+        ${zoneSchedule().closed ? '' : '<span class="key"><i class="sw-now"></i>Now</span>'}
+      </div>
+      <p class="hint">Five lanes on one clock, 01:00–15:00 CT, from
+        ${(d.meta?.zones?.sessions ?? 0).toLocaleString()} sessions: scheduled releases, the named windows,
+        where the day's extremes actually form, how much of the day is already decided by each moment,
+        and what you should be doing. Amber shading is the blast radius around a high-impact print.</p>
+      ${dayRoadmap(d)}
+    </div>
+
+    <div class="panel">
+      <h2>What has to be true</h2>
+      <ul class="checks">
+        <li><b>Rebracket off the 8:30 CT open.</b> ${orb.live ? 'Live session — the bracket above already uses it.'
+          : 'These levels are built off the last RTH close and will move.'}</li>
+        <li><b>First signal only.</b> ${pct(d.stats?.baseline?.expansionRate ?? 0)} of ordinary sessions beat the
+          20-day average range; this setup does it ${pct((d.stats?.current?.insufficient ? d.stats?.nearestUsable : d.stats?.current)?.expansionRate ?? 0)}
+          of the time — expansion is relative to the setup day, not to a big session.</li>
+        <li><b>Direction is not predicted.</b> No cohort in ${d.stats?.sampleSessions?.toLocaleString() ?? '—'} sessions
+          clears two standard errors of the market's own drift. Both orders rest; the market picks.</li>
+        <li><b>Timing.</b> ${pct(d.meta?.zones?.findings?.earlyExtremeRate ?? 0)} of sessions set their extreme before
+          09:30 CT, and the opening 30 minutes runs
+          ${(d.meta?.zones?.zones?.[0]?.concentration ?? 0).toFixed(1)}× chance. Late entries are a different trade.</li>
+        ${g?.available && g.inside.length ? `<li><b>${g.inside.length} gamma levels sit inside the bracket.</b>
+          Price transacts through them before either order fills — the bracket is not firing into clean space.</li>` : ''}
+        ${g?.available && g.stale0dteCount ? `<li><b>${g.stale0dteCount} levels are expired 0DTE.</b>
+          Excluded here, but re-pull after the open or you are trading Friday's walls.</li>` : ''}
+        ${d.calendar?.nextHigh ? `<li><b>${d.calendar.nextHigh.title}</b> at ${d.calendar.nextHigh.ctTime ?? ct(d.calendar.nextHigh.etTime)} CT
+          (${d.calendar.nextHigh.window.replace('-', ' ')}) — a bracket touched after it is the release talking,
+          not the pattern.</li>` : ''}
+      </ul>
+    </div>`;
+
+  // Toggling direction only recolours; it never refetches.
+  pane.querySelectorAll('.sideswitch button').forEach((b) => {
+    b.addEventListener('click', () => {
+      tradeSide = b.dataset.side;
+      localStorage.setItem('oceans-crabel-side', tradeSide);
+      renderTrade(lastData);
+    });
+  });
+}
+
+/**
+ * The session brief: one self-contained document tying every source together.
+ *
+ * This is the print target as well as a tab, so it carries its own context —
+ * a reader who has never seen the dashboard, human or model, should be able to
+ * follow it without the other tabs. Every claim states its sample and source,
+ * because a brief that hides its provenance is just an opinion.
+ */
+/**
+ * Watch — the scheduled things that can override the pattern, and the headlines
+ * that might explain a move.
+ *
+ * No sentiment scoring and no directional inference from news. Nothing in this
+ * tool has shown that works, and a headline dressed as a signal is worse than
+ * no headline. This is context and a clock.
+ */
+function renderWatch(d) {
+  const pane = $('#pane-watch');
+  if (!d || d.error) { pane.innerHTML = '<div class="panel"><p class="hint">No data.</p></div>'; return; }
+  const w = d.watch;
+  if (!w) { pane.innerHTML = '<div class="panel"><p class="hint">Watch data unavailable.</p></div>'; return; }
+
+  const evRow = (e) => `<tr>
+    <td class="w-when">${until(e.epoch)}</td>
+    <td><b>${e.ctTime ?? ct(e.etTime)}</b> <span class="muted">CT</span></td>
+    <td style="text-align:left">${e.title}</td>
+    <td style="text-align:left" class="${e.impact === 'High' ? 'sig' : 'muted'}">${e.impact}</td>
+    ${e.forecast ? `<td class="muted">fc ${e.forecast}</td>` : '<td></td>'}
+  </tr>`;
+
+  // Day-by-day for the whole week, so "what's on Wednesday" is answerable
+  // without waiting for Wednesday.
+  const weekBlock = w.byDay?.length ? `
+    <div class="panel">
+      <h2>${w.weekIsNext ? 'The week ahead' : 'This week'}</h2>
+      <p class="hint">All times Central. ${w.weekIsNext
+        ? 'The week just closed, so this is the one that opens Monday — nothing here is today.'
+        : 'Today is highlighted.'}${
+        w.macroCovered === false ? ' <b>The macro feed has not published it yet</b>, so empty days mean unknown, not quiet.' : ''}</p>
+      <table>
+        <thead><tr><th style="text-align:left">Day</th><th style="text-align:left">Macro</th>
+          <th style="text-align:left">Earnings that move NQ</th></tr></thead>
+        <tbody>${w.byDay.map((d2) => {
+          const isToday = d2.date === w.today;
+          const macro = d2.high.length
+            ? d2.high.map((e) => `<b>${e.ctTime ?? ct(e.etTime)}</b> ${e.title}`).join('<br>')
+            : d2.events.length ? `<span class="muted">${d2.events.length} lower-impact</span>`
+            : '<span class="muted">—</span>';
+          const earn = d2.earnings.length
+            ? d2.earnings.map((e) => `<b class="${e.tier === 'mega' ? 'sig' : ''}">${e.symbol}</b> <span class="muted">${e.when}</span>`).join('<br>')
+            : '<span class="muted">—</span>';
+          return `<tr class="${isToday ? 'ev-now' : ''}">
+            <td style="text-align:left"><b>${dayName(d2.date)}</b>${isToday ? ' <span class="ev-tag">today</span>' : ''}</td>
+            <td style="text-align:left">${macro}</td>
+            <td style="text-align:left">${earn}</td></tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>` : '';
+
+  const earnBlock = w.earnings?.available ? `
+    <div class="panel">
+      <h2>Earnings — Nasdaq heavyweights</h2>
+      <p class="hint">${w.earnings.source} · <b>${w.earnings.totalReports.toLocaleString()}</b> US companies
+        report this week; these are the ones whose weight can move the index on their own.
+        ${w.earnings.stale ? '<b>Cached copy.</b>' : ''}</p>
+      ${(w.earnings.mega.length || w.earnings.large.length)
+        ? `<table>
+             <thead><tr><th style="text-align:left">Symbol</th><th style="text-align:left">Company</th>
+               <th style="text-align:left">Day</th><th style="text-align:left">Session</th></tr></thead>
+             <tbody>${[...w.earnings.mega, ...w.earnings.large].map((e) => `<tr>
+               <td style="text-align:left"><b class="${e.tier === 'mega' ? 'sig' : ''}">${e.symbol}</b>${
+                 e.tier === 'mega' ? ' <span class="ev-tag">mega-cap</span>' : ''}</td>
+               <td style="text-align:left" class="muted">${e.name.slice(0, 40)}</td>
+               <td style="text-align:left">${dayName(e.date)}</td>
+               <td style="text-align:left" class="muted">${e.when}</td></tr>`).join('')}
+             </tbody>
+           </table>
+           <p class="hint" style="margin:10px 0 0">A mega-cap reporting after the close sets the gap you
+             open into the next morning — that is a rebracket, not a continuation.</p>`
+        : `<p class="hint" style="margin:0">No index-heavyweight reports scheduled this week.
+             ${w.earnings.totalReports.toLocaleString()} smaller companies do report; none carry enough
+             weight to move NQ on their own.</p>`}
+    </div>` : `
+    <div class="panel"><h2>Earnings</h2>
+      <p class="hint" style="margin:0">Unavailable — ${w.earnings?.reason ?? 'no source'}</p></div>`;
+
+  const group = (title, list, note) => `
+    <div class="panel">
+      <h2>${title}</h2>
+      ${list.length
+        ? `<p class="hint">${note}</p><table><tbody>${list.map(evRow).join('')}</tbody></table>`
+        : `<p class="hint" style="margin:0">Nothing scheduled. ${note}</p>`}
+    </div>`;
+
+  const cal = w.calendar;
+  const headline = w.highImpact.length
+    ? `<div class="panel">
+         <h2>The one to plan around</h2>
+         <div class="ev-hero ev-${w.highImpact[0].window}">
+           <div class="ev-when"><span class="ev-count">${until(w.highImpact[0].epoch)}</span>
+             <span class="ev-time">${w.highImpact[0].ctTime ?? ct(w.highImpact[0].etTime)} CT · ${w.highImpact[0].window.replace('-', ' ')}</span></div>
+           <div class="ev-what"><span class="ev-impact">High impact</span>
+             <span class="ev-title">${w.highImpact[0].title}</span>
+             ${w.highImpact[0].forecast ? `<span class="ev-meta">forecast ${w.highImpact[0].forecast}${
+               w.highImpact[0].previous ? ` · previous ${w.highImpact[0].previous}` : ''}</span>` : ''}</div>
+         </div>
+         ${w.highImpact[0].window === 'in-session'
+           ? `<p class="hint" style="margin:12px 0 0"><b>Lands mid-session.</b> A bracket touched after it is
+              the release moving price, not the pattern — a different trade with different odds.</p>`
+           : `<p class="hint" style="margin:12px 0 0">Lands before the bell, so it prices into the 8:30 CT open.
+              Recompute the bracket off that open.</p>`}
+       </div>`
+    : `<div class="panel"><h2>The one to plan around</h2>
+         <p class="hint" style="margin:0">No high-impact release scheduled${
+           cal?.exhausted ? " in this week's feed — ForexFactory publishes a current-week file only, so it "
+             + 'empties out until the new one lands. That is a feed limit, not a clear calendar.' : '.'}</p>
+       </div>`;
+
+  const news = w.news.available
+    ? `<div class="panel">
+         <h2>Headlines · last 72 hours</h2>
+         <p class="hint">Yahoo, on QQQ and ^NDX${w.news.stale ? ` · <b>cached</b> — ${w.news.note}` : ''}.
+           Listed for context only — <b>nothing here is scored or turned into a signal.</b></p>
+         <ul class="newslist">${w.news.items.map((n) => `
+           <li><span class="n-age">${n.ageMinutes < 60 ? `${n.ageMinutes}m` : `${Math.round(n.ageMinutes / 60)}h`}</span>
+             <span class="n-title">${n.link ? `<a href="${n.link}" target="_blank" rel="noopener">${n.title}</a>` : n.title}</span>
+             <span class="n-pub">${n.publisher}</span></li>`).join('')}
+         </ul>
+       </div>`
+    : `<div class="panel"><h2>Headlines</h2>
+         <p class="hint" style="margin:0">Unavailable — ${w.news.reason}</p></div>`;
+
+  pane.innerHTML = `
+    ${headline}
+    ${weekBlock}
+    ${earnBlock}
+    ${group('Before the open', w.beforeOpen, 'Lands before 08:30 CT — priced into the open, so rebracket after it.')}
+    ${group('During the session', w.inSession, 'Lands between 08:30 and 15:00 CT, while your orders are live.')}
+    ${group('After the close', w.afterClose, 'After 15:00 CT — sets up tomorrow, not today.')}
+    ${news}
+    <div class="panel">
+      <h2>Not covered here</h2>
+      <ul class="checks">${w.notCovered.map((t) => `<li>${t}</li>`).join('')}</ul>
+      <p class="hint" style="margin:10px 0 0">Listing the gaps because an events page that looks complete
+        is more dangerous than one that admits what it misses.</p>
+    </div>`;
+}
+
+function renderBrief(d) {
+  const pane = $('#pane-brief');
+  if (!d || d.error) { pane.innerHTML = '<div class="panel"><p class="hint">No data.</p></div>'; return; }
+
+  const orb = d.orb, g = d.gamma, pj = d.projection, st = d.stats, z = d.meta?.zones, cal = d.calendar;
+  const gr = setupGrade(d);
+  const q = st?.available ? (st.current.insufficient ? st.nearestUsable : st.current) : null;
+  const risk = 2 * d.nextStretch;
+  const riskUsd = risk * MNQ_PT;
+
+  const conf = { long: sideConfidence(d, 'long'), short: sideConfidence(d, 'short') };
+  const rTable = (dir) => {
+    const entry = dir === 'long' ? orb.buyStop : orb.sellStop;
+    const list = ((dir === 'long' ? g?.above : g?.below) ?? []).slice(0, 4);
+    if (!list.length) return '<em>no levels within the projection</em>';
+    return list.map((l) => {
+      const move = Math.abs(l.value - entry);
+      return `${n1(l.value)} (${n0(move)} pts, ${(move / risk).toFixed(2)}R) — ${l.names.slice(0, 2).join(' / ')}`;
+    }).join('<br>');
+  };
+
+  const ev = (cal?.upcoming ?? []).filter((e) => e.impact === 'High').slice(0, 3);
+
+  pane.innerHTML = `
+    <article class="brief">
+      <header class="brief-head">
+        <div>
+          <h1>Session brief — ${orb.live ? d.currentSession?.date ?? 'today' : 'next session'}</h1>
+          <p class="brief-meta">MNQ / NQ · generated ${new Date().toLocaleString('en-US', { hour12: false })} ·
+            last complete RTH session ${d.last.date}</p>
+        </div>
+        <div class="brief-grade grade-${gr.level}">${gr.icon} ${gr.label}</div>
+      </header>
+
+      <section>
+        <h2>1 · The call</h2>
+        <p class="lead">${d.verdict}. ${gr.detail}</p>
+        <p>${synthesis(d)}</p>
+        <p class="prov">Setup flags from ${d.sessionCount} RTH sessions of NQ=F 5-minute bars.
+          Base rates from ${st?.sampleSessions?.toLocaleString() ?? '—'} sessions, ${st?.source ?? '—'}.</p>
+      </section>
+
+      <section>
+        <h2>2 · The orders</h2>
+        <table class="briefkv">
+          <tr><td>Buy a break up</td><td><b>above ${n1(orb.buyStop)}</b></td>
+              <td class="prov">${n0(d.nextStretch)} pts over the reference · ${orb.referenceLabel}</td></tr>
+          <tr><td>Sell a break down</td><td><b>below ${n1(orb.sellStop)}</b></td>
+              <td class="prov">${n0(d.nextStretch)} pts under the reference ${n1(orb.reference)}</td></tr>
+          <tr><td>Exit if wrong</td><td><b>${n0(risk)}</b> pts · $${riskUsd.toFixed(0)}</td>
+              <td class="prov">at the opposite level; this is 1R, MNQ at $2.00/pt</td></tr>
+          <tr><td>Shape, long</td><td><b>${conf.long?.band ?? '—'}</b> ${conf.long ? `(${conf.long.score}/100)` : ''}</td>
+              <td class="prov">${conf.long?.reasons.join(' · ') ?? ''}</td></tr>
+          <tr><td>Shape, short</td><td><b>${conf.short?.band ?? '—'}</b> ${conf.short ? `(${conf.short.score}/100)` : ''}</td>
+              <td class="prov">${conf.short?.reasons.join(' · ') ?? ''}</td></tr>
+          <tr><td>Size</td><td><b>${Math.floor(500 / riskUsd)}</b> @ $500 · <b>${Math.floor(1000 / riskUsd)}</b> @ $1,000</td>
+              <td class="prov">floor(budget ÷ risk); ignores firm limits</td></tr>
+        </table>
+        <p>Both orders wait; you take whichever price reaches first, then cancel the other or leave it as
+          the exit. Close before the bell.
+          ${orb.live ? '' : 'These are built off the last RTH close — <b>recompute off the 8:30 CT open before placing them</b>.'}
+          The shape ratings above score the trade's geometry, <b>not its direction</b> — no cohort in
+          ${st?.sampleSessions?.toLocaleString() ?? '—'} sessions shows a directional edge.</p>
+      </section>
+
+      <section>
+        <h2>3 · The price map</h2>
+        <p class="prov">Long view. Bands: options-implied ±1σ, projected range, and ${d.last.date}'s actual
+          range. Aqua lines marked ▸ are targets; grey lines are levels that are not targets for a long.</p>
+        ${priceLadder(d, 'long')}
+      </section>
+
+      <section>
+        <h2>4 · Targets</h2>
+        <div class="two">
+          <div><h3>Long — break ${n1(orb.buyStop)}</h3>${targetTable(d, 'long')}</div>
+          <div><h3>Short — break ${n1(orb.sellStop)}</h3>${targetTable(d, 'short')}</div>
+        </div>
+        <p class="prov">R is measured against the ${n0(risk)}-pt bracket-to-bracket stop; dollars are MNQ at
+          $${CONTRACT.pointValue.toFixed(2)}/point. Levels are MenthorQ gamma, blindspot and swing levels for
+          ${g?.ticker ?? 'NQ'}, end-of-day vintage only.</p>
+      </section>
+
+      <section>
+        <h2>5 · Positioning</h2>
+        ${g?.available ? `
+          <p>Clear air is <b>${n0(g.airLong)} pts</b> above the buy stop and <b>${n0(g.airShort)} pts</b> below the
+            sell stop — ${pct(g.airLongPctOfProjection, 0)} and ${pct(g.airShortPctOfProjection, 0)} of the
+            ${n0(pj.median)}-pt projection respectively.</p>
+          <p><b>${g.inside.length} levels sit inside the ${n0(orb.buyStop - orb.sellStop)}-pt bracket</b>${
+            g.inside.length ? `, all of them: ${g.inside.map((l) => `${n1(l.value)} ${l.names[0]}`).join(', ')}` : ''}.
+            Price transacts through these before either order fills.</p>
+          ${g.stale0dteCount ? `<p class="warn-line">${g.stale0dteCount} levels are 0DTE from a prior session and
+            expire with their options — excluded here, but re-pull after the open.</p>` : ''}`
+          : `<p>Gamma levels unavailable — ${g?.reason ?? 'no data'}.</p>`}
+      </section>
+
+      <section>
+        <h2>6 · The day</h2>
+        ${dayRoadmap(d)}
+        <p>${z?.available ? `<b>${pct(z.findings.earlyExtremeRate, 0)}</b> of sessions set their high or low before
+          09:30 CT. The opening 30 minutes runs <b>${(z.zones[0]?.concentration ?? 0).toFixed(1)}× chance</b> of holding
+          an extreme; the midday trough runs ${(Math.min(...z.zones.map((x) => x.concentration))).toFixed(1)}×.` : ''}
+          ${ev.length ? `<br><b>High-impact releases:</b> ${ev.map((e) => `${e.title} ${e.ctTime ?? ct(e.etTime)} CT (${e.window.replace('-', ' ')})`).join('; ')}.` : ''}</p>
+      </section>
+
+      <section>
+        <h2>7 · Recent sessions</h2>
+        <p class="prov">Last ${d.rows.length} RTH sessions. NR7 sessions are highlighted; the outlined slot on
+          the right is where the next session's range is projected to land.</p>
+        ${barChart(d.rows, d.projection)}
+        <table style="margin-top:14px">
+          <thead><tr><th style="text-align:left">Date</th><th>Open</th><th>High</th><th>Low</th><th>Close</th>
+            <th>Range</th><th>CLV</th><th style="text-align:left">Flags</th></tr></thead>
+          <tbody>${d.rows.slice().reverse().slice(0, 10).map((r) => {
+            const f2 = [];
+            if (r.insideDay === true) f2.push('ID');
+            if (r.nr4 === true) f2.push('NR4');
+            if (r.nr7 === true) f2.push('NR7');
+            if (r.nr20 === true) f2.push('NR20');
+            if (r.twoBarNr20 === true) f2.push('2BarNR20');
+            return `<tr><td>${r.date}</td><td>${n1(r.open)}</td><td>${n1(r.high)}</td><td>${n1(r.low)}</td>
+              <td>${n1(r.close)}</td><td>${n1(r.range)}</td>
+              <td>${r.clv == null ? '—' : Math.round(r.clv * 100) + '%'}</td>
+              <td style="text-align:left">${f2.join(' / ') || '—'}</td></tr>`;
+          }).join('')}</tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>8 · Where extremes form</h2>
+        <p class="prov">${z?.sessions?.toLocaleString() ?? '—'} sessions, ${z?.sampleSource ?? ''}.
+          Above the line are session highs, below are lows.</p>
+        ${z?.available ? zoneProfileSvg(z) : ''}
+      </section>
+
+      <section>
+        <h2>9 · Evidence</h2>
+        <table class="briefkv">
+          <tr><td>Next-session range</td><td><b>${q ? q.medianRangeMultiple.toFixed(2) : '—'}×</b> the setup day</td>
+              <td class="prov">median after ${q?.label ?? '—'}, n=${q?.n ?? '—'}; baseline ${st?.baseline?.medianRangeMultiple?.toFixed(2) ?? '—'}×</td></tr>
+          <tr><td>Projected range</td><td><b>${n0(pj.median)}</b> pts</td>
+              <td class="prov">${n0(pj.p25)}–${n0(pj.p75)} middle half</td></tr>
+          <tr><td>Expected move</td><td><b>±${n0(d.expectedMove?.points ?? 0)}</b> pts</td>
+              <td class="prov">VXN ${d.expectedMove?.iv?.toFixed(2) ?? '—'}, ${ordinal(Math.round((d.expectedMove?.ivPercentile ?? 0) * 100))} pct of 5y</td></tr>
+          <tr><td>Beats 20-session avg</td><td><b>${pct(q?.expansionRate ?? 0, 0)}</b></td>
+              <td class="prov">vs ${pct(st?.baseline?.expansionRate ?? 0, 0)} baseline — below it</td></tr>
+          <tr><td>Direction</td><td><b>no edge</b></td>
+              <td class="prov">no cohort clears 2 s.e. of the ${pct(st?.baseline?.upCloseRate ?? 0, 0)} drift</td></tr>
+        </table>
+      </section>
+
+      <section>
+        <h2>10 · What would make this wrong</h2>
+        <ul>
+          <li>The bracket is provisional until the 8:30 CT open exists. Every level here moves with it.</li>
+          <li>Expansion is measured <b>relative to the setup day</b>. A ${q ? q.medianRangeMultiple.toFixed(2) : '—'}× session
+            off a ${n0(d.last.range)}-pt day is still <b>below</b> the 20-session average more often than not.</li>
+          <li>Direction is not predicted by anything in ${st?.sampleSessions?.toLocaleString() ?? '—'} sessions. Both orders rest.</li>
+          <li>Gamma levels come from an undocumented MenthorQ endpoint; 0DTE levels expire nightly.</li>
+          <li>Statistics use NAS100 as a stand-in for NQ — correlation 0.9996 on RTH range, NR flags 36/36,
+            but it is a proxy. Live prices are real NQ.</li>
+        </ul>
+      </section>
+    </article>`;
+}
+
+function render(d) {
+  if (d.error) {
+    app.innerHTML = `<div class="source err"><span class="icon">✕</span><div><b>No data</b><span class="why">${d.error}</span></div></div>`;
+    $('#sub').textContent = '';
+    return;
+  }
+
+  const L = d.last, rows = d.rows;
+  const rth = d.source === 'RTH';
+  const g = setupGrade(d);
+
+  $('#sub').textContent = `${d.meta.instrument ?? ''} · ${d.sessionCount} sessions · last ${L.date}`;
+
+  const orb = d.orb.available
+    ? `<div class="orb">
+         <div class="leg"><div class="k">Buy stop</div><div class="v">${n1(d.orb.buyStop)}</div></div>
+         <div class="leg"><div class="k">Sell stop</div><div class="v">${n1(d.orb.sellStop)}</div></div>
+       </div>
+       <p class="hint" style="margin:14px 0 0">Bracketed off ${n1(d.orb.reference)} — ${d.orb.referenceLabel}</p>`
+    : `<p class="hint" style="margin:0">Unavailable — ${d.orb.reason}</p>`;
+
+  app.innerHTML = `
+    ${sourceBanner(d)}
+    ${touchBanner(d)}
+
+    <div class="verdict">
+      <div class="grade grade-${g.level}">
+        <span class="g-icon" aria-hidden="true">${g.icon}</span>
+        <span class="g-label">${g.label}</span>
+      </div>
+      <div class="text">${d.verdict}</div>
+      <p class="synth">${g.detail}</p>
+      <p class="synth">${synthesis(d)}</p>
+      <div class="chips">
+        ${chip('Inside day', L.insideDay)}
+        ${chip('NR4', L.nr4)}
+        ${chip('NR7', L.nr7)}
+        ${chip('NR20', L.nr20)}
+        ${chip('ID/NR4', L.idNr4)}
+        ${chip('2BarNR20', L.twoBarNr20)}
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>${d.orb.live ? "Today's bracket" : "Monday's bracket"}</h2>
+      <p class="hint">${d.orb.available ? `Reference ± Stretch — ${d.orb.referenceLabel}` : ''}</p>
+      <div class="orb-head">
+        ${d.orb.available ? `
+          <div class="stop buy"><span class="k">Buy stop</span><span class="v">${n1(d.orb.buyStop)}</span></div>
+          <div class="stop sell"><span class="k">Sell stop</span><span class="v">${n1(d.orb.sellStop)}</span></div>
+          <div class="stop hero-stretch"><span class="k">Stretch</span><span class="v">${n1(d.nextStretch)}</span>
+            <span class="sub">$${(d.nextStretch * 2).toFixed(2)} / MNQ</span></div>
+        ` : `<p class="hint">Unavailable — ${d.orb.reason}</p>`}
+      </div>
+      ${priceMap(d)}
+      ${orderPlan(d)}
+      ${d.stretchVsEm ? `<p class="hint" style="margin:10px 0 0">
+        The bracket sits <b>${Math.round(d.stretchVsEm.ratio * 100)}%</b> of the way to a 1σ move —
+        ${d.stretchVsEm.ratio < 0.5
+          ? 'well inside the expected range, so a touch is likely and carries little information on its own.'
+          : d.stretchVsEm.ratio < 0.85
+            ? 'mid-range; a touch is a moderate signal.'
+            : 'near the edge of the expected range; a touch is a genuine outlier move.'}
+        ±1σ means about 68% of sessions finish inside it — not a boundary.</p>` : ''}
+    </div>
+
+    <div class="grid">
+      <div class="tile">
+        <div class="label">Projected range — next session</div>
+        ${d.projection.available
+          ? `<div class="value">${n0(d.projection.median)}</div>
+             <div class="note">${n0(d.projection.p25)}–${n0(d.projection.p75)} middle half · ${d.projection.medianMultiple.toFixed(2)}× after ${d.projection.cohort}</div>`
+          : `<div class="value na">unavailable</div><div class="note">${d.projection.reason}</div>`}
+      </div>
+      <div class="tile">
+        <div class="label">Expected move — 1 session</div>
+        ${d.expectedMove.available
+          ? `<div class="value">${n0(d.expectedMove.points)}</div>
+             <div class="note">±${d.expectedMove.pct.toFixed(2)}% · VXN ${d.expectedMove.iv.toFixed(2)}${
+               d.expectedMove.ivPercentile != null
+                 ? ` · ${ordinal(Math.round(d.expectedMove.ivPercentile * 100))} pct of 5y, ${d.expectedMove.ivRegime}`
+                 : ''}</div>`
+          : `<div class="value na">unavailable</div><div class="note">${d.expectedMove.reason}</div>`}
+      </div>
+      <div class="tile">
+        <div class="label">${L.date.slice(5)} range vs 20-session avg</div>
+        <div class="value">${L.rangePctOf20d == null ? '—' : Math.round(L.rangePctOf20d) + '%'}</div>
+        <div class="note">${n0(L.range)} pts · closed ${L.clv == null ? '—' : Math.round(L.clv * 100) + '%'} of range${
+          L.clv == null ? '' : L.clv > 0.7 ? ' (strong)' : L.clv < 0.3 ? ' (weak)' : ''}</div>
+      </div>
+      <div class="tile">
+        <div class="label">Consecutive NR7</div>
+        <div class="value">${d.nr7Streak}</div>
+        <div class="note">${nr7StreakNote(d)}</div>
+      </div>
+    </div>
+
+    ${tradeBreakdown(d)}
+
+    ${auctionPanel(d)}
+
+    ${oiPanel(d)}
+
+    ${expiryPanel(d)}
+
+    ${zonePanel(d.meta.zones)}
+
+    ${eventsPanel(d.calendar)}
+
+    <div class="panel">
+      <h2>Range compression — last ${rows.length} sessions</h2>
+      <div class="legend">
+        <span><i style="background:var(--bar-flag)"></i>NR7 (narrowest of 7)</span>
+        <span><i style="background:var(--bar-plain)"></i>Other sessions</span>
+        <span><i class="ghost"></i>Projected next</span>
+      </div>
+      ${barChart(rows, d.projection)}
+    </div>
+
+    ${statsPanel(d.stats, d.source)}
+
+    <details class="panel">
+      <summary>Session detail — all ${rows.length} sessions</summary>
+      <table style="margin-top:12px">
+        <thead><tr>
+          <th>Date</th><th>Open</th><th>High</th><th>Low</th><th>Close</th>
+          <th>Range</th><th>Stretch</th><th>CLV</th><th style="text-align:left">Flags</th>
+        </tr></thead>
+        <tbody>${rows.slice().reverse().map(r => {
+          const f = [];
+          if (r.insideDay === true) f.push('ID');
+          if (r.nr4 === true) f.push('NR4');
+          if (r.nr7 === true) f.push('NR7');
+          if (r.nr20 === true) f.push('NR20');
+          if (r.twoBarNr20 === true) f.push('2BarNR20');
+          return `<tr>
+            <td>${r.date}</td><td>${n1(r.open)}</td><td>${n1(r.high)}</td><td>${n1(r.low)}</td><td>${n1(r.close)}</td>
+            <td>${n1(r.range)}</td><td class="${r.stretch == null ? 'muted' : ''}">${n1(r.stretch)}</td>
+            <td>${r.clv == null ? '—' : Math.round(r.clv * 100) + '%'}</td>
+            <td style="text-align:left" class="flagcell">${f.join(' / ') || '<span class="muted">—</span>'}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </details>`;
+
+  wireTooltip(rows);
+  wireProfile(d.meta.zones?.profile ?? []);
+}
+
+/** Hover layer for the intraday profile. Hit areas span the full column height. */
+function wireProfile(prof) {
+  const svg = $('#profile');
+  if (!svg) return;
+  svg.querySelectorAll('.hitzone').forEach((el) => {
+    el.style.cursor = 'crosshair';
+    el.addEventListener('mousemove', (e) => {
+      const p = prof[+el.dataset.b];
+      if (!p) return;
+      tip.innerHTML = `<b>${ctRange(p.from, p.to)} CT</b>` +
+        `Highs formed here: ${pct(p.highPct, 1)}<br>Lows formed here: ${pct(p.lowPct, 1)}<br>` +
+        `<span style="color:var(--text-muted)">${p.concentration.toFixed(2)}× vs an even spread</span>`;
+      tip.style.opacity = 1;
+      tip.style.left = Math.min(e.clientX + 14, innerWidth - 244) + 'px';
+      tip.style.top = (e.clientY + 14) + 'px';
+    });
+    el.addEventListener('mouseleave', () => { tip.style.opacity = 0; });
+  });
+}
+
+function wireTooltip(rows) {
+  const svg = $('#chart');
+  if (!svg) return;
+  svg.querySelectorAll('path').forEach((p) => {
+    p.style.cursor = 'crosshair';
+    p.addEventListener('mousemove', (e) => {
+      const r = rows[+p.dataset.i];
+      const f = [];
+      if (r.insideDay === true) f.push('ID');
+      if (r.nr4 === true) f.push('NR4');
+      if (r.nr7 === true) f.push('NR7');
+      if (r.twoBarNr20 === true) f.push('2BarNR20');
+      tip.innerHTML = `<b>${r.date}</b>Range ${n1(r.range)} pts<br>O ${n1(r.open)} · C ${n1(r.close)}<br>${f.length ? f.join(' / ') : 'no contraction flag'}`;
+      tip.style.opacity = 1;
+      tip.style.left = Math.min(e.clientX + 14, innerWidth - 244) + 'px';
+      tip.style.top = (e.clientY + 14) + 'px';
+    });
+    p.addEventListener('mouseleave', () => { tip.style.opacity = 0; });
+  });
+}
+
+// ---- Bracket alerts -------------------------------------------------------
+//
+// These are CONFIRMATIONS, not triggers. The underlying data is 1-minute bars
+// polled every 5 seconds, so a touch is reported up to about a minute after it
+// happens. Useful for "did it go?", useless as an execution signal — your
+// platform's own alert is the one to trade off.
+
+const FIRED_KEY = 'oceans-crabel-fired';
+const fired = new Set(JSON.parse(localStorage.getItem(FIRED_KEY) || '[]'));
+
+function remember(key) {
+  fired.add(key);
+  localStorage.setItem(FIRED_KEY, JSON.stringify([...fired].slice(-40)));
+}
+
+function notify(title, body) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try { new Notification(title, { body, tag: title }); } catch { /* non-fatal */ }
+}
+
+function checkTouches(d) {
+  const t = d.touch;
+  if (!t || !d.orb?.available) return;
+
+  for (const [side, hit, level] of [
+    ['buy', t.buy, d.orb.buyStop],
+    ['sell', t.sell, d.orb.sellStop],
+  ]) {
+    const key = `${t.sessionDate}:${side}`;
+    if (!hit || fired.has(key)) continue;
+    remember(key);
+    notify(
+      `${side === 'buy' ? 'Buy' : 'Sell'} bracket touched — ${n1(level)}`,
+      `${t.sessionDate} session reached the ${side} stop as of the ${t.asOf} bar.`
+    );
+  }
+}
+
+function touchBanner(d) {
+  const t = d.touch;
+  if (!t) return '';
+  if (!t.buy && !t.sell) {
+    return `<div class="touch idle"><span class="icon">○</span>
+      <div>Neither bracket touched yet — session running, checked to the ${t.asOf} bar.</div></div>`;
+  }
+  const which = t.buy && t.sell ? 'Both brackets' : t.buy ? 'Buy bracket' : 'Sell bracket';
+  return `<div class="touch hit"><span class="icon">●</span>
+    <div><b>${which} touched</b> — as of the ${t.asOf} bar.
+    ${t.buy && t.sell ? 'Both sides went, so the first fill was the trade and the other was noise.' : ''}</div></div>`;
+}
+
+async function enableAlerts() {
+  const btn = $('#alertbtn');
+  if (!('Notification' in window)) { btn.textContent = 'alerts unsupported'; btn.disabled = true; return; }
+  const p = await Notification.requestPermission();
+  paintAlertBtn(p);
+  if (p === 'granted') notify("Ocean's Crabel", 'Bracket alerts are on for this browser.');
+}
+
+function paintAlertBtn(perm) {
+  const btn = $('#alertbtn');
+  if (!btn) return;
+  const p = perm ?? (('Notification' in window) ? Notification.permission : 'unsupported');
+  btn.textContent = p === 'granted' ? 'alerts on' : p === 'denied' ? 'alerts blocked' : 'enable alerts';
+  btn.classList.toggle('on', p === 'granted');
+  btn.disabled = p === 'denied' || p === 'unsupported';
+}
+
+// Re-rendering identical HTML every 5 seconds throws away scroll position and
+// any open <details>. Only touch the DOM when the payload actually changed.
+let lastPayload = null;
+
+async function tick() {
+  try {
+    const raw = await (await fetch('/api/data', { cache: 'no-store' })).text();
+    $('#updated').textContent = 'updated ' + new Date().toLocaleTimeString('en-US', { hour12: false });
+
+    if (raw === lastPayload) return;
+    lastPayload = raw;
+
+    const d = JSON.parse(raw);
+
+    // This tab was served from one build; the server is now on another. Say so
+    // rather than letting an old dashboard look current.
+    if (d.buildTime && window.__BUILD__ && d.buildTime !== window.__BUILD__) {
+      const bar = $('#stalebar');
+      bar.hidden = false;
+      bar.className = 'stalebar';
+      bar.innerHTML = `<span class="icon">↻</span>
+        <div><b>This page is out of date.</b> The dashboard has been rebuilt since you loaded it —
+        reload to pick up the changes.</div>
+        <button type="button" id="reloadbtn">Reload</button>`;
+      $('#reloadbtn').addEventListener('click', () => location.reload());
+    }
+
+    lastData = d;
+    tickClock();
+    if (!d.error) checkTouches(d);
+    render(d);
+    renderTrade(d.error ? null : d);
+    renderWatch(d.error ? null : d);
+    renderBrief(d.error ? null : d);
+    renderCheat(d.error ? null : d);
+    applyTab();
+    $('#dot').className = 'dot' + (d.error ? ' stale' : '');
+  } catch (e) {
+    $('#updated').textContent = 'connection lost';
+    $('#dot').className = 'dot stale';
+  }
+}
+
+// The clocks tick on their own so they stay live without re-rendering the page.
+let lastData = null;
+function tickClock() {
+  const c = sessionClock(lastData);
+  const el = $('#clock');
+  el.textContent = c.text;
+  el.style.color = c.live ? 'var(--status-good)' : '';
+
+  const strip = $('#zonestrip');
+  if (strip) strip.innerHTML = zoneStripHtml(lastData?.meta?.zones);
+}
+
+$('#alertbtn').addEventListener('click', enableAlerts);
+paintAlertBtn();
+
+// The PDF is rendered server-side by headless Edge and takes a few seconds, so
+// the button says so rather than appearing to do nothing.
+$('#pdfbtn').addEventListener('click', () => {
+  const b = $('#pdfbtn');
+  const label = b.textContent;
+  b.classList.add('busy');
+  b.textContent = 'rendering…';
+  setTimeout(() => { b.classList.remove('busy'); b.textContent = label; }, 12000);
+});
+
+// ?print=1 is how the PDF renderer asks for the brief alone.
+if (new URLSearchParams(location.search).get('print') === '1') {
+  activeTab = 'brief';
+  document.documentElement.dataset.theme = 'light';
+}
+
+applyTab();
+tick();
+tickClock();
+setInterval(tick, 5000);
+setInterval(tickClock, 1000);   // countdowns are only useful if they actually count
+</script>
+</body>
+</html>

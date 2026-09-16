@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>test</AssemblyName>
+    <RootNamespace>OceansAnchor.Tests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <!--
+    The clock, the session scan, the profile maths, the zone builder, both absorption paths, the
+    state machine and the log writer are all free of ATAS types precisely so they can be
+    exercised here, on synthetic bars, where the arithmetic can actually be checked. Only the
+    rendering, the settings and the platform plumbing live on the other side of that line.
+  -->
+  <ItemGroup>
+    <Compile Include="../AnchorClock.cs" />
+    <Compile Include="../AnchorSession.cs" />
+    <Compile Include="../AnchorModels.cs" />
+    <Compile Include="../AnchorProfile.cs" />
+    <Compile Include="../AnchorZones.cs" />
+    <Compile Include="../AnchorAbsorption.cs" />
+    <Compile Include="../AnchorState.cs" />
+    <Compile Include="../AnchorLog.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Platforms>AnyCPU</Platforms>
+    <AlgoType>Strategy</AlgoType>
+    <AssemblyName>directionAbsorptionScalpStrategy</AssemblyName>
+    <RootNamespace>directionAbsorptionScalpStrategy</RootNamespace>
+    <StartAction>Program</StartAction>
+    <!-- CONFIRM against whatever's under C:\Quantower\TradingPlatform\ on the machine actually
+         building; Quantower auto-updates itself (already moved once, mid-session, from
+         v1.146.18 to v1.147.3; see Quantower-storage/CLAUDE.md). -->
+    <StartProgram>C:\Quantower\TradingPlatform\v1.147.3\Console.StarterNew.exe</StartProgram>
+    <StartArguments>--address 127.0.0.1 --port 62743</StartArguments>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+     <OutputPath>C:\Quantower\Settings\Scripts\Strategies\directionAbsorptionScalpStrategy</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+     <OutputPath>C:\Quantower\Settings\Scripts\Strategies\directionAbsorptionScalpStrategy</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>C:\Quantower\TradingPlatform\v1.147.3\bin\TradingPlatform.BusinessLayer.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <!--
+      Compiled IN, not referenced: exactly the reasoning in
+      OrbIx.Quantower.Indicator.csproj's own comment, which this repeats because it applies
+      here with equal force. Quantower loads scripts with Assembly.Load(bytes) and caches
+      them keyed by assembly FullName: a shared OrbIx.Core.dll would present the identical
+      identity "OrbIx.Core, Version=1.0.0.0" from two different script folders (this
+      strategy's, and ORB-IX's), and whichever loads first wins the shared cache key for
+      BOTH; a defect already measured once in this codebase for the indicator itself.
+
+      TRADE-OFF, STATED: this strategy's copy of OrbIx.Core is a frozen snapshot as of its
+      own last build. A later fix or tuning change to the real OrbIx.Core does not reach
+      this strategy until it is rebuilt.
+    -->
+    <Compile Include="..\..\..\Indicators\ORB-IX\src\OrbIx.Core\**\*.cs"
+             Exclude="..\..\..\Indicators\ORB-IX\src\OrbIx.Core\bin\**;..\..\..\Indicators\ORB-IX\src\OrbIx.Core\obj\**" />
+
+    <!--
+      Ocean's Anchor's absorption math and zone state machine (AnchorModels/AnchorState/
+      AnchorAbsorption/AnchorZones/AnchorProfile/AnchorSession/AnchorClock/AnchorLog):
+      platform-free by the same discipline OrbIx.Core follows (confirmed: no ATAS types in
+      any of them), ported here from a friend's ATAS indicator suite at Ported/. Only
+      AnchorModels.cs (Zone/TestSide/SignalState/AbsorptionEvent), AnchorState.cs
+      (SignalEngine/ZoneMaintenance/SignalGate) and AnchorAbsorption.cs (TapeAbsorption/
+      DisplacementWatch/ClusterAbsorption) are actually used by this strategy; this
+      strategy builds its OWN Zone objects from OrbIx.Core's HhLlEngine segments rather than
+      porting AnchorProfile/AnchorZones' footprint-based HVN zone BUILDER (ZoneBuilder itself
+      is unused dead code here, kept only because ZoneMaintenance lives in the same file and
+      references types AnchorProfile.cs declares). A full footprint-driven zone detector is
+      its own large port and would hit the same historical-volume-analysis refusal already
+      documented for this Quantower connector (see OrbIx CLAUDE.md). AnchorSession/AnchorClock
+      (Houston-time RTH windows, a Friday-suppression "personal rule") and AnchorLog (CSV
+      calibration) are also unused here for the same "compile the clean tree, unused parts are
+      harmless" reason OrbIx.Core's own whole-tree include already relies on.
+    -->
+    <Compile Include="..\..\..\Ported\src\oceans-anchor\Anchor*.cs" />
+  </ItemGroup>
+</Project>

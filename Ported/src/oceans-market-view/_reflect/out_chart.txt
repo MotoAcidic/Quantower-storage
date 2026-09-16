@@ -1,0 +1,117 @@
+--- ATAS.Indicators.IChartContainer   [ATAS.Indicators] ---
+    P  Decimal High
+    P  Decimal Low
+    P  Decimal Step
+    P  Int32 PriceLevelsCount
+    P  Decimal PriceRowHeight
+    P  Decimal BarsWidth
+    P  Decimal BarSpacing
+    P  Int32 GetVisibleBarsCount
+    P  Int32 FirstVisibleBarNumber
+    P  Int32 LastVisibleBarNumber
+    P  Int32 TotalBars
+    M  abstract Int32 GetYByPrice(Decimal price, Boolean isStartOfPriceLevel)
+    M  abstract Decimal GetPriceByY(Int32 y)
+    M  abstract Int32 GetXByBarNumber(Int32 i)
+    M  abstract Int32 GetXByBar(Int32 bar, Boolean isStartOfBar)
+    M  abstract Void SetCustomBarsSpacing(Nullable`1 value)
+    M  abstract Void SetCustomBarsWidth(Decimal value, Boolean freezeValue)
+  : interface IContainer
+    P  System.Drawing.Rectangle Region
+
+--- OFT.Rendering.Tools.RenderPen   [OFT.Rendering] ---
+    P  System.Drawing.Color Color
+    P  RenderAdjustableArrowCap CustomEndCap
+    P  RenderAdjustableArrowCap CustomStartCap
+    P  Single[] DashPattern
+    P  DashStyle DashStyle
+    P  Single Width
+    M  virtual Boolean Equals(RenderPen other)
+    M  virtual Boolean Equals(Object obj)
+    M  virtual Int32 GetHashCode()
+    C  .ctor(System.Drawing.Color color)
+    C  .ctor(System.Drawing.Color color, Single width)
+    C  .ctor(System.Drawing.Color color, DashStyle dashStyle)
+    C  .ctor(System.Drawing.Color color, Single width, DashStyle dashStyle)
+  : interface IEquatable`1
+    M  abstract Boolean Equals(RenderPen other)
+
+--- OFT.Rendering.Tools.RenderFont   [OFT.Rendering] ---
+    P  Boolean Bold
+    P  String FontFamily
+    P  Boolean Italic
+    P  Single Size
+    P  FontStyle Style
+    P  GraphicsUnit Unit
+    M  virtual Boolean Equals(RenderFont other)
+    M  virtual Boolean Equals(Object obj)
+    M  virtual Int32 GetHashCode()
+    M  virtual String ToString()
+    C  .ctor(String familyName, Single emSize)
+    C  .ctor(String familyName, Single emSize, FontStyle style)
+    C  .ctor(String familyName, Single emSize, GraphicsUnit unit)
+    C  .ctor(String familyName, Single emSize, FontStyle style, GraphicsUnit unit)
+    C  .ctor(String familyName, Single emSize, FontStyle style, GraphicsUnit unit, Byte gdiCharSet)
+  : interface IEquatable`1
+    M  abstract Boolean Equals(RenderFont other)
+
+--- OFT.Rendering.Tools.RenderStringFormat   [OFT.Rendering] ---
+    P  StringAlignment Alignment
+    P  StringFormatFlags FormatFlags
+    P  StringAlignment LineAlignment
+    P  StringTrimming Trimming
+    M  virtual String ToString()
+    M  virtual Boolean Equals(RenderStringFormat other)
+    M  RenderStringFormat Clone()
+    M  virtual Boolean Equals(Object obj)
+    M  virtual Int32 GetHashCode()
+    C  .ctor()
+  : interface IEquatable`1
+    M  abstract Boolean Equals(RenderStringFormat other)
+
+--- ATAS.Indicators.IndicatorCandle   [ATAS.Indicators] ---
+    P  Decimal Open
+    P  Decimal High
+    P  Decimal Low
+    P  Decimal Close
+    P  Decimal Volume
+    P  Decimal Bid
+    P  Decimal Ask
+    P  Decimal Betweens
+    P  Decimal Ticks
+    P  Decimal Delta
+    P  DateTime Time
+    P  DateTime LastTime
+    P  Decimal MaxDelta
+    P  Decimal MinDelta
+    P  Decimal MaxOI
+    P  Decimal MinOI
+    P  Decimal OI
+    P  Decimal VWAP
+    P  PriceVolumeInfo MaxVolumePriceInfo
+    P  PriceVolumeInfo MaxTickPriceInfo
+    P  PriceVolumeInfo MaxAskPriceInfo
+    P  PriceVolumeInfo MaxBidPriceInfo
+    P  PriceVolumeInfo MaxTimePriceInfo
+    P  PriceVolumeInfo MaxPositiveDeltaPriceInfo
+    P  PriceVolumeInfo MaxNegativeDeltaPriceInfo
+    P  ValueArea ValueArea
+    M  virtual IEnumerable`1 GetAllPriceLevels()
+    M  virtual IEnumerable`1 GetAllPriceLevels(PriceVolumeInfo cacheItem)
+    M  virtual PriceVolumeInfo GetPriceVolumeInfo(Decimal price)
+    M  virtual PriceVolumeInfo GetPriceVolumeInfo(Decimal price, PriceVolumeInfo cacheItem)
+    C  .ctor(ISupportedPriceInfo dataprovider, IIntCandle parentCandle, Decimal tickSize)
+  : interface ISupportedPriceInfo
+    P  PriceVolumeInfo MaxVolumePriceInfo
+    P  PriceVolumeInfo MaxTickPriceInfo
+    P  PriceVolumeInfo MaxAskPriceInfo
+    P  PriceVolumeInfo MaxBidPriceInfo
+    P  PriceVolumeInfo MaxTimePriceInfo
+    P  PriceVolumeInfo MaxPositiveDeltaPriceInfo
+    P  PriceVolumeInfo MaxNegativeDeltaPriceInfo
+    P  ValueArea ValueArea
+    M  abstract IEnumerable`1 GetAllPriceLevels()
+    M  abstract IEnumerable`1 GetAllPriceLevels(PriceVolumeInfo cacheItem)
+    M  abstract PriceVolumeInfo GetPriceVolumeInfo(Decimal price)
+    M  abstract PriceVolumeInfo GetPriceVolumeInfo(Decimal price, PriceVolumeInfo cacheItem)
+

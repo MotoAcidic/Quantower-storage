@@ -78,6 +78,20 @@
     -->
     <Compile Include="..\OrbIx.Quantower.Shared\**\*.cs"
              Exclude="..\OrbIx.Quantower.Shared\bin\**;..\OrbIx.Quantower.Shared\obj\**" />
+
+    <!--
+      Ocean's Anchor's absorption math and zone state machine, same reasoning as above and
+      the same files directionAbsorptionScalpStrategy.csproj compiles in: platform-free
+      (confirmed: no ATAS types), ported from a friend's ATAS indicator suite at
+      Ported/src/oceans-anchor/. Only AnchorModels.cs, AnchorState.cs's SignalEngine/
+      ZoneMaintenance/SignalGate, and AnchorAbsorption.cs's TapeAbsorption/DisplacementWatch/
+      ClusterAbsorption are exercised — this indicator builds its own Zone objects from
+      HhLlEngine segments, the same as the strategy, rather than porting AnchorProfile/
+      AnchorZones' footprint-based HVN zone BUILDER (which would hit the same historical
+      volume-analysis refusal already documented above). The unused remainder compiles in as
+      harmless dead code for the same "compile the clean tree" reason.
+    -->
+    <Compile Include="..\..\..\..\Ported\src\oceans-anchor\Anchor*.cs" />
   </ItemGroup>
 
   <ItemGroup>

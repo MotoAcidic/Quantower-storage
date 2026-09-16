@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>test</AssemblyName>
+    <RootNamespace>OceansCurrent.Tests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <!--
+    The model carries no ATAS types, so it runs here against references that share none of its
+    code. Only the reading of candles and the drawing need the platform.
+  -->
+  <ItemGroup>
+    <Compile Include="../TimeContext.cs" />
+    <Compile Include="../SessionState.cs" />
+    <Compile Include="../Factors.cs" />
+    <Compile Include="../GexFeed.cs" />
+    <Compile Include="../TradeGexBridge.cs" />
+    <Compile Include="../StateMachine.cs" />
+    <Compile Include="../BiasEngine.cs" />
+    <Compile Include="../BadgeModel.cs" />
+    <Compile Include="../BiasPanel.cs" />
+    <Compile Include="../Triggers.cs" />
+    <Compile Include="../Scorecard.cs" />
+    <Compile Include="../EventCalendar.cs" />
+    <Compile Include="../SessionLogger.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+
+</Project>

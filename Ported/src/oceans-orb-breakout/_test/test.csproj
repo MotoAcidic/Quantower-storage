@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>test</AssemblyName>
+    <RootNamespace>OceansOrbBreakout.Tests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <!--
+    The model and the time resolver are deliberately free of ATAS types so they can be
+    exercised on synthetic bars here, where the arithmetic can actually be checked.
+  -->
+  <ItemGroup>
+    <Compile Include="../TimeContext.cs" />
+    <Compile Include="../OrbModel.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,288 @@
+﻿###### BASE CHAIN ######
+  ATAS.Indicators.Indicator   [asm: ATAS.Indicators]
+  ATAS.Indicators.ExtendedIndicator   [asm: ATAS.Indicators]
+  ATAS.Indicators.BaseIndicator   [asm: ATAS.Indicators]
+  ATAS.Indicators.ChartObject   [asm: ATAS.Indicators]
+  ATAS.Indicators.Filters.TrackedPropertyBase   [asm: ATAS.Indicators]
+
+###### Indicator chain members ######
+--- ATAS.Indicators.Indicator ---
+    P  String Category
+    P  IInstrumentInfo InstrumentInfo
+    P  ITradingManager TradingManager
+    P  IPlatformSettings PlatformSettings
+    P  IMarketDepthInfoProvider MarketDepthInfo
+    P  IChart ChartInfo
+    P  ITradingStatisticsProvider TradingStatisticsProvider
+    P  Boolean IgnoreHistoryScale
+    P  Rectangle ChartArea
+    P  IMouseLocationInfo MouseLocationInfo
+    P  Int32 FirstVisibleBarNumber
+    P  Int32 LastVisibleBarNumber
+    P  Int32 VisibleBarsCount
+    P  Decimal CumulativeDomAsks
+    P  Decimal CumulativeDomBids
+    P  String Instrument
+    P  Decimal TickSize
+    P  String DataPath
+    P  Int32 ValueAreaPercent
+    P  String ChartType
+    P  String TimeFrame
+    P  String StringFormat
+    M  Boolean IsNewSession(Int32 bar)
+    M  Boolean IsNewWeek(Int32 bar)
+    M  Boolean IsNewMonth(Int32 bar)
+    M  DrawingText AddText(String tag, String text, Boolean isAbovePrice, Int32 bar, Decimal price, Color textColor, Color outlineColor, Color fillColor, Single fontSize, TextAlign align, Boolean autoSize)
+    M  DrawingText AddText(String tag, String text, Boolean isAbovePrice, Int32 bar, Decimal price, Color textColor, Color fillColor, Single fontSize, TextAlign align, Boolean autoSize)
+    M  Void DoActionInGuiThread(Action action)
+    M  IEnumerable`1 GetMarketDepthSnapshot()
+    M  DrawingText AddText(String tag, String text, Boolean isAbovePrice, Int32 bar, Int32 price, Int32 yOffset, Int32 xOffset, Color textcolor, Color outlinecolor, Color fillcolor, Single fontSize, TextAlign align, Boolean autoSize)
+    M  virtual Void RefreshData()
+    M  virtual Void OnApplyDefaultColors()
+    C  .ctor(Boolean useCandles)
+    C  .ctor(DataSeriesType seriesType)
+--- ATAS.Indicators.ExtendedIndicator ---
+    P  Boolean AlertsEnabled
+    P  Boolean FullScreenMode
+    P  Boolean DenyToChangePanel
+    P  Boolean DrawAbovePrice
+    P  Boolean EnableCustomDrawing
+    P  Boolean ShowDescription
+    P  IIndicatorContainer Container
+    P  IIndicatorDataProvider DataProvider
+    P  List`1 HorizontalLinesTillTouch
+    P  List`1 TrendLines
+    P  List`1 Rectangles
+    P  SyncDictionary`2 Labels
+    P  IEnumerable`1 MarketByOrders
+    P  DateTime MarketTime
+    P  DateTime UtcTime
+    M  virtual Void OnContainerChanged(IIndicatorContainer container)
+    M  virtual Void OnDataProviderChanged(IIndicatorDataProvider oldDataProvider, IIndicatorDataProvider newDataProvider)
+    M  Boolean TryGetService(T& service)
+    M  virtual Void OnPortfolioChanged(Portfolio portfolio)
+    M  virtual Void OnPositionChanged(Position position)
+    M  virtual Void OnNewOrder(Order order)
+    M  virtual Void OnOrderChanged(Order order)
+    M  virtual Void OnNewMyTrade(MyTrade myTrade)
+    M  virtual Void OnOrderRegisterFailed(Order order, String message)
+    M  virtual Void OnOrderCancelFailed(Order order, String message)
+    M  virtual Void OnOrderModifyFailed(Order order, Order newOrder, String error)
+    M  Void Draw(RenderContext context, DrawingLayouts layout)
+    M  virtual Void OnRender(RenderContext context, DrawingLayouts layout)
+    M  Void SubscribeToDrawingEvents(DrawingLayouts flags)
+    M  Void RedrawChart(RedrawArg redrawArg)
+    M  Void AddAlert(String soundFile, String instrument, String message, Color background, Color foreground)
+    M  Void AddAlert(String soundFile, String instrument, String message, Color background, Color foreground, DateTime time)
+    M  Void AddAlert(String soundFile, String message)
+    M  DrawingText AddText(String tag, String text, Boolean isAbovePrice, Int32 bar, Decimal price, Int32 yOffset, Int32 xOffset, Color textColor, Color outlineColor, Color fillColor, Single fontSize, TextAlign align, Boolean autoSize)
+    M  virtual Void RecalculateValues()
+    M  IndicatorCandle GetCandle(Int32 bar)
+    M  virtual Void Calculate(Int32 bar, Decimal value)
+    M  virtual Void Dispose()
+    M  virtual Void OnNewTrades(IEnumerable`1 trades)
+    M  virtual Void OnNewTrade(MarketDataArg trade)
+    M  virtual Void OnBestBidAskChanged(MarketDataArg depth)
+    M  virtual Void MarketDepthsChanged(IEnumerable`1 depths)
+    M  virtual Void MarketDepthChanged(MarketDataArg depth)
+    M  virtual Void OnCumulativeTrade(CumulativeTrade trade)
+    M  virtual Void OnUpdateCumulativeTrade(CumulativeTrade trade)
+    M  virtual Void OnCumulativeTradesResponse(CumulativeTradesRequest request, IEnumerable`1 cumulativeTrades)
+    M  Void RequestForCumulativeTrades(CumulativeTradesRequest request)
+    M  virtual Void OnVisibleChanged()
+    M  virtual Void OnFixedProfilesResponse(IndicatorCandle fixedProfile, FixedProfilePeriods period)
+    M  virtual Void OnFixedProfilesResponse(IndicatorCandle fixedProfileScaled, IndicatorCandle fixedProfileOriginScale, FixedProfilePeriods period)
+    M  Void GetFixedProfile(FixedProfileRequest request)
+    M  Task`1 RequestFixedProfileAsync(FixedProfileRequest request)
+    M  Task SubscribeMarketByOrderData()
+    M  ITradesCache GetTradesCache(TimeSpan period)
+    M  IMarketByOrdersCache GetMarketByOrdersCache(TimeSpan period)
+    M  IMarketByOrdersWithTradesCache GetMarketByOrdersWithTradesCache(TimeSpan period)
+    M  virtual Void OnMarketByOrdersChanged(IEnumerable`1 values)
+    M  Void ApplyDefaultColors()
+    M  virtual Void OnApplyDefaultColors()
+    M  virtual Void SubscribeToTimer(TimeSpan period, Action callback)
+    M  virtual Void UnsubscribeFromTimer(TimeSpan period, Action callback)
+    C  .ctor(Boolean useCandles)
+    C  .ctor(DataSeriesType seriesType)
+--- ATAS.Indicators.BaseIndicator ---
+    P  PerformanceDiagnoser PerformanceDiagnoser
+    P  Boolean UseProfiling
+    P  IPropertiesEditor PropertiesEditor
+    P  String Name
+    P  Boolean IsDisposed
+    P  List`1 DataSeries
+    P  Boolean SupportsExtendedSeries
+    P  List`1 LineSeries
+    P  String Panel
+    P  Boolean IsVerticalIndicator
+    P  Boolean UseCandles
+    P  Int32 CurrentBar
+    P  IDataSeries`1 SourceDataSeries
+    P  Decimal Item
+    M  PerfCounter MeasurePerformance(String name)
+    M  virtual Void RecalculateValues()
+    M  virtual Void OnInitialize()
+    M  virtual Void OnRecalculate()
+    M  virtual Void OnFinishRecalculate()
+    M  virtual Void Calculate(Int32 bar, Decimal value)
+    M  abstract Void OnCalculate(Int32 bar, Decimal value)
+    M  Void Add(Indicator indicator)
+    M  Void Clear()
+    M  virtual Void OnSourceChanged()
+    M  virtual Void OnPropertiesEditorChanged(IPropertiesEditor oldValue, IPropertiesEditor newValue)
+    M  Void RaisePropertyChanged(String propertyName)
+    M  Void RaisePropertyChanged(Object sender, PropertyChangedEventArgs e)
+    M  Void RaisePanelPropertyChanged(String name)
+    M  Void RaiseBarValueChanged(Int32 bar)
+    M  virtual Void Dispose()
+    M  virtual Void OnDispose()
+    M  virtual Void OnVisibleChanged()
+    M  virtual String ToString()
+    C  .ctor(Boolean useCandles)
+--- ATAS.Indicators.ChartObject ---
+    P  Boolean Visible
+    P  Boolean Locked
+    P  Boolean AllowedInteraction
+    M  virtual Boolean ProcessMouseClick(RenderControlMouseEventArgs e)
+    M  virtual Boolean ProcessMouseWheel(Int32 delta)
+    M  virtual Boolean ProcessMouseDown(RenderControlMouseEventArgs e)
+    M  virtual Boolean ProcessMouseUp(RenderControlMouseEventArgs e)
+    M  virtual Boolean ProcessMouseMove(RenderControlMouseEventArgs e)
+    M  virtual Boolean ProcessMouseDoubleClick(RenderControlMouseEventArgs e)
+    M  virtual StdCursor GetCursor(RenderControlMouseEventArgs e)
+    M  virtual Boolean ProcessKeyDown(KeyEventArgs e)
+    M  virtual Boolean ProcessKeyUp(KeyEventArgs e)
+    M  virtual Void OnVisibleChanged()
+    M  virtual Void LockedOnChanged()
+    C  .ctor()
+--- ATAS.Indicators.Filters.TrackedPropertyBase ---
+    M  Void SetProperty(TProperty& store, TProperty value, Action onChanged, Func`2 onChanging, String propertyName)
+    M  Void SetTrackedProperty(TProperty& store, TProperty value, Action`1 onChanged, String propertyName)
+    M  virtual Void OnChangeProperty(String propertyName)
+    C  .ctor()
+
+###### Candle types ######
+--- ATAS.Indicators.Candle ---
+    P  Decimal Open
+    P  Decimal High
+    P  Decimal Low
+    P  Decimal Close
+    C  .ctor()
+--- ATAS.Indicators.CandleDataSeries ---
+    P  Int32 Digits
+    P  String StringFormat
+    P  Boolean HideZeroCandles
+    P  Boolean HideOpenCloseLabels
+    P  CandleTooltipAnchor TooltipAnchor
+    P  Boolean ShowCurrentValue
+    P  Color UpCandleColor
+    P  Color DownCandleColor
+    P  Color BorderColor
+    P  Color ValuesColor
+    P  Boolean Visible
+    P  Boolean ScaleIt
+    P  CandleVisualMode Mode
+    P  Boolean DrawCandleBorder
+    P  Boolean IsVisible
+    P  Int32 Count
+    P  Candle Item
+    M  virtual Void Clear()
+    C  .ctor(String id, String name)
+    C  .ctor(String id)
+--- ATAS.Indicators.CandlePartSeries ---
+    P  Int32 Count
+    P  Decimal Item
+    M  IndicatorCandle GetCandle(Int32 bar)
+    C  .ctor(ICandleCreator candleCreator, DataSeriesType type)
+--- ATAS.Indicators.CandleTooltipAnchor ---
+--- ATAS.Indicators.CandleVisualMode ---
+--- ATAS.Indicators.ICandleCreator ---
+    P  String Name
+    P  List`1 Candles
+--- ATAS.Indicators.IIntCandle ---
+    P  Int32 Open
+    P  Int32 High
+    P  Int32 Low
+    P  Int32 Close
+    P  Decimal Ask
+    P  Decimal Bid
+    P  Decimal Betweens
+    P  Decimal Delta
+    P  Int32 Ticks
+    P  DateTime BeginTime
+    P  DateTime LastTime
+    P  Decimal Volume
+    P  Decimal OI
+    P  Decimal MaxOI
+    P  Decimal MinOI
+    P  Decimal MaxDelta
+    P  Decimal MinDelta
+    P  Decimal VWAP
+--- ATAS.Indicators.IndicatorCandle ---
+    P  Decimal Open
+    P  Decimal High
+    P  Decimal Low
+    P  Decimal Close
+    P  Decimal Volume
+    P  Decimal Bid
+    P  Decimal Ask
+    P  Decimal Betweens
+    P  Decimal Ticks
+    P  Decimal Delta
+    P  DateTime Time
+    P  DateTime LastTime
+    P  Decimal MaxDelta
+    P  Decimal MinDelta
+    P  Decimal MaxOI
+    P  Decimal MinOI
+    P  Decimal OI
+    P  Decimal VWAP
+    P  PriceVolumeInfo MaxVolumePriceInfo
+    P  PriceVolumeInfo MaxTickPriceInfo
+    P  PriceVolumeInfo MaxAskPriceInfo
+    P  PriceVolumeInfo MaxBidPriceInfo
+    P  PriceVolumeInfo MaxTimePriceInfo
+    P  PriceVolumeInfo MaxPositiveDeltaPriceInfo
+    P  PriceVolumeInfo MaxNegativeDeltaPriceInfo
+    P  ValueArea ValueArea
+    M  virtual IEnumerable`1 GetAllPriceLevels()
+    M  virtual IEnumerable`1 GetAllPriceLevels(PriceVolumeInfo cacheItem)
+    M  virtual PriceVolumeInfo GetPriceVolumeInfo(Decimal price)
+    M  virtual PriceVolumeInfo GetPriceVolumeInfo(Decimal price, PriceVolumeInfo cacheItem)
+    C  .ctor(ISupportedPriceInfo dataprovider, IIntCandle parentCandle, Decimal tickSize)
+
+###### Session/Instrument types ######
+--- ATAS.Indicators.IInstrumentInfo ---
+    P  String Instrument
+    P  String Exchange
+    P  Decimal TickSize
+    P  Int32 TimeZone
+--- ATAS.Indicators.InstrumentInfo ---
+    P  String Instrument
+    P  String Exchange
+    P  Decimal TickSize
+    P  Int32 TimeZone
+    C  .ctor(String instrument, String exchange, Decimal tickSize, Int32 timeZone)
+--- ATAS.Indicators.SessionWorkingTime ---
+    P  DateTime From
+    P  DateTime To
+    M  virtual String ToString()
+    M  virtual Int32 GetHashCode()
+    M  virtual Boolean Equals(Object obj)
+    M  virtual Boolean Equals(SessionWorkingTime other)
+    M  Void Deconstruct(DateTime& From, DateTime& To)
+    C  .ctor(DateTime From, DateTime To)
+--- ATAS.Indicators.TradingSessionDescription ---
+    P  Type EqualityContract
+    P  Nullable`1 Id
+    P  String Name
+    M  virtual String ToString()
+    M  virtual Boolean PrintMembers(StringBuilder builder)
+    M  virtual Int32 GetHashCode()
+    M  virtual Boolean Equals(Object obj)
+    M  virtual Boolean Equals(TradingSessionDescription other)
+    M  virtual TradingSessionDescription <Clone>$()
+    M  Void Deconstruct(Nullable`1& Id, String& Name)
+    C  .ctor(Nullable`1 Id, String Name)
+    C  .ctor(TradingSessionDescription original)

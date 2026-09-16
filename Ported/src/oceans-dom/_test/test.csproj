@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>test</AssemblyName>
+    <RootNamespace>OceansDom.Tests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <!--
+    The ladder geometry, the tape decay and the state machine carry no ATAS types, so they can be
+    driven here against references that share none of their code. Anything that needs a live book
+    stays in the indicator and is checked in ATAS instead.
+  -->
+  <ItemGroup>
+    <Compile Include="../DomMath.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+
+</Project>
