@@ -58,7 +58,9 @@ internal sealed class DeltaLevelsOverlay : IDisposable
         Color FlipUpColor,
         Color FlipDownColor,
         Color ShelfColor,
-        bool Labels);
+        bool Labels,
+        bool FlipVerticalMarker = false,
+        bool FlipVerticalMarkerNewestOnly = true);
 
     /// <summary>
     /// Candidate rows for the caption, tried in order.
@@ -143,17 +145,53 @@ internal sealed class DeltaLevelsOverlay : IDisposable
 
         graphics.DrawLine(this.Pen(faded, dash: false), left, y, pane.Right, y);
 
-        if (!options.Labels)
+        if (options.Labels)
+        {
+            var label = string.Format(
+                CultureInfo.InvariantCulture,
+                "Δflip {0} {1:HH:mm} {2:N0}",
+                flip.Sign > 0 ? "up" : "down",
+                flip.CrossedBarCloseUtc,
+                flip.ConfirmCumulative);
+
+            this.Tag(graphics, pane, label, left, y, faded, labelRegistry);
+        }
+
+        if (options.FlipVerticalMarker && (!options.FlipVerticalMarkerNewestOnly || newest))
+            this.FlipVertical(graphics, converter, pane, flip, colour, labelRegistry);
+    }
+
+    /// <summary>
+    /// The full-height "line straight up" the operator asked for (2026-09-16): marks WHEN a big
+    /// delta shift happened, same crossing bar the horizontal level anchors to, drawn top to
+    /// bottom of the pane instead of left to right. A deliberate, requested exception to this
+    /// overlay's own "horizontal only" design note above — see DeltaFlipVerticalMarker's doc
+    /// comment in OrbIxIndicator.cs for why it's independently toggleable rather than folded
+    /// into the existing flip level.
+    /// </summary>
+    private void FlipVertical(
+        Graphics graphics, IChartWindowCoordinatesConverter converter, RectangleF pane,
+        DeltaFlip flip, Color colour, List<RectangleF> labelRegistry)
+    {
+        if (!ChartOverlay.TryX(converter, flip.CrossedBarCloseUtc, out var x)
+            || x < pane.Left || x > pane.Right)
+        {
+            return;
+        }
+
+        var full = Color.FromArgb(200, colour);
+        graphics.DrawLine(this.Pen(full, dash: false), x, pane.Top, x, pane.Bottom);
+
+        var text = flip.Sign > 0 ? "FLIP UP" : "FLIP DOWN";
+        var size = graphics.MeasureString(text, this.font);
+        var rect = new RectangleF(x + 3f, pane.Top + 3f, size.Width + 6f, size.Height + 2f);
+
+        if (!ChartOverlay.TryReserve(labelRegistry, rect))
             return;
 
-        var label = string.Format(
-            CultureInfo.InvariantCulture,
-            "Δflip {0} {1:HH:mm} {2:N0}",
-            flip.Sign > 0 ? "up" : "down",
-            flip.CrossedBarCloseUtc,
-            flip.ConfirmCumulative);
-
-        this.Tag(graphics, pane, label, left, y, faded, labelRegistry);
+        graphics.FillRectangle(this.back, rect);
+        using var brush = new SolidBrush(full);
+        graphics.DrawString(text, this.font, brush, rect.Left + 3f, rect.Top + 1f);
     }
 
     /// <summary>

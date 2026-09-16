@@ -274,6 +274,180 @@ two independent lines, both still anchoring to a frozen PRICE rather than tracki
   paint machinery was needed - it only paints whatever `PublishDirection` hands it, same
   discipline as everything else here.
 
+**Fixed 2026-09-16 - "Flow: trend lines" appeared to move when panning the chart.** Root cause
+confirmed by direct investigation: `EnsureFlowBars()` rebuilds `flowBarOpen/High/Low/Close`
+every fold from `HistoricalData[i, SeekOriginHistory.Begin]`, where index 0 is whatever bar is
+CURRENTLY oldest in the platform's loaded window. Panning far enough back makes Quantower load
+MORE history, prepending older bars - the array gets LONGER, but every existing index now names
+an EARLIER calendar bar than it did before. `BuildFlowBias`'s staleness check
+(`flowStructureBars > flowBarHigh.Count`) only ever caught the array getting SHORTER, so this
+exact case slipped through: `flowStructure`'s already-emitted `HhLlLabel.Bar`/
+`TrendLine.StartBar/EndBar` values kept pointing at whatever index they were assigned, which now
+named a different bar in the freshly-rebuilt `BarTimes` - the line visibly relocating. Fixed by
+comparing the origin bar's OWN TIME (`flowBarOriginUtc`, new field), not just the count: any
+change to `flowBarOpen[0]`'s timestamp now forces the same full `flowStructure` rebuild the
+shrink case already triggered. Same class of bug as the ADR/prior-day levels' own "strictly
+before" date handling elsewhere in this file - an index that means something only as long as its
+origin hasn't moved, quietly assumed to be stable.
+
+**Added 2026-09-16 - "reversal incoming" flag on the Anchor Gate, and a trend-line break flag,
+both from a live-chart request.** Two more signals layered onto machinery already built the
+same day rather than new subsystems:
+- **Reversal incoming** (`DirectionReversalIncomingEnabled`/`DirectionReversalIncomingDistanceTicks`,
+  indices 404-405): when price has run at least the configured distance from the bias line -
+  still IN the trend's own direction, not a violation of it (that is the separate dashed
+  reversal line above) - AND the OPPOSING Anchor Gate zone (the one a reversal would actually
+  trade) reaches Confirmed, its label changes from `"LONG CONFIRMED"`/`"SHORT CONFIRMED"` to
+  `"POSSIBLE REVERSAL INCOMING — LONG"`/`"...SHORT"`. No new drawable or overlay - just an
+  `IsReversalSignal` flag on the existing `AnchorGateZoneDraw`, computed in
+  `BuildAnchorGateDrawable()`. One known staleness: `FeedAnchorGate()` (which calls this) runs
+  BEFORE `PublishDirection()` in the fold sequence, so the label reflects the PREVIOUS fold's
+  bias/distance reading, one fold interval (default ~100ms) behind — immaterial for a text
+  label, not worth reordering the fold for.
+- **Trend-line break flag** (`TrendLineBreakFlagEnabled` + up/down colours, indices 406-408,
+  new `TrendLineBreakOverlay.cs`): flags "Flow: trend lines" (the two-tap high/low lines,
+  `AutoTrendlines`/`FlowBias.TrendLines`) only when "all signs show break... in that direction"
+  - the operator's own bar (2026-09-16): the bar that just closed broke the line's own
+  `PriceAt(bar)` value AND the direction callout already agrees with that side ON THE SAME BAR.
+  Checked in `UpdateTrendLineBreaks()`, called AFTER `PublishDirection()` specifically so both
+  halves of the confirmation are from the same fold, using `this.flowFrame.Bias` (already
+  rebuilt earlier the same fold by `FoldFlow`). Checked once per newly-closed bar per line kind
+  (high/low) via `trendLineHighCheckedBar`/`trendLineLowCheckedBar`, so a fold that finds nothing
+  new never re-flags a bar already judged.
+
+**Added 2026-09-16 - a full-height vertical marker at a delta flip, matching a friend's chart**
+(`DeltaFlipVerticalMarker`/`DeltaFlipVerticalMarkerNewestOnly`, indices 1031-1032,
+`DeltaLevelsOverlay.FlipVertical`). The existing "Flip levels" feature already computed
+everything needed (`DeltaFlip.CrossedBarCloseUtc`) but only ever drew it as a HORIZONTAL price
+level running right - a deliberate design constraint stated in the overlay's own class doc
+("HORIZONTAL ONLY... anything that reserved panel height here would be paid for by the chart it
+is meant to explain"). The operator asked for what a friend's chart does instead: "when the big
+moves in delta shift it sends a line straight up" - a vertical line at the FLIP'S TIME, full
+pane height, labelled `"FLIP UP"`/`"FLIP DOWN"`. Added as an independently-toggleable exception
+to that design note rather than folded into the existing level (WHERE vs. WHEN are different
+questions; either can be on with the other off), defaulting to the newest flip only so it
+doesn't accumulate into a forest of vertical lines across a long session.
+
+**Added 2026-09-16 - three more defaults turned off, same "reduce clutter" pattern as the
+2026-09-15 round above, plus one feature split rather than just muted:**
+- `DrawBox` (the opening-range/session box - IB, overnight range) -> **false**. The operator's
+  own bar, after asking what a red/purple shaded band on their chart meant and being told it
+  was the OR/overnight box: "I dont want these anymore." Deferred full code removal ("do it
+  after") - this only changes the default, the feature and its code are untouched and still a
+  settings-panel toggle away. Same deferral applies to removing the ORB code from the indicator
+  and the strategy entirely, per the operator's own words ("I also dont want the orb in my
+  indicator or strategy either... just turn off by default, do it after") - **still not done**,
+  tracked here so it isn't lost.
+- `ShowStatusLine` -> **false** (was documented `true` on 2026-09-15, above). Same box the
+  operator had already asked to keep muted for the FRVP/AVP-unavailable notice specifically now
+  gets turned off outright after a screenshot showing it alongside "Δ flip levels 0" cluttering
+  the chart with two lines of permanent, already-understood, unfixable-on-this-connector
+  status text.
+- `ShowDeltaFlips` -> **false**, and DECOUPLED from the vertical flip marker added earlier the
+  same day. `ShowDeltaFlips` used to be the one gate for BOTH the horizontal flip-level line
+  AND (transitively, since both read the same computed flip list) the vertical marker - turning
+  it off would have silently killed the vertical marker too, which the operator explicitly
+  wanted to KEEP ("the level flips can go" - horizontal only - "I want ... the line that shoots
+  up for the delta" - vertical only, from the same message). Fixed by splitting the DATA gate
+  from the DISPLAY gate, the same pattern as every other "one toggle secretly controls two
+  things" fix this session: `PublishDeltaLevels()`'s `wantFlips` now reads
+  `this.ShowDeltaFlips || this.DeltaFlipVerticalMarker` (either display still needs the
+  underlying flip computed), while the horizontal line's own on-chart caption text is gated by
+  a new `flipCaption` local that checks `ShowDeltaFlips` alone. Net effect: the horizontal
+  level and its "Δ flip levels N" caption are gone by default; the vertical "FLIP UP"/"FLIP
+  DOWN" marker (added earlier 2026-09-16, see above) is unaffected and still on.
+
+**Added 2026-09-16 - a consolidated pass built from one large multi-part request** (kept both
+the reversal line/callout and everything already built the same day; five additive pieces, all
+reusing infrastructure already in place rather than new subsystems):
+1. **Reversal-incoming: triangle + label, not just relabeled text.** The `IsReversalSignal` flag
+   added earlier the same day (see the "reversal incoming" entry above) originally only swapped
+   the Anchor Gate zone's text label. `AnchorGateOverlay.Draw` now also fills a small triangle
+   at the confirming zone's own price, pointing toward the bias line's side, alongside the
+   swapped `"POSSIBLE REVERSAL INCOMING — LONG/SHORT"` text - the operator's own distinction
+   ("this might be a triangle with a label" vs. plain relabeled text on an existing line).
+2. **Anchor Gate zones drawn as boxes, not lines** (`AnchorGateZoneDraw` gained `StartUtc`/
+   `Top`/`Bottom`, resolved from `zone.StartBar`/`zone.Top`/`zone.Bottom` through the same
+   `hhllBarOpen` index space HH/LL already uses). `AnchorGateOverlay.Draw` now fills+borders a
+   box from the zone's own start bar to "now" (same still-extending convention
+   `WickAbsorptionOverlay` uses for Dormant/Armed/Triggered/Confirmed) instead of a full-width
+   line at a single price - directly answers "I want to see absorption boxes... so I know what
+   to target as bounce zones." Dormant zones are still never drawn at all.
+3. **The rich "ABSORPTION" panel** (new file `AnchorAbsorptionPanelOverlay.cs`,
+   `AnchorAbsorptionPanelDrawable`, `InputParameter` indices 218-220
+   `AnchorAbsorptionPanelEnabled`/`OffsetX`/`OffsetY`), built after the operator showed a
+   friend's chart with a header/`gate: Veto/Confirm` badge/`GEN BUY/SELL · N bars` headline/
+   `ΔPRICE`/`ΣDELTA` stat boxes/reasoning text/`LONGS`/`SHORTS` guidance boxes and said "I really
+   love how my friend has this... this might be the better way of identifying this." Searched
+   the whole `Ported/` bundle for the panel's exact wording (`gate:`, `GEN BUY`, `ΔPRICE`,
+   `ΣDELTA`) first and found no match anywhere - **this is not a port of anything in the
+   bundle**, it's designed fresh here, informed by the screenshot and by `oceans-effort`'s own
+   documented "effort vs. result" idea (a genuine move has price and order flow agreeing;
+   absorption is the divergence between them) applied to data the Anchor Gate already tracks.
+   **The classifier** (`BuildAnchorAbsorptionPanelDrawable()` in `OrbIxIndicator.cs`): on a
+   zone's Dormant/Expired/Broken -> Armed transition, captures `ArmPrice`/`ArmCvd` (new fields
+   `anchorLong/ShortArmPrice`/`Cvd`). Each fold, `ΔPRICE = lastPrice - ArmPrice` and
+   `ΣDELTA = AnchorSignalEngine.Cvd - ArmCvd` (net session delta since THIS arming, not since
+   session open). Same sign on both -> reads as a genuine directional move, badge `"gate:
+   Veto"`, headline `"GEN BUY"`/`"GEN SELL"`; opposite signs -> absorption is the more likely
+   reading, badge `"gate: Confirm"`. **Validated post-hoc, not just asserted**: checked against
+   two numbers independently observed on the operator's own screenshots (+63.8 ΔPRICE /
+   +4759 ΣDELTA, and a second showing -4.5 / -241) - both same-sign pairs, both correctly read
+   as Veto under this exact rule. This is a STATED heuristic, not a measured one, same
+   disclosure standard as `DirectionCallout.From`'s scalp/hold thresholds - flagged as such in
+   the drawable's own doc comment. When multiple zones are active, picks the highest-ranked one
+   (Confirmed > Triggered > Armed, ties broken toward whichever side the bias line currently
+   agrees with). The progress-dot row's denominator is `anchorZoneStateRules.ClockBars` - Ocean's
+   Anchor's own confirmation-clock bar count (default 3, inherited as-is; never exposed as its
+   own `InputParameter` since nothing so far needed to tune it independently of the ported
+   default).
+4. **Entry/target marking** (`AnchorEntryMarkingEnabled`/`AnchorTargetMinDistanceTicks`, indices
+   216-217): "when it shows only shorts or only longs there needs to be an area marked out that
+   says enter short here or enter long here and mark out what i should be targeting." Fires on
+   the SAME two-signal gate the strategy already uses before it would enter a trade - an Anchor
+   Gate zone reaching Confirmed AND `directionCalloutSide` (the bias line's frozen side)
+   agreeing with that zone's side - kept in sync by hand with
+   `directionAbsorptionScalpStrategy.cs`'s `OnZoneConfirmed`/`TryEnter` since the strategy and
+   the indicator share no compiled dependency by design. Draws `"ENTER LONG/SHORT HERE"` at the
+   zone and a target line/label at the nearest QUALIFYING candidate ahead of price, past a
+   minimum-distance floor (`TryComputeAnchorTarget()`, reimplementing the strategy's own
+   `TryComputeTarget` logic against data the INDICATOR already maintains - no new reference-
+   level plumbing needed here, unlike the strategy which had to build `ReferenceLevels` from
+   scratch): the nearest opposing `hhllEngine.Segments` level, current VWAP, prior day/week
+   levels already in `this.levels`/`LevelGraph`, or a live volume-node shelf (point 5) - in that
+   proximity order, whichever qualifies first.
+5. **Live-forward ("since session open") volume-node zones** (new file
+   `VolumeNodeOverlay.cs`, `AnchorVolumeZonesEnabled`/`Color`/`MinPeakPercent`, indices
+   213-215): "I want to see... areas were alot of orders were placed so i know what to target as
+   bounce zones," clarified via questions into: build it TICK-BY-TICK going forward rather than
+   from history, since this connector already refuses the historical volume-analysis API
+   everywhere else in this file (see the FRVP/AVP notes above) - never touching that API here
+   either. A plain `OceansAnchor.SessionProfile` instance (already compiled in from the earlier
+   Anchor Gate work, no `.csproj` change needed this time) is fed every tick in the same
+   `FeedAnchorTape` drain loop (`profile.Add((decimal)price, (decimal)size)`), reset to a FRESH
+   instance on every session open (same hook `vwapSession`/`deltaFlips`/`direction` already use)
+   - proof it's live-built, not reconstructed from history, is that it is empty right after a
+   fresh session open and fills in visibly through the session. Shelves extracted once per fold
+   via `AnchorProfileMath.ExtractShelves(profile.VolByPrice, tickSize, hvnSettings)` and drawn as
+   full-pane-width filled+dashed-bordered bands, independent of `AnchorGateEnabled` (its own
+   toggle) - these are reference/target boxes in their own right, not just Anchor Gate plumbing,
+   and also feed point 4's target-candidate list.
+
+**All five pieces verified 2026-09-16**: `dotnet build ... -c Release` - 0 errors (281
+pre-existing nullable-annotation-context warnings, same class already noted above, not this
+session's code). Deployed to `C:\Quantower\Settings\Scripts\Indicators\ORB-IX\
+OrbIxIndicator.dll`, `sha256sum` confirms the deployed DLL matches the freshly built one. As
+with every other default change this session, **only affects a fresh attach or a manual
+settings-panel change** - an already-attached chart instance keeps whatever it last saved.
+
+**Still open, not yet revisited**: the operator asked once "why does my bias line stop appearing
+after a while" - never got a definitive answer back to them. Most likely explanation:
+`DirectionCallout.From` draws nothing at all when the multi-input verdict reads Mixed or
+Undecided (by design, documented above), and that "no callout" state is now invisible with the
+Direction panel defaulted off (no other on-chart indicator says "no bias right now" vs. "bias
+line is broken"). Possible fix if this resurfaces: a small, low-key "no bias — verdict is
+Mixed/Undecided" marker independent of the full Direction panel.
+
 ### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
 **Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show
 delta, DOM/resting orders, absorption, auto-drawn fib, and FRVP+AVP (higher/lower timeframe

@@ -51,6 +51,10 @@ using AnchorDisplacementWatch = OceansAnchor.DisplacementWatch;
 using AnchorClusterRules = OceansAnchor.ClusterRules;
 using AnchorClusterAbsorption = OceansAnchor.ClusterAbsorption;
 using AnchorBarFacts = OceansAnchor.BarFacts;
+using AnchorSessionProfile = OceansAnchor.SessionProfile;
+using AnchorHvnSettings = OceansAnchor.HvnSettings;
+using AnchorHvnShelf = OceansAnchor.HvnShelf;
+using AnchorProfileMath = OceansAnchor.ProfileMath;
 
 namespace OrbIx.Quantower.Indicator;
 
@@ -348,8 +352,13 @@ public sealed class OrbIxIndicator : Qt.Indicator
     [InputParameter("Account (blank = first configured)", 35)]
     public string AccountId { get; set; } = string.Empty;
 
+    // Defaults to OFF (2026-09-16): the operator's own repeated ask — "I don't want the orb in
+    // my indicator... I don't need it" and, concretely, "these boxes... we can remove those" —
+    // referring to exactly this shaded session-range fill, not the labelled key-level lines
+    // (IB ORH, ONH, etc.), which stay on via DrawKeyLevels below. Still a settings-panel toggle
+    // for anyone who wants the box back.
     [InputParameter("Draw the opening-range box", 40)]
-    public bool DrawBox { get; set; } = true;
+    public bool DrawBox { get; set; } = false;
 
     [InputParameter("Draw the range high and low", 50)]
     public bool DrawEdges { get; set; } = true;
@@ -404,8 +413,12 @@ public sealed class OrbIxIndicator : Qt.Indicator
     /// underlying limitation or the FRVP/AVP profiles themselves — those already draw nothing
     /// when their data isn't there, independent of this setting.
     /// </summary>
+    // Defaults to OFF (2026-09-16, operator's own ask, twice now: this is the recurring
+    // FRVP/AVP/"volume analysis unavailable" line, a known permanent connector limitation the
+    // operator no longer needs re-flagged every session). Still a settings toggle for anyone who
+    // wants a genuine, unexpected fault surfaced on the chart instead of only in the log.
     [InputParameter("Status: show the problems line", 91)]
-    public bool ShowStatusLine { get; set; } = true;
+    public bool ShowStatusLine { get; set; } = false;
 
     // ---- HH/LL structure port ------------------------------------------------------------
     //
@@ -800,6 +813,91 @@ public sealed class OrbIxIndicator : Qt.Indicator
     public Color AnchorGateShortColor { get; set; } = Color.FromArgb(0xFF, 0x44, 0x44);
 
     /// <summary>
+    /// "Areas where a lot of orders were placed" (the operator's own phrase, 2026-09-16) — built
+    /// LIVE from ticks since the current session opened, using Ocean's Anchor's own high-volume-
+    /// shelf extraction (ProfileMath.ExtractShelves/HvnShelf, already compiled in for the Anchor
+    /// Gate above) fed from a live volume-by-price accumulator instead of Anchor's own
+    /// footprint-based HVN detector — the same "compile the math, supply our own data source"
+    /// pattern the Anchor Gate itself already uses, and for the identical reason: this
+    /// connector's historical volume-analysis API is refused, so only LIVE-FORWARD accumulation
+    /// is reliable here. Resets every session open — this is today's picture, not a multi-day
+    /// POC. Reference boxes only, no side, no state machine; also feeds the entry/target
+    /// marking below as a candidate target.
+    /// </summary>
+    [InputParameter("Volume nodes: enable (live, since session open)", 213)]
+    public bool AnchorVolumeZonesEnabled { get; set; } = true;
+
+    [InputParameter("Volume nodes: colour", 214)]
+    public Color AnchorVolumeZonesColor { get; set; } = Color.FromArgb(0xFF, 0xD5, 0x4F);
+
+    [InputParameter("Volume nodes: minimum peak (% of session's own busiest price)", 215, 10, 100, 5, 0)]
+    public int AnchorVolumeMinPeakPercent { get; set; } = 70;
+
+    /// <summary>
+    /// "There needs to be an area marked out that says enter short here or enter long here and
+    /// mark out what i should be targeting" (the operator's own ask, 2026-09-16). Fires ONLY
+    /// when an Anchor Gate zone reaches Confirmed AND the direction callout's bias already
+    /// agrees with that zone's side — the identical two-signal gate
+    /// directionAbsorptionScalpStrategy.cs requires before it would actually place an order, so
+    /// the indicator's visual signal and the strategy's real one never disagree about what
+    /// counts as an entry.
+    /// </summary>
+    [InputParameter("Anchor Gate: mark entry + target zones", 216)]
+    public bool AnchorEntryMarkingEnabled { get; set; } = true;
+
+    [InputParameter("Anchor Gate: target minimum distance (ticks)", 217, 1, 1000, 1, 0)]
+    public int AnchorTargetMinDistanceTicks { get; set; } = 10;
+
+    /// <summary>
+    /// The rich "ABSORPTION" panel, from a friend's chart the operator shared (2026-09-16):
+    /// header, a "gate: Veto/Confirm" badge, a "GEN BUY/SELL · N bars" headline, deltaPRICE/
+    /// sigmaDELTA stat boxes, plain-English reasoning, and LONGS/SHORTS guidance boxes. Kept
+    /// ALONGSIDE the box+line display above, not a replacement — the operator's own choice.
+    /// See BuildAnchorAbsorptionPanelDrawable for the effort-vs-result classifier behind the
+    /// gate verdict: a stated heuristic (price and delta agreeing reads as a genuine move;
+    /// disagreeing reads as absorption), not a measured one, same as every other judgement call
+    /// in this codebase.
+    /// </summary>
+    [InputParameter("Anchor Gate: show ABSORPTION panel", 218)]
+    public bool AnchorAbsorptionPanelEnabled { get; set; } = true;
+
+    [InputParameter("Anchor Gate: panel left offset (px)", 219, 0, 4000, 0, 0)]
+    public int AnchorAbsorptionPanelOffsetX { get; set; } = 12;
+
+    [InputParameter("Anchor Gate: panel top offset (px)", 220, 0, 4000, 0, 0)]
+    public int AnchorAbsorptionPanelOffsetY { get; set; } = 260;
+
+    /// <summary>
+    /// The operator's own ask (2026-09-16, from a live chart): when price has run far below (or
+    /// above) the bias line — still consistent with the trend the bias line calls, not a
+    /// violation of it — and the OPPOSING Anchor Gate zone then confirms (absorption against the
+    /// prevailing direction, holding), that is worth flagging louder than an ordinary "CONFIRMED"
+    /// label. Reuses the existing Confirmed-zone display rather than adding a parallel one: see
+    /// BuildAnchorGateDrawable's IsReversalSignal computation.
+    /// </summary>
+    [InputParameter("Direction: show reversal-incoming flag", 404)]
+    public bool DirectionReversalIncomingEnabled { get; set; } = true;
+
+    [InputParameter("Direction: reversal-incoming distance (ticks)", 405, 1, 2000, 1, 0)]
+    public int DirectionReversalIncomingDistanceTicks { get; set; } = 40;
+
+    /// <summary>
+    /// A flag where "Flow: trend lines" (the two-tap high/low lines) is broken AND the direction
+    /// callout already agrees with the break's side on the same bar — the operator's own "all
+    /// signs show break of the line in that direction" ask (2026-09-16). Needs "Flow: trend
+    /// lines" itself switched on (Flow: draw the absorbed tools + Flow: trend lines) — this only
+    /// flags a line that is already being drawn.
+    /// </summary>
+    [InputParameter("Direction: show trend-line break flag", 406)]
+    public bool TrendLineBreakFlagEnabled { get; set; } = true;
+
+    [InputParameter("Direction: trend-line break — up colour", 407)]
+    public Color TrendLineBreakUpColor { get; set; } = Color.FromArgb(0x00, 0xDD, 0x44);
+
+    [InputParameter("Direction: trend-line break — down colour", 408)]
+    public Color TrendLineBreakDownColor { get; set; } = Color.FromArgb(0xFF, 0x44, 0x44);
+
+    /// <summary>
     /// Research instrumentation, off by default: one NDJSON line per closed
     /// chart bar and per source into the output directory, for the
     /// registered parity study against the QuestDB research feed. Turning
@@ -816,8 +914,12 @@ public sealed class OrbIxIndicator : Qt.Indicator
     /// cumulative-delta divergence is a measured null on this instrument (trial 025). The chart
     /// caption says so.
     /// </summary>
+    // Defaults to OFF (2026-09-16, operator's own ask: "the level flips can go") — the
+    // HORIZONTAL price level only. The vertical "FLIP UP"/"FLIP DOWN" marker
+    // (DeltaFlipVerticalMarker) the operator explicitly wants kept is independent of this flag —
+    // see PublishDeltaLevels's own comment for how the two were decoupled.
     [InputParameter("Flip levels: draw", 1000)]
-    public bool ShowDeltaFlips { get; set; } = true;
+    public bool ShowDeltaFlips { get; set; } = false;
 
     /// <summary>
     /// How far beyond zero cumulative delta must travel before a crossing counts, in contracts.
@@ -857,6 +959,24 @@ public sealed class OrbIxIndicator : Qt.Indicator
 
     [InputParameter("Flip levels: down colour", 1030)]
     public Color DeltaFlipDownColor { get; set; } = Color.FromArgb(225, 105, 120);
+
+    /// <summary>
+    /// A full-height vertical line at the bar the flip crossed on, labelled "FLIP UP"/"FLIP
+    /// DOWN" — the operator's own reference (2026-09-16), from a friend's chart: "when the big
+    /// moves in delta shift it sends a line straight up". INDEPENDENT of the horizontal flip
+    /// level above, deliberately: that line marks WHERE (the price the flip happened at, still
+    /// relevant as a level); this one marks WHEN (the moment a big delta shift happened, as a
+    /// time marker). Either can be on with the other off. The horizontal level's own design
+    /// note calls this overlay "horizontal only... a design constraint" to keep the chart from
+    /// competing with other panels for room — this is the deliberate, requested exception to
+    /// that, not an accident, so it defaults on for the newest flip only unless told to draw
+    /// every kept one.
+    /// </summary>
+    [InputParameter("Flip levels: vertical marker at the flip", 1031)]
+    public bool DeltaFlipVerticalMarker { get; set; } = true;
+
+    [InputParameter("Flip levels: vertical marker — newest only", 1032)]
+    public bool DeltaFlipVerticalMarkerNewestOnly { get; set; } = true;
 
     /// <summary>
     /// Prices that repeatedly absorbed one-sided aggression across the footprint -- the "lines in
@@ -1070,6 +1190,23 @@ public sealed class OrbIxIndicator : Qt.Indicator
     /// <summary>Bars already fed to <see cref="flowStructure"/>, so feeding stays incremental.</summary>
     private int flowStructureBars;
 
+    /// <summary>
+    /// The open time of index 0 in <see cref="flowBarOpen"/> the last time <see cref="flowStructure"/>
+    /// was fed against it — NOT the same thing as the bar count.
+    ///
+    /// <see cref="EnsureFlowBars"/> rebuilds those arrays every fold from
+    /// <c>HistoricalData[i, SeekOriginHistory.Begin]</c>, where index 0 is whatever bar is
+    /// currently OLDEST in the platform's loaded window. Panning far enough back makes the
+    /// platform load MORE history, which PREPENDS older bars — the array gets LONGER, but every
+    /// existing index now names an earlier calendar bar than it did a moment ago. The count-only
+    /// staleness check below (`flowStructureBars > flowBarHigh.Count`) only ever catches the
+    /// array getting SHORTER; it missed exactly this case, so `flowStructure`'s already-emitted
+    /// `HhLlLabel.Bar`/`TrendLine.StartBar/EndBar` values kept pointing at whatever index they
+    /// were assigned, which now named a DIFFERENT bar in the freshly-rebuilt `BarTimes` — the
+    /// trend line appearing to "move" when the chart was panned, reported 2026-09-16.
+    /// </summary>
+    private DateTime flowBarOriginUtc = DateTime.MinValue;
+
     /// <summary>The fold the chart-bar cache was filled for, so it is read once per fold.</summary>
     private DateTime flowBarsFoldUtc = DateTime.MinValue;
 
@@ -1248,17 +1385,25 @@ public sealed class OrbIxIndicator : Qt.Indicator
             Math.Max(loaded.Flow.TrendLines.PivotLeftBars, 1),
             Math.Max(loaded.Flow.TrendLines.PivotRightBars, 1));
 
-        // REBUILT WHEN THE PIVOTS MOVE, OR WHEN THE CHART RE-SERVES ITS HISTORY. The engine's
-        // labels are a function of its parameters, so one built for a five-bar pivot is the wrong
-        // object for a ten-bar one; and a bar list that got SHORTER means the platform handed back
-        // a different history, which the engine cannot be walked backwards through.
+        // REBUILT WHEN THE PIVOTS MOVE, WHEN THE BAR LIST SHRANK, OR WHEN ITS ORIGIN SHIFTED.
+        // The engine's labels are a function of its parameters, so one built for a five-bar
+        // pivot is the wrong object for a ten-bar one. A SHORTER list means the platform handed
+        // back different history outright. But a LONGER list is not automatically safe either:
+        // panning far enough back makes the platform load more history, prepending older bars,
+        // and index 0 (and everything after it) then names an earlier calendar bar than the
+        // engine was fed against — see flowBarOriginUtc's own doc comment for the reproduction.
+        // Comparing the origin bar's OWN TIME, not just the count, is what catches that case.
+        var origin = this.flowBarOpen.Count > 0 ? this.flowBarOpen[0] : DateTime.MinValue;
+
         if (this.flowStructure is null
             || this.flowStructureParams != wanted
-            || this.flowStructureBars > this.flowBarHigh.Count)
+            || this.flowStructureBars > this.flowBarHigh.Count
+            || origin != this.flowBarOriginUtc)
         {
             this.flowStructure = new HhLlEngine(wanted.Item1, wanted.Item2);
             this.flowStructureParams = wanted;
             this.flowStructureBars = 0;
+            this.flowBarOriginUtc = origin;
         }
 
         // FED INCREMENTALLY. The engine appends, so re-feeding a bar it has already seen would
@@ -2183,6 +2328,38 @@ public sealed class OrbIxIndicator : Qt.Indicator
 
     private volatile AnchorGateDrawable anchorGateDrawable = AnchorGateDrawable.Empty;
 
+    // Captured the bar a zone FIRST becomes Armed, reset every time it re-arms — the reference
+    // point the rich ABSORPTION panel's effort-vs-result read (deltaPRICE/sigmaDELTA) measures
+    // FROM. See BuildAnchorAbsorptionPanelDrawable's own doc comment for the classifier itself.
+    private double anchorLongArmPrice = double.NaN;
+    private decimal anchorLongArmCvd;
+    private double anchorShortArmPrice = double.NaN;
+    private decimal anchorShortArmCvd;
+
+    private readonly AnchorAbsorptionPanelOverlay anchorAbsorptionPanelOverlay = new();
+    private volatile AnchorAbsorptionPanelDrawable anchorAbsorptionPanelDrawable = AnchorAbsorptionPanelDrawable.Empty;
+
+    // ---- live-forward volume-node ("areas where a lot of orders were placed") zones ---------
+    //
+    // Built ONLY from live ticks since the current session opened -- never from this
+    // connector's own refused historical volume-analysis API (see VolumeAnalysisForceTickData's
+    // doc comment above). Resets every session open, same as VWAP/delta/direction: this is
+    // TODAY's live order-flow picture, not a multi-day POC.
+
+    private readonly VolumeNodeOverlay volumeNodeOverlay = new();
+    private AnchorSessionProfile anchorVolumeProfile = new();
+    private readonly AnchorHvnSettings anchorHvnSettings = new();
+    private volatile VolumeNodeDrawable volumeNodeDrawable = VolumeNodeDrawable.Empty;
+
+    // ---- trend-line break flag --------------------------------------------------------------
+
+    private readonly TrendLineBreakOverlay trendLineBreakOverlay = new();
+    private readonly List<TrendLineBreakDraw> trendLineBreakHistory = new();
+    private int trendLineHighCheckedBar = -1;
+    private int trendLineLowCheckedBar = -1;
+    private volatile TrendLineBreakDrawable trendLineBreakDrawable = TrendLineBreakDrawable.Empty;
+    private const int TrendLineBreakMaxKept = 20;
+
     public OrbIxIndicator()
     {
         this.Name = "ORB-IX";
@@ -2579,6 +2756,23 @@ public sealed class OrbIxIndicator : Qt.Indicator
         this.anchorDisplacementWatch.Clear();
         this.anchorGateDrawable = AnchorGateDrawable.Empty;
 
+        // Same reasoning again: a trend-line break flag from a different chart's bars would
+        // mark a level and a moment that mean nothing on the new chart.
+        this.trendLineBreakHistory.Clear();
+        this.trendLineHighCheckedBar = -1;
+        this.trendLineLowCheckedBar = -1;
+        this.trendLineBreakDrawable = TrendLineBreakDrawable.Empty;
+
+        // A volume node from a prior chart's tape describes prints that never happened here.
+        this.anchorVolumeProfile = new AnchorSessionProfile();
+        this.volumeNodeDrawable = VolumeNodeDrawable.Empty;
+
+        this.anchorLongArmPrice = double.NaN;
+        this.anchorLongArmCvd = 0m;
+        this.anchorShortArmPrice = double.NaN;
+        this.anchorShortArmCvd = 0m;
+        this.anchorAbsorptionPanelDrawable = AnchorAbsorptionPanelDrawable.Empty;
+
         // The zone and delta features start over on the next load, same
         // reasoning as the HH/LL block above.
         this.ResetZoneState();
@@ -2849,6 +3043,12 @@ public sealed class OrbIxIndicator : Qt.Indicator
                     // direction read are: cumulative delta restarts, so a side carried across the
                     // boundary would be this session wearing yesterday's verdict.
                     this.deltaFlips.OnSessionOpen(sessionOpen);
+
+                    // Same reasoning: a volume node from a prior session describes tape that is
+                    // no longer trading. This is a fresh SessionProfile, not a cleared one -- the
+                    // type carries no Clear() of its own.
+                    this.anchorVolumeProfile = new AnchorSessionProfile();
+
                     if (this.deltaEngine is { } engineForVwap)
                     {
                         foreach (var bar in engineForVwap.Bars)
@@ -2894,6 +3094,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
                 // no follow-through within a real millisecond window), so it is fed here
                 // rather than waiting for the fold's bar-close pass.
                 this.FeedAnchorTape(in tick);
+                this.FeedVolumeNodeTick(in tick);
 
                 // A bar closes on the tick that closes it, not at the end of whatever batch the
                 // drain happened to collect. Everything the evaluation reads is then the state
@@ -2981,6 +3182,8 @@ public sealed class OrbIxIndicator : Qt.Indicator
             this.SeedClosedSessionsFromBars(nowUtc);
             this.FeedHhLl();
             this.FeedAnchorGate();
+            this.anchorAbsorptionPanelDrawable = this.BuildAnchorAbsorptionPanelDrawable();
+            this.BuildVolumeNodeDrawable();
             this.FeedWickAbsorption();
             this.FeedZones();
             this.PublishDelta();
@@ -2991,6 +3194,12 @@ public sealed class OrbIxIndicator : Qt.Indicator
             this.PublishWave1(nowUtc);
             this.PublishProfiles(nowUtc);
             this.PublishDirection();
+
+            // AFTER PublishDirection, deliberately: this needs THIS fold's fresh callout side,
+            // not last fold's, to judge whether "all signs" agree with a break on the bar that
+            // just closed. this.flowFrame.Bias was already rebuilt earlier this same fold by
+            // FoldFlow, so both halves of the confirmation are current.
+            this.UpdateTrendLineBreaks();
 
             this.SampleConnectionProbe(nowUtc);
 
@@ -3576,7 +3785,25 @@ public sealed class OrbIxIndicator : Qt.Indicator
         if (zone is null)
             return;
 
+        var wasArmed = zone.State == AnchorSignalState.Armed;
         engine.Advance(zone, this.anchorBarsFed, facts, DateTime.UtcNow, (decimal)tickSize, otf);
+
+        // The ABSORPTION panel's deltaPRICE/sigmaDELTA read FROM the instant a zone starts being
+        // tested, not from whenever the panel happens to be looked at — captured once per arming,
+        // reset every time it re-arms (Dormant -> Armed -> Dormant -> Armed is a NEW test).
+        if (!wasArmed && zone.State == AnchorSignalState.Armed)
+        {
+            if (side == AnchorTestSide.SupportLong)
+            {
+                this.anchorLongArmPrice = this.lastPrice;
+                this.anchorLongArmCvd = engine.Cvd;
+            }
+            else
+            {
+                this.anchorShortArmPrice = this.lastPrice;
+                this.anchorShortArmCvd = engine.Cvd;
+            }
+        }
 
         if (!haveTicksThisBar || zone.State != AnchorSignalState.Armed)
             return;
@@ -3603,6 +3830,21 @@ public sealed class OrbIxIndicator : Qt.Indicator
         };
 
         engine.Promote(zone, evt, this.anchorBarsFed);
+    }
+
+    /// <summary>
+    /// Feeds the live volume-by-price profile one tick at a time — INDEPENDENT of the Anchor
+    /// Gate's own enable flag, since this is its own switch (AnchorVolumeZonesEnabled).
+    /// </summary>
+    private void FeedVolumeNodeTick(in TickEvent tick)
+    {
+        if (!this.AnchorVolumeZonesEnabled)
+            return;
+
+        if (!double.IsFinite(tick.Price) || !double.IsFinite(tick.Size) || tick.Size <= 0)
+            return;
+
+        this.anchorVolumeProfile.Add((decimal)tick.Price, (decimal)tick.Size);
     }
 
     /// <summary>Tape-based absorption: fed per tick from the drain loop, not per bar.</summary>
@@ -3667,25 +3909,338 @@ public sealed class OrbIxIndicator : Qt.Indicator
             yield return (sz, AnchorTestSide.ResistanceShort);
     }
 
+    /// <summary>
+    /// Extracts this session's live high-volume shelves once per fold — cheap enough (a walk of
+    /// however many distinct prices have traded today) not to need a coarser cadence. Rebuilds
+    /// unconditionally: the profile changes every tick, unlike the bar-indexed drawables that
+    /// only change on a bar close.
+    /// </summary>
+    private void BuildVolumeNodeDrawable()
+    {
+        if (!this.AnchorVolumeZonesEnabled)
+        {
+            if (this.volumeNodeDrawable.Shelves.Length > 0)
+                this.volumeNodeDrawable = VolumeNodeDrawable.Empty;
+            return;
+        }
+
+        var tickSize = this.instrument.TickSize;
+        if (!double.IsFinite(tickSize) || tickSize <= 0 || this.anchorVolumeProfile.VolByPrice.Count == 0)
+            return;
+
+        this.anchorHvnSettings.NodePeakPct = this.AnchorVolumeMinPeakPercent / 100m;
+
+        var shelves = AnchorProfileMath.ExtractShelves(
+            this.anchorVolumeProfile.VolByPrice, (decimal)tickSize, this.anchorHvnSettings);
+
+        var result = new VolumeNodeDraw[shelves.Count];
+        for (var i = 0; i < shelves.Count; i++)
+        {
+            var s = shelves[i];
+            result[i] = new VolumeNodeDraw((double)s.Bottom, (double)s.Top, (double)s.Peak);
+        }
+
+        this.volumeNodeDrawable = new VolumeNodeDrawable(result);
+    }
+
     private AnchorGateDrawable BuildAnchorGateDrawable()
     {
         var zones = new List<AnchorGateZoneDraw>(2);
+        var tickSize = this.instrument.TickSize;
+
+        // "POSSIBLE REVERSAL INCOMING" (the operator's own ask, 2026-09-16, off a live chart):
+        // price has run at least the configured distance from the bias line, still IN the
+        // trend's own direction (directionReversalSide == 0 rules out the separate "price
+        // already violated the bias line" case, which is its own dashed line elsewhere), and
+        // the OPPOSING zone — the one a reversal would actually trade — has reached Confirmed.
+        // A short bias stretched far down confirming its LONG/support zone is the exhaustion
+        // sign; a long bias stretched far up confirming its SHORT/resistance zone is the mirror.
+        bool ReversalConditionMet(bool zoneIsLong)
+        {
+            if (!this.DirectionReversalIncomingEnabled) return false;
+            if (this.directionCalloutSide == 0 || !double.IsFinite(this.directionCalloutAnchorPrice)) return false;
+            if (this.directionReversalSide != 0) return false;
+            if (!double.IsFinite(tickSize) || tickSize <= 0) return false;
+
+            var opposesBias = zoneIsLong ? this.directionCalloutSide < 0 : this.directionCalloutSide > 0;
+            if (!opposesBias) return false;
+
+            var distance = Math.Abs(this.lastPrice - this.directionCalloutAnchorPrice);
+            return distance >= this.DirectionReversalIncomingDistanceTicks * tickSize;
+        }
+
+        // "Enter long/short here" + target — ONLY when Confirmed AND the bias line already
+        // agrees with this zone's side, the same two-signal bar the strategy requires before it
+        // would place an order (see directionAbsorptionScalpStrategy.cs's OnZoneConfirmed).
+        (double Price, string Label)? ComputeEntryTarget(bool zoneIsLong, double entryPrice)
+        {
+            if (!this.AnchorEntryMarkingEnabled) return null;
+            if (!double.IsFinite(tickSize) || tickSize <= 0) return null;
+
+            var side = zoneIsLong ? 1 : -1;
+            if (this.directionCalloutSide != side) return null;
+
+            return this.TryComputeAnchorTarget(side, entryPrice, tickSize, out var target, out var label)
+                ? (target, label)
+                : null;
+        }
 
         void AddZone(AnchorZone? zone, bool isLong)
         {
             if (zone is null || zone.State == AnchorSignalState.Dormant)
                 return;
 
+            var isReversal = zone.State == AnchorSignalState.Confirmed && ReversalConditionMet(isLong);
+            var entryTarget = zone.State == AnchorSignalState.Confirmed
+                ? ComputeEntryTarget(isLong, (double)zone.Poc)
+                : null;
+
+            // StartBar is the same HH/LL bar index space hhllBarOpen already indexes — the zone
+            // was built FROM that segment, so no separate bar-time tracking is needed here.
+            var startUtc = zone.StartBar >= 0 && zone.StartBar < this.hhllBarOpen.Count
+                ? this.hhllBarOpen[zone.StartBar]
+                : DateTime.UtcNow;
+
             zones.Add(new AnchorGateZoneDraw(
-                (double)zone.Poc, isLong, zone.State,
+                startUtc, (double)zone.Top, (double)zone.Bottom, (double)zone.Poc, isLong, zone.State,
                 zone.HasCluster ? (double?)((double)zone.ClusterLow) : null,
-                zone.HasCluster ? (double?)((double)zone.ClusterHigh) : null));
+                zone.HasCluster ? (double?)((double)zone.ClusterHigh) : null,
+                isReversal, entryTarget?.Price, entryTarget?.Label));
         }
 
         AddZone(this.anchorLongZone, isLong: true);
         AddZone(this.anchorShortZone, isLong: false);
 
         return new AnchorGateDrawable(zones.ToArray());
+    }
+
+    private static bool IsAheadOfPrice(double candidate, double price, int side) =>
+        side == 1 ? candidate > price : candidate < price;
+
+    /// <summary>
+    /// Nearest qualifying level ahead of price in the trade's direction — the same rule
+    /// directionAbsorptionScalpStrategy.cs's own TryComputeTarget uses, reimplemented here
+    /// against data the INDICATOR already maintains (this.hhllEngine, this.vwapSession,
+    /// this.levels) rather than rebuilt from scratch the way the strategy had to. Candidates:
+    /// the nearest opposing HH/LL level, VWAP, prior day/week levels (from the existing
+    /// LevelGraph already powering "Draw key levels near price"), and this session's own live
+    /// volume-node shelves.
+    /// </summary>
+    private bool TryComputeAnchorTarget(
+        int side, double price, double tickSize, out double targetPrice, out string source)
+    {
+        var candidates = new List<(double Price, string Label)>();
+
+        var opposing = this.hhllEngine?.Segments.LastOrDefault(s => s.IsResistance == (side == 1));
+        if (opposing is not null && IsAheadOfPrice(opposing.Price, price, side))
+            candidates.Add((opposing.Price, side == 1 ? "resistance" : "support"));
+
+        if (this.vwapSession.TryCurrent(out var vwap, out _) && IsAheadOfPrice(vwap, price, side))
+            candidates.Add((vwap, "VWAP"));
+
+        if (this.levels is { } levelGraph)
+        {
+            foreach (var level in levelGraph.Levels)
+            {
+                var relevant = side == 1
+                    ? level.Kind is LevelKind.PriorDayHigh or LevelKind.PriorDayClose or LevelKind.PriorWeekHigh
+                    : level.Kind is LevelKind.PriorDayLow or LevelKind.PriorDayClose or LevelKind.PriorWeekLow;
+
+                if (relevant && IsAheadOfPrice(level.Price, price, side))
+                    candidates.Add((level.Price, level.Label));
+            }
+        }
+
+        foreach (var shelf in this.volumeNodeDrawable.Shelves)
+        {
+            if (IsAheadOfPrice(shelf.Peak, price, side))
+                candidates.Add((shelf.Peak, "volume node"));
+        }
+
+        var minDistance = this.AnchorTargetMinDistanceTicks * tickSize;
+        var qualified = candidates.Where(c => Math.Abs(c.Price - price) >= minDistance).ToList();
+
+        if (qualified.Count == 0)
+        {
+            targetPrice = default;
+            source = string.Empty;
+            return false;
+        }
+
+        var nearest = qualified.OrderBy(c => Math.Abs(c.Price - price)).First();
+        targetPrice = nearest.Price;
+        source = nearest.Label;
+        return true;
+    }
+
+    /// <summary>
+    /// Builds the rich ABSORPTION panel for whichever zone is currently most active
+    /// (Confirmed &gt; Triggered &gt; Armed; a tie prefers the side the bias line already agrees
+    /// with). THE EFFORT-VS-RESULT CLASSIFIER, stated plainly since it decides the whole panel:
+    /// deltaPRICE (price change since this zone's current arming began) and sigmaDELTA (net
+    /// session delta over the same window) are compared by SIGN. Same sign (both up, or both
+    /// down) reads as a genuine directional move — the order flow is confirming the price
+    /// action, not fighting it — so the gate reads "Veto" (this is not absorption) and the
+    /// headline names the side actually in control. Opposite signs (or either one flat) means
+    /// price is NOT being confirmed by the order flow, which is the textbook absorption
+    /// signature, so the gate reads "Confirm". VALIDATED AGAINST TWO OBSERVED SCREENSHOTS from
+    /// the friend's chart this was modelled on (2026-09-16): +63.8/+4759 read "GEN BUY, gate:
+    /// Veto"; -4.5/-241 read "GEN SELL, gate: Veto" — both same-sign, both Veto, matching this
+    /// rule exactly. The Confirm side's exact wording was not observed and is this codebase's
+    /// own construction, not a verbatim copy. STATED HEURISTIC, NOT A MEASURED ONE, same
+    /// standing as every other judgement call here — see the class doc comment on
+    /// AnchorAbsorptionPanelOverlay.
+    /// </summary>
+    private AnchorAbsorptionPanelDrawable BuildAnchorAbsorptionPanelDrawable()
+    {
+        if (!this.AnchorAbsorptionPanelEnabled)
+            return AnchorAbsorptionPanelDrawable.Empty;
+
+        static int Rank(AnchorZone? z) => z?.State switch
+        {
+            AnchorSignalState.Confirmed => 3,
+            AnchorSignalState.Triggered => 2,
+            AnchorSignalState.Armed => 1,
+            _ => 0,
+        };
+
+        var longRank = Rank(this.anchorLongZone);
+        var shortRank = Rank(this.anchorShortZone);
+
+        if (longRank == 0 && shortRank == 0)
+            return AnchorAbsorptionPanelDrawable.Empty;
+
+        bool pickLong;
+        if (longRank != shortRank)
+        {
+            pickLong = longRank > shortRank;
+        }
+        else
+        {
+            // Tie: prefer whichever side the bias line already agrees with, else long.
+            pickLong = this.directionCalloutSide >= 0;
+        }
+
+        var zone = pickLong ? this.anchorLongZone : this.anchorShortZone;
+        var engine = pickLong ? this.anchorLongSignal : this.anchorShortSignal;
+        var armPrice = pickLong ? this.anchorLongArmPrice : this.anchorShortArmPrice;
+        var armCvd = pickLong ? this.anchorLongArmCvd : this.anchorShortArmCvd;
+
+        if (zone is null || !double.IsFinite(armPrice))
+            return AnchorAbsorptionPanelDrawable.Empty;
+
+        var deltaPrice = this.lastPrice - armPrice;
+        var sigmaDelta = engine.Cvd - armCvd;
+
+        var priceSign = Math.Sign(deltaPrice);
+        var deltaSign = Math.Sign(sigmaDelta);
+        var isVeto = priceSign != 0 && priceSign == deltaSign;
+
+        var barsSinceArm = zone.ArmedBar >= 0 ? Math.Max(0, this.anchorBarsFed - zone.ArmedBar) : 0;
+
+        string reasoning;
+        string longsText, shortsText;
+        bool longsGood, shortsGood;
+
+        if (isVeto)
+        {
+            var buying = deltaPrice >= 0;
+            reasoning = buying
+                ? "Price rising with delta positive → genuine aggressive buying, not absorption."
+                : "Price falling with delta negative → genuine aggressive selling, not absorption.";
+            longsText = buying ? "real buying — aggressors in control" : "stand aside";
+            shortsText = buying ? "stand aside" : "real selling — aggressors in control";
+            longsGood = buying;
+            shortsGood = !buying;
+        }
+        else
+        {
+            reasoning = pickLong
+                ? "Price making little progress against the delta here → sellers being absorbed at support."
+                : "Price making little progress against the delta here → buyers being absorbed at resistance.";
+            longsText = pickLong ? "absorption holding — buyers defending" : "stand aside — buying absorbed";
+            shortsText = pickLong ? "stand aside — selling absorbed" : "absorption holding — sellers defending";
+            longsGood = pickLong;
+            shortsGood = !pickLong;
+        }
+
+        return new AnchorAbsorptionPanelDrawable(
+            true, pickLong, isVeto, deltaPrice, sigmaDelta, barsSinceArm, this.anchorZoneStateRules.ClockBars,
+            reasoning, longsText, shortsText, longsGood, shortsGood);
+    }
+
+    /// <summary>
+    /// Flags a "Flow: trend lines" break only when "all signs show break... in that direction"
+    /// (the operator's own wording, 2026-09-16): the bar that just closed broke the line AND the
+    /// direction callout already agreed with that side on the SAME bar. Checked once per newly
+    /// closed bar, per line kind (high/low), never re-checked once a bar has been judged.
+    /// </summary>
+    private void UpdateTrendLineBreaks()
+    {
+        if (!this.TrendLineBreakFlagEnabled)
+        {
+            if (this.trendLineBreakHistory.Count > 0)
+            {
+                this.trendLineBreakHistory.Clear();
+                this.trendLineBreakDrawable = TrendLineBreakDrawable.Empty;
+            }
+
+            return;
+        }
+
+        var bias = this.flowFrame.Bias;
+        if (bias.TrendLines.Length == 0 || bias.BarTimes.Length == 0)
+            return;
+
+        var latestBar = bias.BarTimes.Length - 1;
+        if (latestBar < 0 || latestBar >= this.flowBarClose.Count)
+            return;
+
+        var latestClose = this.flowBarClose[latestBar];
+        if (!double.IsFinite(latestClose))
+            return;
+
+        var advanced = false;
+
+        foreach (var line in bias.TrendLines)
+        {
+            var alreadyChecked = line.IsHighLine ? this.trendLineHighCheckedBar : this.trendLineLowCheckedBar;
+            if (latestBar <= alreadyChecked)
+                continue;
+
+            if (line.IsHighLine)
+                this.trendLineHighCheckedBar = latestBar;
+            else
+                this.trendLineLowCheckedBar = latestBar;
+
+            // Only a bar strictly after the line's own second anchor can break it — a bar at or
+            // before EndBar is one of the swings the line is drawn THROUGH, not a break of it.
+            if (latestBar <= line.EndBar)
+                continue;
+
+            var linePrice = line.PriceAt(latestBar);
+            var brokeUp = line.IsHighLine && latestClose > linePrice;
+            var brokeDown = !line.IsHighLine && latestClose < linePrice;
+
+            if (!brokeUp && !brokeDown)
+                continue;
+
+            // "ALL SIGNS SHOW BREAK... IN THAT DIRECTION": the raw price break alone is not
+            // enough — the broader direction callout (structure/VWAP/delta) must already agree
+            // with the same side, on this same bar.
+            var confirmed = brokeUp ? this.directionCalloutSide > 0 : this.directionCalloutSide < 0;
+            if (!confirmed)
+                continue;
+
+            this.trendLineBreakHistory.Add(new TrendLineBreakDraw(bias.BarTimes[latestBar], linePrice, brokeUp));
+            if (this.trendLineBreakHistory.Count > TrendLineBreakMaxKept)
+                this.trendLineBreakHistory.RemoveAt(0);
+
+            advanced = true;
+        }
+
+        if (advanced)
+            this.trendLineBreakDrawable = new TrendLineBreakDrawable(this.trendLineBreakHistory.ToArray());
     }
 
     // ---- HTF zones (approved plan 2026-08-28) ----------------------------
@@ -4483,7 +5038,12 @@ public sealed class OrbIxIndicator : Qt.Indicator
     /// </summary>
     private void PublishDeltaLevels()
     {
-        var wantFlips = this.ShowDeltaFlips;
+        // The vertical "FLIP UP/DOWN" marker and the horizontal flip level are two independent
+        // displays of the same underlying DeltaFlip data (see DeltaFlipVerticalMarker's own doc
+        // comment) — the data must be computed whenever EITHER wants it, or turning the
+        // horizontal level off would silently take the vertical marker down with it. Which one
+        // actually draws is decided per-line, in DeltaLevelsOverlay, from each toggle separately.
+        var wantFlips = this.ShowDeltaFlips || this.DeltaFlipVerticalMarker;
         var wantShelves = this.ShowAbsorptionShelves;
 
         if (!wantFlips && !wantShelves)
@@ -4521,10 +5081,14 @@ public sealed class OrbIxIndicator : Qt.Indicator
         // THE CAPTION CARRIES BOTH MEASURED RECORDS, on the chart, every frame. A line on a chart
         // implies a read worth acting on; neither of these has earned that, and the place that has
         // to say so is the chart rather than a source comment nobody reading the chart can see.
+        //
+        // Named for the HORIZONTAL level specifically, so it only appears when that display is
+        // actually on — the vertical marker has its own "FLIP UP"/"FLIP DOWN" labels already and
+        // does not need this caption repeating the count for a line that is not drawn.
+        var flipCaption = this.ShowDeltaFlips ? $"Δ flip levels {flips.Count}" : string.Empty;
         var status = string.Concat(
-            $"Δ flip levels {flips.Count}",
-            wantShelves ? " · " + shelfNote : string.Empty,
-            string.Empty);
+            flipCaption,
+            wantShelves ? (flipCaption.Length > 0 ? " · " : string.Empty) + shelfNote : string.Empty);
 
         this.deltaLevelsDrawable = new DeltaLevelsDrawable(flips, shelves, status);
     }
@@ -7799,7 +8363,10 @@ public sealed class OrbIxIndicator : Qt.Indicator
             this.DrawFib(graphics, registry);
             this.DrawHhLl(graphics, registry);
             this.DrawWickAbsorption(graphics, registry);
+            this.DrawVolumeNodes(graphics, registry);
             this.DrawAnchorGate(graphics, registry);
+            this.DrawAnchorAbsorptionPanel(graphics);
+            this.DrawTrendLineBreaks(graphics, registry);
             this.DrawZones(graphics, registry);
             // BEFORE the ranges and the setup geometry: imbalance is tape context and must sit
             // under the decision lines, never over them.
@@ -8061,7 +8628,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
             this.deltaLevelsOverlay.Draw(graphics, window, drawable,
                 new DeltaLevelsOverlay.Options(
                     this.DeltaFlipUpColor, this.DeltaFlipDownColor, this.AbsorptionShelfColor,
-                    this.LabelDeltaLevels),
+                    this.LabelDeltaLevels, this.DeltaFlipVerticalMarker, this.DeltaFlipVerticalMarkerNewestOnly),
                 labelRegistry);
         }
         catch (Exception ex)
@@ -8299,6 +8866,28 @@ public sealed class OrbIxIndicator : Qt.Indicator
         }
     }
 
+    private void DrawVolumeNodes(Graphics graphics, List<RectangleF> labelRegistry)
+    {
+        var chart = this.CurrentChart;
+        var window = chart?.MainWindow;
+        var drawable = this.volumeNodeDrawable;
+
+        if (window is null || chart is null || drawable.Shelves.Length == 0)
+            return;
+
+        try
+        {
+            this.volumeNodeOverlay.Draw(graphics, window, drawable,
+                new VolumeNodeOverlay.Options(this.AnchorVolumeZonesColor),
+                labelRegistry);
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = PathDisplay.Redact(
+                $"The volume node overlay failed to draw: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     private void DrawAnchorGate(Graphics graphics, List<RectangleF> labelRegistry)
     {
         var chart = this.CurrentChart;
@@ -8318,6 +8907,53 @@ public sealed class OrbIxIndicator : Qt.Indicator
         {
             this.overlayFault = PathDisplay.Redact(
                 $"The Anchor gate overlay failed to draw: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private void DrawAnchorAbsorptionPanel(Graphics graphics)
+    {
+        var chart = this.CurrentChart;
+        var window = chart?.MainWindow;
+        var panel = this.anchorAbsorptionPanelDrawable;
+
+        if (window is null || chart is null || !panel.Show)
+            return;
+
+        try
+        {
+            this.anchorAbsorptionPanelOverlay.Draw(
+                graphics, window.ClientRectangle, panel,
+                new AnchorAbsorptionPanelOverlay.Options(
+                    this.AnchorAbsorptionPanelOffsetX, this.AnchorAbsorptionPanelOffsetY,
+                    this.AnchorGateLongColor, this.AnchorGateShortColor,
+                    Color.FromArgb(0x26, 0xA6, 0x9A), Color.FromArgb(150, 150, 150)));
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = PathDisplay.Redact(
+                $"The Absorption panel failed to draw: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private void DrawTrendLineBreaks(Graphics graphics, List<RectangleF> labelRegistry)
+    {
+        var chart = this.CurrentChart;
+        var window = chart?.MainWindow;
+        var drawable = this.trendLineBreakDrawable;
+
+        if (window is null || chart is null || drawable.Flags.Length == 0)
+            return;
+
+        try
+        {
+            this.trendLineBreakOverlay.Draw(graphics, window, drawable,
+                new TrendLineBreakOverlay.Options(this.TrendLineBreakUpColor, this.TrendLineBreakDownColor),
+                labelRegistry);
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = PathDisplay.Redact(
+                $"The trend-line break overlay failed to draw: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -8476,6 +9112,9 @@ public sealed class OrbIxIndicator : Qt.Indicator
         this.hhllOverlay.Dispose();
         this.wickAbsorptionOverlay.Dispose();
         this.anchorGateOverlay.Dispose();
+        this.trendLineBreakOverlay.Dispose();
+        this.volumeNodeOverlay.Dispose();
+        this.anchorAbsorptionPanelOverlay.Dispose();
         this.fibOverlay.Dispose();
         this.zoneOverlay.Dispose();
         this.deltaOverlay.Dispose();
