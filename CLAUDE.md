@@ -448,6 +448,36 @@ Direction panel defaulted off (no other on-chart indicator says "no bias right n
 line is broken"). Possible fix if this resurfaces: a small, low-key "no bias — verdict is
 Mixed/Undecided" marker independent of the full Direction panel.
 
+**Added 2026-09-16 (later same day) - "don't enter" warnings, and a louder entry call, from a
+live-chart follow-up.** After seeing the neutral-yellow volume-node boxes and asking whether
+they were long or short (they're deliberately neither - a volume node is a price the tape spent
+time at, not a directional signal, per its own class doc comment), the operator asked for the
+opposite kind of signal: "an indication like enter short or enter long now and something that
+is like dont enter in this area." Two clarifying answers fixed scope: BOTH no-entry triggers
+count (either is enough on its own), and the entry call reuses the EXISTING Confirmed+bias-
+agreement gate rather than firing earlier on Triggered, just made louder. `NoEntryZonesEnabled`/
+`NoEntryColor` (indices 221-222, default orange `#FF9900`):
+- **Volume-node no-entry** (`VolumeNodeDraw.IsNoEntry`, computed in `BuildVolumeNodeDrawable()`
+  against `this.lastPrice` each fold): only the ONE shelf price is currently inside gets
+  flagged - not every shelf on the chart, which would just repaint everything orange. Flagged
+  shelves swap from yellow to orange fill/border and their label from `"VOLUME NODE"` to
+  `"DON'T ENTER HERE — VOLUME NODE"`.
+- **Conflicting-signals no-entry** (`AnchorGateDrawable.ConflictWarning`, computed in
+  `BuildAnchorGateDrawable()`): true when the Anchor Gate has zones live (Armed or later) on
+  BOTH sides at once, OR the bias line's own verdict is Mixed/Undecided
+  (`directionCalloutSide == 0`) - the signals disagreeing with themselves, independent of where
+  price is. Drawn as a standing banner (`"⚠ DON'T ENTER — SIGNALS CONFLICTING"`) at a FIXED
+  pixel position (top-centre of the pane), not anchored to any price, since this condition isn't
+  about a price level - fixed `DrawAnchorGate`'s early-return (previously skipped the whole
+  overlay call whenever there were zero zones, which would have silently dropped this banner on
+  a Mixed-verdict day with no zones armed at all) to also let a zone-less, warning-only draw
+  through.
+- **"ENTER LONG/SHORT HERE" reworded to "...NOW" and made visually louder** (bigger bold font,
+  solid colour-filled background instead of the translucent dark box every other label here
+  uses, black text for contrast) - same trigger as before (Anchor Gate zone Confirmed AND the
+  bias line already agreeing), the operator's own choice was to keep the trigger and just make
+  the call read as more of a clear go-signal.
+
 ### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
 **Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show
 delta, DOM/resting orders, absorption, auto-drawn fib, and FRVP+AVP (higher/lower timeframe

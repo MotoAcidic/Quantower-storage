@@ -29,7 +29,7 @@ namespace OrbIx.Quantower.Indicator;
 /// <param name="TargetPrice">
 /// Set only while this zone is Confirmed AND the direction callout's bias agrees with its side
 /// — the same two-signal bar the strategy uses before it would actually enter. Null otherwise.
-/// Draws "ENTER LONG/SHORT HERE" at the zone and a target line/label at this price.
+/// Draws "ENTER LONG/SHORT NOW" at the zone and a target line/label at this price.
 /// </param>
 /// <param name="TargetLabel">Which level supplied <see cref="TargetPrice"/> — HH/LL, VWAP, a
 /// prior day/week level, a volume node, or "fallback" when nothing qualified.</param>
@@ -39,7 +39,14 @@ internal readonly record struct AnchorGateZoneDraw(
     double? TargetPrice = null, string? TargetLabel = null);
 
 /// <summary>Immutable paint snapshot: the fold writes it, the paint reads it.</summary>
-internal sealed record AnchorGateDrawable(AnchorGateZoneDraw[] Zones)
+/// <param name="ConflictWarning">
+/// True when the Anchor Gate has zones active on BOTH sides at once, or the bias line's own
+/// verdict is Mixed/Undecided — the signals disagree with themselves, so entering either
+/// direction right now is a coin flip regardless of price. The operator's own "dont enter in
+/// this area" ask (2026-09-16), the half of it that isn't tied to a volume-node price band —
+/// see VolumeNodeDraw.IsNoEntry for that half. Drawn as a standing banner, not a price zone.
+/// </param>
+internal sealed record AnchorGateDrawable(AnchorGateZoneDraw[] Zones, bool ConflictWarning = false)
 {
     public static readonly AnchorGateDrawable Empty = new(Array.Empty<AnchorGateZoneDraw>());
 }
@@ -55,11 +62,13 @@ internal sealed record AnchorGateDrawable(AnchorGateZoneDraw[] Zones)
 /// </summary>
 internal sealed class AnchorGateOverlay : IDisposable
 {
-    internal readonly record struct Options(Color LongColor, Color ShortColor);
+    internal readonly record struct Options(Color LongColor, Color ShortColor, Color NoEntryColor);
 
     private const float TriangleSize = 7f;
 
     private readonly Font font = new(FontFamily.GenericSansSerif, 8f, FontStyle.Bold);
+    private readonly Font enterFont = new(FontFamily.GenericSansSerif, 10f, FontStyle.Bold);
+    private readonly Font warningFont = new(FontFamily.GenericSansSerif, 9f, FontStyle.Bold);
     private readonly Dictionary<int, Pen> borders = new();
     private readonly Dictionary<int, Pen> dashedLines = new();
     private readonly Dictionary<int, SolidBrush> fills = new();
@@ -71,7 +80,7 @@ internal sealed class AnchorGateOverlay : IDisposable
         Graphics graphics, IChartWindow window, AnchorGateDrawable drawable,
         in Options options, List<RectangleF> labelRegistry)
     {
-        if (this.disposed || drawable.Zones.Length == 0)
+        if (this.disposed)
             return;
 
         var converter = window.CoordinatesConverter;
@@ -85,6 +94,27 @@ internal sealed class AnchorGateOverlay : IDisposable
 
         try
         {
+            // Standing banner, not a price zone — the "signals disagree with each other" half
+            // of "dont enter in this area". Fixed pixel position (top-centre) since there is no
+            // single price this warning is about; see AnchorGateDrawable.ConflictWarning.
+            if (drawable.ConflictWarning)
+            {
+                const string warnText = "⚠ DON'T ENTER — SIGNALS CONFLICTING";
+                var warnSize = graphics.MeasureString(warnText, this.warningFont);
+                var warnRect = new RectangleF(
+                    pane.Left + ((pane.Width - warnSize.Width) / 2f) - 6f, pane.Top + 8f,
+                    warnSize.Width + 12f, warnSize.Height + 6f);
+
+                using var warnText_ = new SolidBrush(options.NoEntryColor);
+                using var warnBorder = new Pen(Color.FromArgb(255, options.NoEntryColor), 1.5f);
+                graphics.FillRectangle(this.labelBack, warnRect);
+                graphics.DrawRectangle(warnBorder, warnRect.X, warnRect.Y, warnRect.Width, warnRect.Height);
+                graphics.DrawString(warnText, this.warningFont, warnText_, warnRect.Left + 6f, warnRect.Top + 3f);
+            }
+
+            if (drawable.Zones.Length == 0)
+                return;
+
             foreach (var zone in drawable.Zones)
             {
                 if (zone.State == SignalState.Dormant)
@@ -164,19 +194,24 @@ internal sealed class AnchorGateOverlay : IDisposable
                     }
                 }
 
-                // ENTER LONG/SHORT HERE + target — only set at all when Confirmed AND the bias
+                // ENTER LONG/SHORT NOW + target — only set at all when Confirmed AND the bias
                 // line agrees (see OrbIxIndicator's own entry-marking gate), so its mere
-                // presence here already means both signals agreed.
+                // presence here already means both signals agreed. Drawn LOUDER than every other
+                // label here (bigger font, solid fill instead of translucent) — the operator's
+                // own ask (2026-09-16): a clear go signal, not another line of small text among
+                // the rest ("ENTER ... NOW" replacing the original "... HERE" wording).
                 if (zone.TargetPrice is { } target)
                 {
-                    var enterText = $"ENTER {(zone.IsLong ? "LONG" : "SHORT")} HERE";
-                    var enterSize = graphics.MeasureString(enterText, this.font);
-                    var enterRect = new RectangleF(left + 4f, top - enterSize.Height - 2f, enterSize.Width + 6f, enterSize.Height + 2f);
+                    var enterText = $"ENTER {(zone.IsLong ? "LONG" : "SHORT")} NOW";
+                    var enterSize = graphics.MeasureString(enterText, this.enterFont);
+                    var enterRect = new RectangleF(left + 4f, top - enterSize.Height - 8f, enterSize.Width + 14f, enterSize.Height + 6f);
 
                     if (ChartOverlay.TryReserve(labelRegistry, enterRect))
                     {
-                        graphics.FillRectangle(this.labelBack, enterRect);
-                        graphics.DrawString(enterText, this.font, this.LabelBrush(colour), enterRect.Left + 3f, enterRect.Top + 1f);
+                        using var enterFill = new SolidBrush(Color.FromArgb(235, colour));
+                        graphics.FillRectangle(enterFill, enterRect);
+                        graphics.DrawRectangle(this.Border(colour), enterRect.X, enterRect.Y, enterRect.Width, enterRect.Height);
+                        graphics.DrawString(enterText, this.enterFont, Brushes.Black, enterRect.Left + 7f, enterRect.Top + 3f);
                     }
 
                     if (ChartOverlay.TryY(converter, target, pane.Top, pane.Bottom, out var targetY)
@@ -268,6 +303,8 @@ internal sealed class AnchorGateOverlay : IDisposable
 
         this.disposed = true;
         this.font.Dispose();
+        this.enterFont.Dispose();
+        this.warningFont.Dispose();
         this.labelBack.Dispose();
 
         foreach (var pen in this.borders.Values) pen.Dispose();

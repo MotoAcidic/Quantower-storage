@@ -868,6 +868,23 @@ public sealed class OrbIxIndicator : Qt.Indicator
     public int AnchorAbsorptionPanelOffsetY { get; set; } = 260;
 
     /// <summary>
+    /// "Something that is like dont enter in this area" (the operator's own ask, 2026-09-16).
+    /// Two independent triggers, either one enough on its own (the operator's own choice):
+    /// (1) price is currently INSIDE one of the live volume-node shelves above — heavy two-way
+    /// volume already traded there, a worse spot to open a fresh position than a clean level —
+    /// flagged by tinting that specific shelf and relabelling it, see BuildVolumeNodeDrawable;
+    /// (2) the Anchor Gate has zones active on BOTH sides at once, or the bias line's own verdict
+    /// is Mixed/Undecided (directionCalloutSide == 0) — the signals disagree with themselves, so
+    /// entering either direction right now is a coin flip regardless of price — flagged as a
+    /// standing banner, see BuildAnchorGateDrawable's conflictWarning computation.
+    /// </summary>
+    [InputParameter("Anchor Gate: show \"don't enter\" warnings", 221)]
+    public bool NoEntryZonesEnabled { get; set; } = true;
+
+    [InputParameter("Anchor Gate: don't-enter colour", 222)]
+    public Color NoEntryColor { get; set; } = Color.FromArgb(0xFF, 0x99, 0x00);
+
+    /// <summary>
     /// The operator's own ask (2026-09-16, from a live chart): when price has run far below (or
     /// above) the bias line — still consistent with the trend the bias line calls, not a
     /// violation of it — and the OPPOSING Anchor Gate zone then confirms (absorption against the
@@ -3933,11 +3950,19 @@ public sealed class OrbIxIndicator : Qt.Indicator
         var shelves = AnchorProfileMath.ExtractShelves(
             this.anchorVolumeProfile.VolByPrice, (decimal)tickSize, this.anchorHvnSettings);
 
+        var price = this.lastPrice;
         var result = new VolumeNodeDraw[shelves.Count];
         for (var i = 0; i < shelves.Count; i++)
         {
             var s = shelves[i];
-            result[i] = new VolumeNodeDraw((double)s.Bottom, (double)s.Top, (double)s.Peak);
+            var bottom = (double)s.Bottom;
+            var top = (double)s.Top;
+
+            // "Don't enter in this area" — only the shelf price is CURRENTLY inside gets
+            // flagged, not every shelf on the chart (the operator's own scoping, 2026-09-16).
+            var isNoEntry = double.IsFinite(price) && price >= Math.Min(bottom, top) && price <= Math.Max(bottom, top);
+
+            result[i] = new VolumeNodeDraw(bottom, top, (double)s.Peak, isNoEntry);
         }
 
         this.volumeNodeDrawable = new VolumeNodeDrawable(result);
@@ -4011,7 +4036,16 @@ public sealed class OrbIxIndicator : Qt.Indicator
         AddZone(this.anchorLongZone, isLong: true);
         AddZone(this.anchorShortZone, isLong: false);
 
-        return new AnchorGateDrawable(zones.ToArray());
+        // The other half of "dont enter in this area" — signals disagreeing with each other,
+        // independent of price: both Anchor Gate zones live at once (a long and a short case
+        // both being actively made), or the bias line's own verdict is Mixed/Undecided
+        // (directionCalloutSide == 0, see PublishDirection). Either is enough on its own (the
+        // operator's own choice, 2026-09-16).
+        bool IsLive(AnchorZone? z) => z is { State: AnchorSignalState.Armed or AnchorSignalState.Triggered or AnchorSignalState.Confirmed };
+        var conflictWarning = this.NoEntryZonesEnabled
+            && (IsLive(this.anchorLongZone) && IsLive(this.anchorShortZone) || this.directionCalloutSide == 0);
+
+        return new AnchorGateDrawable(zones.ToArray(), conflictWarning);
     }
 
     private static bool IsAheadOfPrice(double candidate, double price, int side) =>
@@ -8878,7 +8912,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
         try
         {
             this.volumeNodeOverlay.Draw(graphics, window, drawable,
-                new VolumeNodeOverlay.Options(this.AnchorVolumeZonesColor),
+                new VolumeNodeOverlay.Options(this.AnchorVolumeZonesColor, this.NoEntryColor, this.NoEntryZonesEnabled),
                 labelRegistry);
         }
         catch (Exception ex)
@@ -8894,13 +8928,14 @@ public sealed class OrbIxIndicator : Qt.Indicator
         var window = chart?.MainWindow;
         var drawable = this.anchorGateDrawable;
 
-        if (window is null || chart is null || drawable.Zones.Length == 0 || !this.AnchorGateShowPanel)
+        var hasContent = drawable.Zones.Length > 0 || drawable.ConflictWarning;
+        if (window is null || chart is null || !hasContent || !this.AnchorGateShowPanel)
             return;
 
         try
         {
             this.anchorGateOverlay.Draw(graphics, window, drawable,
-                new AnchorGateOverlay.Options(this.AnchorGateLongColor, this.AnchorGateShortColor),
+                new AnchorGateOverlay.Options(this.AnchorGateLongColor, this.AnchorGateShortColor, this.NoEntryColor),
                 labelRegistry);
         }
         catch (Exception ex)
