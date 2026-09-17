@@ -834,6 +834,26 @@ public sealed class OrbIxIndicator : Qt.Indicator
     public int AnchorVolumeMinPeakPercent { get; set; } = 70;
 
     /// <summary>
+    /// Fixed 2026-09-17, reported live: right after a session opens there are too few distinct
+    /// prices traded for the profile to have any real peak/valley shape yet, so Ocean's Anchor's
+    /// own walk-out (ShelfEdgePct against a peak that isn't really a peak) kept expanding until
+    /// it hit its own 100-tick/25-point default cap, on MULTIPLE adjacent price clusters at once
+    /// — the operator's exact complaint, screenshot of a chart where the shelves covered most of
+    /// the visible price range ("where am i supposed to trade at"). Three independent
+    /// tightenings, all defaulting far below Ocean's Anchor's own ATAS-tuned defaults since this
+    /// is a live-only, since-session-open profile (thin right after open) rather than the full
+    /// multi-day footprint history that class was designed against:
+    /// </summary>
+    [InputParameter("Volume nodes: minimum ticks fed before showing", 223, 0, 100000, 50, 0)]
+    public int AnchorVolumeMinTicks { get; set; } = 400;
+
+    [InputParameter("Volume nodes: max shelf width (ticks)", 224, 1, 400, 1, 0)]
+    public int AnchorVolumeMaxShelfTicks { get; set; } = 32;
+
+    [InputParameter("Volume nodes: max shelves shown", 225, 1, 20, 1, 0)]
+    public int AnchorVolumeMaxShelves { get; set; } = 3;
+
+    /// <summary>
     /// "There needs to be an area marked out that says enter short here or enter long here and
     /// mark out what i should be targeting" (the operator's own ask, 2026-09-16). Fires ONLY
     /// when an Anchor Gate zone reaches Confirmed AND the direction callout's bias already
@@ -2366,6 +2386,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
     private readonly VolumeNodeOverlay volumeNodeOverlay = new();
     private AnchorSessionProfile anchorVolumeProfile = new();
     private readonly AnchorHvnSettings anchorHvnSettings = new();
+    private int anchorVolumeTicksFed;
     private volatile VolumeNodeDrawable volumeNodeDrawable = VolumeNodeDrawable.Empty;
 
     // ---- trend-line break flag --------------------------------------------------------------
@@ -2782,6 +2803,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
 
         // A volume node from a prior chart's tape describes prints that never happened here.
         this.anchorVolumeProfile = new AnchorSessionProfile();
+        this.anchorVolumeTicksFed = 0;
         this.volumeNodeDrawable = VolumeNodeDrawable.Empty;
 
         this.anchorLongArmPrice = double.NaN;
@@ -3065,6 +3087,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
                     // no longer trading. This is a fresh SessionProfile, not a cleared one -- the
                     // type carries no Clear() of its own.
                     this.anchorVolumeProfile = new AnchorSessionProfile();
+                    this.anchorVolumeTicksFed = 0;
 
                     if (this.deltaEngine is { } engineForVwap)
                     {
@@ -3862,6 +3885,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
             return;
 
         this.anchorVolumeProfile.Add((decimal)tick.Price, (decimal)tick.Size);
+        this.anchorVolumeTicksFed++;
     }
 
     /// <summary>Tape-based absorption: fed per tick from the drain loop, not per bar.</summary>
@@ -3941,14 +3965,41 @@ public sealed class OrbIxIndicator : Qt.Indicator
             return;
         }
 
+        // Fixed 2026-09-17: right after a session opens there are too few distinct prices traded
+        // for the profile to have any real peak/valley shape, so the extractor's own walk-out
+        // kept expanding until it hit its width cap on several adjacent clusters at once,
+        // covering most of the visible chart ("where am i supposed to trade at" — the operator's
+        // own complaint). Wait for enough ticks before showing anything at all, rather than
+        // showing a shape that isn't real yet.
+        if (this.anchorVolumeTicksFed < this.AnchorVolumeMinTicks)
+        {
+            if (this.volumeNodeDrawable.Shelves.Length > 0)
+                this.volumeNodeDrawable = VolumeNodeDrawable.Empty;
+            return;
+        }
+
         var tickSize = this.instrument.TickSize;
         if (!double.IsFinite(tickSize) || tickSize <= 0 || this.anchorVolumeProfile.VolByPrice.Count == 0)
             return;
 
         this.anchorHvnSettings.NodePeakPct = this.AnchorVolumeMinPeakPercent / 100m;
 
+        // Tightened well below Ocean's Anchor's own ATAS-tuned default (100 ticks / 25 NQ
+        // points) — that default assumed a full multi-day footprint profile with a clearly
+        // shaped distribution; a live, since-session-open profile is thinner and needs a
+        // narrower cap to read as "an area", not "a third of the day's range".
+        this.anchorHvnSettings.MaxShelfTicks = this.AnchorVolumeMaxShelfTicks;
+
         var shelves = AnchorProfileMath.ExtractShelves(
             this.anchorVolumeProfile.VolByPrice, (decimal)tickSize, this.anchorHvnSettings);
+
+        // Cap how many shelves actually draw, ranked by their own peak volume — the extractor
+        // can return more candidates than are useful to look at; showing everything it finds is
+        // exactly what covered the chart in the first place.
+        if (shelves.Count > this.AnchorVolumeMaxShelves)
+        {
+            shelves = shelves.OrderByDescending(s => s.PeakVol).Take(this.AnchorVolumeMaxShelves).ToList();
+        }
 
         var price = this.lastPrice;
         var result = new VolumeNodeDraw[shelves.Count];

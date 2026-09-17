@@ -478,6 +478,30 @@ agreement gate rather than firing earlier on Triggered, just made louder. `NoEnt
   bias line already agreeing), the operator's own choice was to keep the trigger and just make
   the call read as more of a clear go-signal.
 
+**Fixed 2026-09-17 - volume nodes were covering most of the visible chart right after a session
+opened** ("it seems like the full chart is volume nodes... so were am i supposed to trade at").
+Root cause: right after open there are too few distinct prices traded for the live profile to
+have any real peak/valley shape yet, so `AnchorProfileMath.ExtractShelves`'s own walk-out
+(`ShelfEdgePct` against a peak that wasn't a real peak) kept expanding until it hit Ocean's
+Anchor's own default width cap (`MaxShelfTicks = 100`, i.e. 25 NQ points) on several adjacent
+price clusters at once - that default was tuned for a full multi-day ATAS footprint profile with
+a clearly shaped distribution, not a thin, since-session-open live accumulation. Three
+independent tightenings (`AnchorVolumeMinTicks`/`MaxShelfTicks`/`MaxShelves`, indices 223-225):
+- **`AnchorVolumeMinTicks`** (default 400): shows nothing at all until this many ticks have been
+  fed into the session's own live profile - the honest fix for "the shape isn't real yet" rather
+  than trying to tune around it.
+- **`AnchorVolumeMaxShelfTicks`** (default 32, vs. Ocean's Anchor's own 100): the width cap
+  actually applied to `anchorHvnSettings.MaxShelfTicks` each fold - a shelf now reads as "an
+  area", not "a third of the day's range".
+- **`AnchorVolumeMaxShelves`** (default 3): if the extractor still returns more candidates than
+  this, only the top N by their own `PeakVol` (smoothed peak volume) are drawn - showing
+  everything it finds is what covered the chart in the first place.
+
+(This fix landed the morning after the "don't enter" warnings above, once the operator actually
+watched the feature run live through a session open - see that entry for the `NoEntryZonesEnabled`
+feature itself, which is unaffected by this narrower-shelf fix beyond now having narrower, fewer
+shelves to flag against.)
+
 ### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
 **Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show
 delta, DOM/resting orders, absorption, auto-drawn fib, and FRVP+AVP (higher/lower timeframe
