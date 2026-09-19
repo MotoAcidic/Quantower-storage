@@ -1,0 +1,76 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    REBUILT 2026-09-18, SECOND RESTART: a from-scratch minimal version (delta engine + flip
+    engine only, no ORB-IX code shared) built earlier the same day would not display anything on
+    a live chart, and the cause was not found quickly enough to be worth continuing to chase in
+    isolation. The operator asked to go back to a literal copy of ORB-IX's own proven, working
+    file as the starting point, and remove unwanted features from THAT one at a time — each
+    removal keeps a known-working baseline instead of debugging new platform-integration code
+    with an unknown fault in it. See FinchScalpingIndicator.cs's own doc comment and
+    Quantower-storage/CLAUDE.md for what's been removed so far.
+
+    This is the SAME csproj shape as ORB-IX's own project (OrbIx.Core, OrbIx.Quantower.Shared,
+    every OrbIx.Quantower.Indicator overlay file, Ported/oceans-anchor, and an embedded config)
+    for exactly that reason: at this starting point Finch-Scalping IS ORB-IX, byte for byte
+    except the class name and Name string, so it needs everything ORB-IX needs. Items get
+    deleted from here as the corresponding code is removed from FinchScalpingIndicator.cs, not
+    before.
+
+    net10.0-windows for the same reason as ORB-IX's own project: the installed platform binds
+    System.Runtime 10 and System.Drawing.Common 9, and net8.0-windows fails with CS1705.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <AssemblyName>FinchScalpingIndicator</AssemblyName>
+    <RootNamespace>OrbIx.Quantower.Indicator</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Share)' == 'true'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <Deterministic>true</Deterministic>
+    <PathMap>$(MSBuildThisFileDirectory)..\..\=/src/</PathMap>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Compiled IN, not referenced — Assembly.Load cache-key hazard, documented at length in
+         ORB-IX's own .csproj. Referenced by relative path rather than duplicated, same DRY
+         pattern directionAbsorptionScalpStrategy.csproj already uses from a different folder. -->
+    <Compile Include="..\..\..\ORB-IX\src\OrbIx.Core\**\*.cs"
+             Exclude="..\..\..\ORB-IX\src\OrbIx.Core\bin\**;..\..\..\ORB-IX\src\OrbIx.Core\obj\**" />
+
+    <Compile Include="..\..\..\ORB-IX\src\OrbIx.Quantower.Shared\**\*.cs"
+             Exclude="..\..\..\ORB-IX\src\OrbIx.Quantower.Shared\bin\**;..\..\..\ORB-IX\src\OrbIx.Quantower.Shared\obj\**" />
+
+    <!-- Every overlay ORB-IX's own indicator file uses, EXCEPT OrbIxIndicator.cs itself — that
+         one file is this project's own copy, FinchScalpingIndicator.cs. -->
+    <Compile Include="..\..\..\ORB-IX\src\OrbIx.Quantower.Indicator\**\*.cs"
+             Exclude="..\..\..\ORB-IX\src\OrbIx.Quantower.Indicator\bin\**;..\..\..\ORB-IX\src\OrbIx.Quantower.Indicator\obj\**;..\..\..\ORB-IX\src\OrbIx.Quantower.Indicator\OrbIxIndicator.cs" />
+
+    <Compile Include="..\..\..\..\Ported\src\oceans-anchor\Anchor*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>$(QuantowerSdkPath)</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- One config file, used for both Debug and Release. LINK MUST STAY "orbix.default.json":
+       the config loader (inherited unchanged from OrbIxIndicator.cs) looks up its embedded
+       resource by matching any manifest name ENDING IN that exact string. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\config\finch-scalping.json" Link="orbix.default.json" />
+    <None Include="..\..\config\finch-scalping.json" Link="finch-scalping.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

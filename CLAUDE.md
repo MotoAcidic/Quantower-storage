@@ -502,6 +502,157 @@ watched the feature run live through a session open - see that entry for the `No
 feature itself, which is unaffected by this narrower-shelf fix beyond now having narrower, fewer
 shelves to flag against.)
 
+**Renamed 2026-09-17 - "ONLY LONG/SHORT SCALPS ..." bias-line wording changed to "ONLY BULLISH
+ABOVE"/"ONLY BEARISH BELOW"** (`OrbIxIndicator.cs`, the fixed regime sentence painted by
+`DirectionCalloutOverlay`) - the operator's own preference, no logic change: still the same
+regime divider frozen at the price where the multi-input verdict last flipped side, just
+different words for the same two outcomes. The reversal line's own wording (`BuildReversalText`,
+which still borrows the callout's scalp/hold grading, e.g. "POSSIBLE REVERSAL — LONG SCALP") was
+left as-is - that is a different concept (how urgent/how long the setup reads), not just a label
+for the same two states, and the operator's ask was specifically about the bias line's wording.
+
+**Recoloured 2026-09-17 - every footprint-based Flow level (Unfinished Auction, Volume
+Absorption tiers, Stacked Imbalance, footprint Absorption) now follows ONE consistent rule:
+green = bullish = long-limit candidate, red = bearish = short-limit candidate** (`config/
+orbix.share.json`'s per-feature `bullishColour`/`bearishColour`/`lowColour`/`highColour` keys -
+these colours are config-only, never exposed as their own `InputParameter`s, so this is the only
+place they can be changed; a rebuild is required for the embedded config to take effect, same as
+any other change to this file). Explained to the operator first (what "UA high 122×4" and "126
+over 17 tick(s) −x7.4" actually mean - Unfinished Auction and Volume Absorption, two SEPARATE
+features that happened to draw in similarly-hued pinks at an overlapping price, which is what
+actually prompted the confusion), then the operator said outright: "I have been putting limit
+orders on them and scalping the bounce from it and works out perfect but i need to know in what
+direction" - confirming this is a live, working trade practice, not idle curiosity, and that the
+one missing piece was a legend a glance could read. Before this change each feature family had
+its own unrelated colour pair (Unfinished Auction purple/pink, Stacked Imbalance blue/orange,
+footprint Absorption teal/red-ish, Volume Absorption cyan/magenta for tier1) with no shared
+meaning across the chart - a reader had to remember five different colour schemes instead of one.
+Reused colours ALREADY established elsewhere in the same config file for "buy"/"sell" (line
+~605's `buyColour`/`sellColour`, `#00E676`/`#FF5252`) rather than inventing new ones, so these
+lines now read the same green/red as everything else on the chart already does (Anchor Gate
+long/short, the bias/reversal lines, Wick Absorption boxes, big-trades markers). Volume
+Absorption's own tier1-vs-tier2 "strength reads as brightness, not a label" design (see
+`FlowLevelStyle.cs`'s own doc comment) is preserved - tier1 (moderate) got DIMMER green/red
+(`#2E7D32`/`#B71C1C`) than tier2 (heavy, `#00E676`/`#FF5252`, the same bright pair as everything
+else) - so strength is still legible at a glance, just within the green/red family now instead of
+a separate cyan/magenta family. **Deliberately NOT recoloured**: Cluster Search's single yellow
+`#FFEB3B` - that display has no bullish/bearish side of its own (its own doc comment: "a hit is a
+hit, and its side is already said by where the marker sits against the bar"), so forcing it into
+green/red would misrepresent a non-directional signal as directional.
+
+### Finch-Scalping (`Indicators/Finch-Scalping/`) — added 2026-09-17, REBUILT TWICE since
+
+**A brand-new, separately-installed indicator (its own DLL, its own name in Quantower's picker,
+its own per-chart settings — entirely independent of ORB-IX), built on the operator's own
+request** ("I want a brand new indicator setup were it just shows the delta on the bottom of my
+chart and it also has the line that comes up from the delta and i also want the lines that show
+up that show the bids and asks and the fib and golden pocket and call this indicator
+Finch-Scalping", plus a mid-build follow-up adding "the box that is currently in the top right
+that shows the buy and sells imbalance and the triangle delta thing").
+
+**Two false starts, briefly, because they explain the current shape.**
+1. First version: copied ORB-IX's ~9000-line `OrbIxIndicator.cs` verbatim, renamed the class,
+   flipped every `InputParameter` default not on the keep-list to `false`. Kept showing clutter
+   anyway — traced to every property still carrying ORB-IX's own `InputParameter` NAME AND INDEX
+   verbatim, which Quantower's settings persistence most likely keys by rather than by which
+   indicator assembly declares it, so ORB-IX's own saved values silently carried over.
+2. Second version: rebuilt from scratch as a genuinely small, self-contained file (just
+   `DeltaSeriesEngine`/`DeltaFlipEngine`/`SessionClock` from `OrbIx.Core`, two new small overlay
+   files, no shared `InputParameter` identity with ORB-IX at all). Displayed NOTHING on a live
+   chart — traced to `OnInit` trying exactly once and giving up permanently if
+   `HistoricalData.Aggregation` was not yet populated at that instant (the same startup race
+   ORB-IX's own `OnInit` already hit and fixed with a retry timer; this rebuild had dropped that
+   retry on the wrong assumption that a pure delta engine needed nothing worth waiting for).
+   Fixed with the same retry pattern ORB-IX uses, plus a minimal on-chart fault line so a future
+   startup failure would be visible instead of silent — but by the time it was confirmed fixed,
+   the operator had already decided the risk of debugging unfamiliar platform-integration code a
+   second time wasn't worth it, and asked to go back to a literal ORB-IX copy and cut from a
+   KNOWN-WORKING baseline instead.
+
+**Current approach (2026-09-18): back to a literal copy of `OrbIxIndicator.cs`** (same file, same
+`.csproj` shape as ORB-IX itself — `OrbIx.Core`, `OrbIx.Quantower.Shared`, every
+`OrbIx.Quantower.Indicator` overlay file, `Ported/oceans-anchor`, an embedded config — everything
+ORB-IX needs, because at this starting point Finch-Scalping IS ORB-IX byte-for-byte except the
+class name and `this.Name` string), verified to render identically to ORB-IX on a live chart
+before anything was removed. Features are being cut from THIS copy one at a time — actual
+deletion, not just an `InputParameter` default flip, so the settings-collision class of bug
+above cannot resur for anything actually removed (whatever's left still shares ORB-IX's
+parameter identity until it's specifically dealt with).
+
+**The operator also described their real trading workflow** (2026-09-18), which reframed what
+the "keep" list should be: HTF (1h/4h) absorption levels, order blocks and FVG for read-only
+top-down context, then drop to a 30s chart and scalp bounces off LARGE RESTING BID/ASK ORDERS.
+Two corrections this produced:
+- The "lines that show the bids and asks" feature picked earlier (Stacked Imbalance — historical
+  footprint runs) is the WRONG one for "large bid and ask orders" — that's **DOM levels** (live
+  resting order sizes), a different feature. Swapping to DOM levels.
+- Anchor Gate absorption currently builds its zones from THIS CHART's own HH/LL structure — on a
+  30s chart that means 30s swings, not the 1h/4h structure the operator actually wants read-only
+  context from. This needs rebuilding against a higher timeframe, not just re-enabling — not yet
+  started.
+- The HTF Zones/FVG/order-blocks feature already exists (`ZonesEnabled` + a `ZoneTimeframe`
+  string, default "4h") but only shows ONE timeframe at a time via a text field. The operator
+  wants "two switches, pick one at a time" (a 1h toggle and a separate 4h toggle) instead of
+  retyping a timeframe string — not yet built.
+
+**Removed so far (actual deletion, from the fresh ORB-IX copy), all "debug stuff on the chart"
+the operator explicitly did not want** (distinct from the actual absorption zone boxes/HH-LL
+tags, which stay — those are the real signal the HTF workflow needs, not debug noise):
+- The rich ABSORPTION panel entirely — `BuildAnchorAbsorptionPanelDrawable()`, `DrawAnchor
+  AbsorptionPanel()`, the `anchorAbsorptionPanelOverlay`/`anchorAbsorptionPanelDrawable` fields,
+  the `anchorLong/ShortArmPrice/Cvd` tracking fields that only fed it, and all three of its
+  `InputParameter`s (`AnchorAbsorptionPanelEnabled`/`OffsetX`/`OffsetY`) — the "gate: Confirm"
+  badge, ΔPRICE/ΣDELTA boxes, reasoning sentence, LONGS/SHORTS guidance boxes all came from this
+  one method and are now gone from the code, not merely defaulted off.
+- The old per-cell Imbalance display (`ImbalanceDrawEnabled`, was defaulting `true` — the
+  "...min 10 / stack 3 · gate ON · UNVERIFIED on this stack" caption), the old book-based
+  Absorption display (`AbsorptionDrawEnabled` — "absorption 5s: bid Quiet · ask Quiet · gate
+  recording only"), the Absorption Shelves scan (`ShowAbsorptionShelves` — "absorption shelves:
+  the footprint at ... has no matching delta bar..."), and the status/problems line
+  (`ShowStatusLine`) — these four were already defaulting `false` (or, for Imbalance, got set to
+  `false`) in ORB-IX's own current source, but were STILL rendering because ORB-IX itself is
+  attached to the same test chart with these manually turned on from earlier testing, and (per
+  the settings-collision theory above) Finch-Scalping's copy shared their exact parameter
+  identity. Fixed the same way as the first rebuild's 38 properties: removed the
+  `[InputParameter(...)]` attribute from all four so Quantower's settings system can no longer
+  see or override them, regardless of what ORB-IX's own chart has saved for that name.
+
+**Verified 2026-09-18**: `dotnet build src/Finch.Scalping.Indicator/Finch.Scalping.Indicator.csproj
+-c Release -p:Share=true -p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.3\bin\
+TradingPlatform.BusinessLayer.dll"` — 0 errors after the copy, and 0 errors again after the debug-
+text removal pass above. Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Scalping\
+FinchScalpingIndicator.dll`, `sha256sum` confirms each deploy matched. Confirmed rendering on a
+live chart (candles, structure, both indicators showing consistent output) before the removal
+pass began.
+
+**Fixed 2026-09-18 (same day) - the Delta panel disappeared** ("were is my delta that was at the
+bottom") right after the debug-text removal pass above, even though `DeltaEnabled`/`PublishDelta`/
+`DrawDelta` were all untouched by that pass. Same settings-collision mechanism as everything
+else in this entry: `"Delta: enable panel", 140` is byte-for-byte identical to ORB-IX's own
+parameter, and ORB-IX's chart (also attached, from earlier testing) most likely has a different
+saved value for it than this copy's own `= true` default. Fixed the same way: stripped the
+`InputParameter` attribute from `DeltaEnabled`. Applied the SAME fix proactively, before another
+one of these went missing, to every other property this indicator currently depends on actually
+working: `DeltaFlipVerticalMarker`/`DeltaFlipVerticalMarkerNewestOnly` (feature 2), `FlowEnabled`/
+`FlowClusterStatistics` (the other half of "delta at the bottom"), and `HhLlEnabled`/
+`AnchorGateEnabled`/`AnchorGateShowPanel` (required for the absorption zone boxes/HH-LL tags the
+operator's HTF workflow actually wants kept). None of these are configurable from the settings
+panel any more, same trade-off as every other property this fix has touched — worth revisiting
+once Finch-Scalping stops sharing a chart with ORB-IX during testing, since the underlying
+ORB-IX/Finch-Scalping identity collision is what makes losing configurability the safer choice
+right now. Rebuilt (0 errors), redeployed, hash-verified.
+
+**Not yet done, in order**: (1) confirm the panel is back and the debug-text removal actually
+cleaned up the chart; (2) swap Stacked Imbalance off / DOM levels on; (3) turn off Big Trades and
+the live counter box (not mentioned in the operator's actual workflow, may not be wanted at all —
+ask before assuming either way); (4) split HTF Zones into two independent 1h/4h toggles; (5) the
+hard one — rebuild Anchor Gate to read a higher timeframe's structure instead of the chart's own.
+Fib/golden pocket status is also unresolved — not mentioned in the trading-workflow explanation,
+needs asking. **A recurring lesson worth stating plainly**: nearly every regression in this
+indicator so far has been the SAME settings-collision mechanism hitting a different property each
+time — worth checking first, before assuming a code change broke something, whenever a feature
+that should be working goes missing or reappears unexpectedly.
+
 ### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
 **Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show
 delta, DOM/resting orders, absorption, auto-drawn fib, and FRVP+AVP (higher/lower timeframe

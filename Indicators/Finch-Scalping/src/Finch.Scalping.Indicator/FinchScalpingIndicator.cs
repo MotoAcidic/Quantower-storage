@@ -72,7 +72,7 @@ namespace OrbIx.Quantower.Indicator;
 /// folds the rings into module state; painting reads an immutable snapshot from that fold.
 /// No allocation, no computation, and no locking happens on the market-data path.
 /// </summary>
-public sealed class OrbIxIndicator : Qt.Indicator
+public sealed class FinchScalpingIndicator : Qt.Indicator
 {
     private readonly EventRing<TickEvent> tickRing = new(8192);
 
@@ -417,7 +417,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
     // FRVP/AVP/"volume analysis unavailable" line, a known permanent connector limitation the
     // operator no longer needs re-flagged every session). Still a settings toggle for anyone who
     // wants a genuine, unexpected fault surfaced on the chart instead of only in the log.
-    [InputParameter("Status: show the problems line", 91)]
     public bool ShowStatusLine { get; set; } = false;
 
     // ---- HH/LL structure port ------------------------------------------------------------
@@ -429,7 +428,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
     // Pine v4's own named-constant defaults (official v4 reference: lime
     // #00E676, red #FF5252, blue #2196F3, black #363A45).
 
-    [InputParameter("HH/LL structure: enable", 100)]
     public bool HhLlEnabled { get; set; } = true;
 
     [InputParameter("HH/LL: left bars", 101, 1, 500, 1, 0)]
@@ -663,7 +661,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
     [InputParameter("Zones: max height, % of ADR", 126, 5, 200, 5, 0)]
     public int ZoneMaxHeightAdrPercent { get; set; } = 50;
 
-    [InputParameter("Delta: enable panel", 140)]
     public bool DeltaEnabled { get; set; } = true;
 
     [InputParameter("Delta: panel height, px", 141, 40, 300, 10, 0)]
@@ -683,8 +680,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
     // chart input, because a per-chart toggle on something that decides entries would make
     // two charts of one instrument disagree about what the system does.
 
-    [InputParameter("Imbalance: draw on chart", 150)]
-    public bool ImbalanceDrawEnabled { get; set; } = true;
+    public bool ImbalanceDrawEnabled { get; set; } = false;
 
     /// <summary>
     /// Draw isolated imbalanced rows as well as stacked ones. Off by default: the loose rows
@@ -716,7 +712,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
     // on the same chart was the user's own "is that an absorption level or what" complaint.
     // The new one is kept as the single default absorption display; this one is a settings
     // toggle away for anyone who still wants the touch-bracket read alongside it.
-    [InputParameter("Absorption: draw on chart", 160)]
     public bool AbsorptionDrawEnabled { get; set; } = false;
 
     [InputParameter("Absorption: bid-holding colour", 161)]
@@ -790,7 +785,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
     /// real wick). On by default, replacing "Wick Absorption" above as the primary absorption
     /// read.
     /// </summary>
-    [InputParameter("Anchor Gate: enable", 175)]
     public bool AnchorGateEnabled { get; set; } = true;
 
     [InputParameter("Anchor Gate: min print size (contracts)", 176, 1, 100000, 1, 0)]
@@ -805,7 +799,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
     [InputParameter("Anchor Gate: cluster tests required (of 4)", 179, 1, 4, 1, 0)]
     public int AnchorGateClusterMinScore { get; set; } = 3;
 
-    [InputParameter("Anchor Gate: show reasoning panel", 210)]
     public bool AnchorGateShowPanel { get; set; } = true;
 
     [InputParameter("Anchor Gate: long colour", 211)]
@@ -869,25 +862,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
 
     [InputParameter("Anchor Gate: target minimum distance (ticks)", 217, 1, 1000, 1, 0)]
     public int AnchorTargetMinDistanceTicks { get; set; } = 10;
-
-    /// <summary>
-    /// The rich "ABSORPTION" panel, from a friend's chart the operator shared (2026-09-16):
-    /// header, a "gate: Veto/Confirm" badge, a "GEN BUY/SELL · N bars" headline, deltaPRICE/
-    /// sigmaDELTA stat boxes, plain-English reasoning, and LONGS/SHORTS guidance boxes. Kept
-    /// ALONGSIDE the box+line display above, not a replacement — the operator's own choice.
-    /// See BuildAnchorAbsorptionPanelDrawable for the effort-vs-result classifier behind the
-    /// gate verdict: a stated heuristic (price and delta agreeing reads as a genuine move;
-    /// disagreeing reads as absorption), not a measured one, same as every other judgement call
-    /// in this codebase.
-    /// </summary>
-    [InputParameter("Anchor Gate: show ABSORPTION panel", 218)]
-    public bool AnchorAbsorptionPanelEnabled { get; set; } = true;
-
-    [InputParameter("Anchor Gate: panel left offset (px)", 219, 0, 4000, 0, 0)]
-    public int AnchorAbsorptionPanelOffsetX { get; set; } = 12;
-
-    [InputParameter("Anchor Gate: panel top offset (px)", 220, 0, 4000, 0, 0)]
-    public int AnchorAbsorptionPanelOffsetY { get; set; } = 260;
 
     /// <summary>
     /// "Something that is like dont enter in this area" (the operator's own ask, 2026-09-16).
@@ -957,7 +931,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
     // HORIZONTAL price level only. The vertical "FLIP UP"/"FLIP DOWN" marker
     // (DeltaFlipVerticalMarker) the operator explicitly wants kept is independent of this flag —
     // see PublishDeltaLevels's own comment for how the two were decoupled.
-    [InputParameter("Flip levels: draw", 1000)]
     public bool ShowDeltaFlips { get; set; } = false;
 
     /// <summary>
@@ -1011,10 +984,8 @@ public sealed class OrbIxIndicator : Qt.Indicator
     /// that, not an accident, so it defaults on for the newest flip only unless told to draw
     /// every kept one.
     /// </summary>
-    [InputParameter("Flip levels: vertical marker at the flip", 1031)]
     public bool DeltaFlipVerticalMarker { get; set; } = true;
 
-    [InputParameter("Flip levels: vertical marker — newest only", 1032)]
     public bool DeltaFlipVerticalMarkerNewestOnly { get; set; } = true;
 
     /// <summary>
@@ -1034,7 +1005,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
     // footprint-based absorption display the docstring just called a measured null, and it
     // was one more thing on the chart answering the same "is this absorption" question the
     // wick/volume port now answers instead.
-    [InputParameter("Shelves: draw (lines in the sand)", 1100)]
     public bool ShowAbsorptionShelves { get; set; } = false;
 
     /// <summary>
@@ -1139,10 +1109,8 @@ public sealed class OrbIxIndicator : Qt.Indicator
     /// focus-mode precedent in the operator overlay for exactly this, and clearing the chart
     /// by unticking eleven boxes and re-ticking them later is how settings get lost.
     /// </summary>
-    [InputParameter("Flow: draw the absorbed tools", 1200)]
     public bool FlowEnabled { get; set; } = true;
 
-    [InputParameter("Flow: cluster statistics (numeric rows per bar)", 1201)]
     public bool FlowClusterStatistics { get; set; } = true;
 
     [InputParameter("Flow: cluster search (mark clusters matching the filters)", 1202)]
@@ -2367,17 +2335,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
 
     private volatile AnchorGateDrawable anchorGateDrawable = AnchorGateDrawable.Empty;
 
-    // Captured the bar a zone FIRST becomes Armed, reset every time it re-arms — the reference
-    // point the rich ABSORPTION panel's effort-vs-result read (deltaPRICE/sigmaDELTA) measures
-    // FROM. See BuildAnchorAbsorptionPanelDrawable's own doc comment for the classifier itself.
-    private double anchorLongArmPrice = double.NaN;
-    private decimal anchorLongArmCvd;
-    private double anchorShortArmPrice = double.NaN;
-    private decimal anchorShortArmCvd;
-
-    private readonly AnchorAbsorptionPanelOverlay anchorAbsorptionPanelOverlay = new();
-    private volatile AnchorAbsorptionPanelDrawable anchorAbsorptionPanelDrawable = AnchorAbsorptionPanelDrawable.Empty;
-
     // ---- live-forward volume-node ("areas where a lot of orders were placed") zones ---------
     //
     // Built ONLY from live ticks since the current session opened -- never from this
@@ -2400,13 +2357,13 @@ public sealed class OrbIxIndicator : Qt.Indicator
     private volatile TrendLineBreakDrawable trendLineBreakDrawable = TrendLineBreakDrawable.Empty;
     private const int TrendLineBreakMaxKept = 20;
 
-    public OrbIxIndicator()
+    public FinchScalpingIndicator()
     {
-        this.Name = "ORB-IX";
+        this.Name = "Finch-Scalping";
         this.Description =
-            "Institutional opening-range engine. Session-aware range construction, order-flow "
-            + "confirmation, and a four-target execution ladder. Draws and journals only — "
-            + "this indicator places no orders.";
+            "A copy of ORB-IX (2026-09-18), kept as a known-working baseline while unwanted "
+            + "features are removed from it one at a time rather than merely toggled off. "
+            + "Draws only — places no orders.";
         this.SeparateWindow = false;
     }
 
@@ -2807,12 +2764,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
         this.anchorVolumeProfile = new AnchorSessionProfile();
         this.anchorVolumeTicksFed = 0;
         this.volumeNodeDrawable = VolumeNodeDrawable.Empty;
-
-        this.anchorLongArmPrice = double.NaN;
-        this.anchorLongArmCvd = 0m;
-        this.anchorShortArmPrice = double.NaN;
-        this.anchorShortArmCvd = 0m;
-        this.anchorAbsorptionPanelDrawable = AnchorAbsorptionPanelDrawable.Empty;
 
         // The zone and delta features start over on the next load, same
         // reasoning as the HH/LL block above.
@@ -3224,7 +3175,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
             this.SeedClosedSessionsFromBars(nowUtc);
             this.FeedHhLl();
             this.FeedAnchorGate();
-            this.anchorAbsorptionPanelDrawable = this.BuildAnchorAbsorptionPanelDrawable();
             this.BuildVolumeNodeDrawable();
             this.FeedWickAbsorption();
             this.FeedZones();
@@ -3827,25 +3777,7 @@ public sealed class OrbIxIndicator : Qt.Indicator
         if (zone is null)
             return;
 
-        var wasArmed = zone.State == AnchorSignalState.Armed;
         engine.Advance(zone, this.anchorBarsFed, facts, DateTime.UtcNow, (decimal)tickSize, otf);
-
-        // The ABSORPTION panel's deltaPRICE/sigmaDELTA read FROM the instant a zone starts being
-        // tested, not from whenever the panel happens to be looked at — captured once per arming,
-        // reset every time it re-arms (Dormant -> Armed -> Dormant -> Armed is a NEW test).
-        if (!wasArmed && zone.State == AnchorSignalState.Armed)
-        {
-            if (side == AnchorTestSide.SupportLong)
-            {
-                this.anchorLongArmPrice = this.lastPrice;
-                this.anchorLongArmCvd = engine.Cvd;
-            }
-            else
-            {
-                this.anchorShortArmPrice = this.lastPrice;
-                this.anchorShortArmCvd = engine.Cvd;
-            }
-        }
 
         if (!haveTicksThisBar || zone.State != AnchorSignalState.Armed)
             return;
@@ -4158,102 +4090,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
         targetPrice = nearest.Price;
         source = nearest.Label;
         return true;
-    }
-
-    /// <summary>
-    /// Builds the rich ABSORPTION panel for whichever zone is currently most active
-    /// (Confirmed &gt; Triggered &gt; Armed; a tie prefers the side the bias line already agrees
-    /// with). THE EFFORT-VS-RESULT CLASSIFIER, stated plainly since it decides the whole panel:
-    /// deltaPRICE (price change since this zone's current arming began) and sigmaDELTA (net
-    /// session delta over the same window) are compared by SIGN. Same sign (both up, or both
-    /// down) reads as a genuine directional move — the order flow is confirming the price
-    /// action, not fighting it — so the gate reads "Veto" (this is not absorption) and the
-    /// headline names the side actually in control. Opposite signs (or either one flat) means
-    /// price is NOT being confirmed by the order flow, which is the textbook absorption
-    /// signature, so the gate reads "Confirm". VALIDATED AGAINST TWO OBSERVED SCREENSHOTS from
-    /// the friend's chart this was modelled on (2026-09-16): +63.8/+4759 read "GEN BUY, gate:
-    /// Veto"; -4.5/-241 read "GEN SELL, gate: Veto" — both same-sign, both Veto, matching this
-    /// rule exactly. The Confirm side's exact wording was not observed and is this codebase's
-    /// own construction, not a verbatim copy. STATED HEURISTIC, NOT A MEASURED ONE, same
-    /// standing as every other judgement call here — see the class doc comment on
-    /// AnchorAbsorptionPanelOverlay.
-    /// </summary>
-    private AnchorAbsorptionPanelDrawable BuildAnchorAbsorptionPanelDrawable()
-    {
-        if (!this.AnchorAbsorptionPanelEnabled)
-            return AnchorAbsorptionPanelDrawable.Empty;
-
-        static int Rank(AnchorZone? z) => z?.State switch
-        {
-            AnchorSignalState.Confirmed => 3,
-            AnchorSignalState.Triggered => 2,
-            AnchorSignalState.Armed => 1,
-            _ => 0,
-        };
-
-        var longRank = Rank(this.anchorLongZone);
-        var shortRank = Rank(this.anchorShortZone);
-
-        if (longRank == 0 && shortRank == 0)
-            return AnchorAbsorptionPanelDrawable.Empty;
-
-        bool pickLong;
-        if (longRank != shortRank)
-        {
-            pickLong = longRank > shortRank;
-        }
-        else
-        {
-            // Tie: prefer whichever side the bias line already agrees with, else long.
-            pickLong = this.directionCalloutSide >= 0;
-        }
-
-        var zone = pickLong ? this.anchorLongZone : this.anchorShortZone;
-        var engine = pickLong ? this.anchorLongSignal : this.anchorShortSignal;
-        var armPrice = pickLong ? this.anchorLongArmPrice : this.anchorShortArmPrice;
-        var armCvd = pickLong ? this.anchorLongArmCvd : this.anchorShortArmCvd;
-
-        if (zone is null || !double.IsFinite(armPrice))
-            return AnchorAbsorptionPanelDrawable.Empty;
-
-        var deltaPrice = this.lastPrice - armPrice;
-        var sigmaDelta = engine.Cvd - armCvd;
-
-        var priceSign = Math.Sign(deltaPrice);
-        var deltaSign = Math.Sign(sigmaDelta);
-        var isVeto = priceSign != 0 && priceSign == deltaSign;
-
-        var barsSinceArm = zone.ArmedBar >= 0 ? Math.Max(0, this.anchorBarsFed - zone.ArmedBar) : 0;
-
-        string reasoning;
-        string longsText, shortsText;
-        bool longsGood, shortsGood;
-
-        if (isVeto)
-        {
-            var buying = deltaPrice >= 0;
-            reasoning = buying
-                ? "Price rising with delta positive → genuine aggressive buying, not absorption."
-                : "Price falling with delta negative → genuine aggressive selling, not absorption.";
-            longsText = buying ? "real buying — aggressors in control" : "stand aside";
-            shortsText = buying ? "stand aside" : "real selling — aggressors in control";
-            longsGood = buying;
-            shortsGood = !buying;
-        }
-        else
-        {
-            reasoning = pickLong
-                ? "Price making little progress against the delta here → sellers being absorbed at support."
-                : "Price making little progress against the delta here → buyers being absorbed at resistance.";
-            longsText = pickLong ? "absorption holding — buyers defending" : "stand aside — buying absorbed";
-            shortsText = pickLong ? "stand aside — selling absorbed" : "absorption holding — sellers defending";
-            longsGood = pickLong;
-            shortsGood = !pickLong;
-        }
-
-        return new AnchorAbsorptionPanelDrawable(
-            true, pickLong, isVeto, deltaPrice, sigmaDelta, barsSinceArm, this.anchorZoneStateRules.ClockBars,
-            reasoning, longsText, shortsText, longsGood, shortsGood);
     }
 
     /// <summary>
@@ -8452,7 +8288,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
             this.DrawWickAbsorption(graphics, registry);
             this.DrawVolumeNodes(graphics, registry);
             this.DrawAnchorGate(graphics, registry);
-            this.DrawAnchorAbsorptionPanel(graphics);
             this.DrawTrendLineBreaks(graphics, registry);
             this.DrawZones(graphics, registry);
             // BEFORE the ranges and the setup geometry: imbalance is tape context and must sit
@@ -8998,31 +8833,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
         }
     }
 
-    private void DrawAnchorAbsorptionPanel(Graphics graphics)
-    {
-        var chart = this.CurrentChart;
-        var window = chart?.MainWindow;
-        var panel = this.anchorAbsorptionPanelDrawable;
-
-        if (window is null || chart is null || !panel.Show)
-            return;
-
-        try
-        {
-            this.anchorAbsorptionPanelOverlay.Draw(
-                graphics, window.ClientRectangle, panel,
-                new AnchorAbsorptionPanelOverlay.Options(
-                    this.AnchorAbsorptionPanelOffsetX, this.AnchorAbsorptionPanelOffsetY,
-                    this.AnchorGateLongColor, this.AnchorGateShortColor,
-                    Color.FromArgb(0x26, 0xA6, 0x9A), Color.FromArgb(150, 150, 150)));
-        }
-        catch (Exception ex)
-        {
-            this.overlayFault = PathDisplay.Redact(
-                $"The Absorption panel failed to draw: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
     private void DrawTrendLineBreaks(Graphics graphics, List<RectangleF> labelRegistry)
     {
         var chart = this.CurrentChart;
@@ -9202,7 +9012,6 @@ public sealed class OrbIxIndicator : Qt.Indicator
         this.anchorGateOverlay.Dispose();
         this.trendLineBreakOverlay.Dispose();
         this.volumeNodeOverlay.Dispose();
-        this.anchorAbsorptionPanelOverlay.Dispose();
         this.fibOverlay.Dispose();
         this.zoneOverlay.Dispose();
         this.deltaOverlay.Dispose();
