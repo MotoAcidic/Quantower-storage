@@ -718,6 +718,22 @@ reference visually) is still outstanding.
 
 ### Finch-Lite (`Indicators/Finch-Lite/`) — added 2026-09-22
 
+**CORRECTION 2026-09-23 — do NOT tell the operator to remove/re-add the indicator after a
+redeploy.** Every "Verified" entry below this point that says "ask the operator to remove/re-add
+Finch-Lite" is WRONG and should not be repeated or trusted as instruction — it was said
+repeatedly across this whole file's Finch-Lite history despite this exact codebase already
+documenting the correct behaviour elsewhere (see the WickAbsorption entry under ORB-IX: "Quantower
+persists settings per chart instance, so an already-attached chart keeps its old saved values").
+Removing and re-adding an indicator discards its ENTIRE saved settings blob and creates a fresh
+instance at every parameter's coded default — not just a new one's. The operator hit this for
+real ("this is showing but it removed my large orders on the dom" → "i got it working you reset
+my settings thats all" → "stop reseting my settings its screwing me up"). Correct instruction
+going forward: after a redeploy, **restart Quantower** — this reloads the updated DLL while
+Quantower restores every EXISTING parameter's saved value from the chart's own settings blob;
+only a genuinely brand-new `InputParameter` (absent from the old saved blob) falls back to its
+coded default. Remove/re-add is for when a full reset is actually wanted, not the routine
+post-deploy step.
+
 **A THIRD, deliberately separate indicator** ("all these moving parts in quantower are making
 the charts super slow lets start a new indicator and add only 1 thing at a time and it doesnt
 need to be a port from the finch-scalping or anyhting we will build this on our own" — the
@@ -1404,6 +1420,101 @@ FinchLiteIndicator.dll`, `sha256sum` confirms the deployed DLL matches. Not yet 
 live chart — ask the operator to remove/re-add Finch-Lite and confirm ordinary-sized DOM ladder
 bars are visibly longer again even when one outlier level is on the book, and that toggling `DOM
 ladder: enable` off still actually hides it.
+
+**FEATURE 5 + 6 (2026-09-23) — 15m/1h order blocks and inverse fair value gaps.** "i would like to
+see the 15minute order blocks and 1hr order blocks that are labeled and the ability to see inverse
+fairvalue gaps" — Finch-Lite's first departure from pure order-book/tape reading into
+multi-timeframe price-STRUCTURE analysis. Genuinely large addition (four new files); before
+writing any of it, dispatched a research agent to find how this codebase already solves
+higher-timeframe historical pulls, rather than rediscovering platform quirks blind — found the
+live, self-updating `Symbol.GetHistory(Period, HistoryType, DateTime)` pattern (confirmed working
+in `Strategies/emaCrossStrategy/emaCrossStrategy.cs`) and the exact bar-indexing syntax
+(`data[i, SeekOriginHistory.Begin] is HistoryItemBar item`) already used throughout
+`OrbIxIndicator.cs`. Also found `OrbIx.Core/Structure/ZoneEngine.cs` already has a working FVG +
+order-block detector — read for reference/precedent, but NOT ported or referenced: this is
+genuinely fresh logic, re-derived to match the operator's own specific answers below (ZoneEngine's
+own rules differ in several particulars).
+
+Three explicit design decisions clarified via `AskUserQuestion` before writing any detection code
+(getting the core algorithm wrong would have meant redoing real work, same lesson as the
+"unfinished auction" redefinition earlier this week) — operator picked the first/recommended
+option on all four questions:
+- **Order block detection: structure-break.** A swing high/low is confirmed once
+  `OrderBlockPivotLookback` bars (default 2) have closed on BOTH sides without a more extreme
+  high/low (a standard fractal pivot). Once a bar CLOSES beyond the most recently confirmed swing,
+  that is a structure break; the last OPPOSITE-coloured candle before the break bar (scanned back
+  up to 20 bars) is the order block. The broken swing is consumed (reset to unknown) so the same
+  swing cannot fire twice — only a freshly confirmed one, broken again, fires again.
+- **Order block invalidation: closes-through, not wick-touch, not never.** A bullish (support)
+  block is removed the moment a bar CLOSES below its own bottom; a bearish (resistance) block is
+  removed the moment a bar CLOSES above its own top. A wick alone does not remove it.
+- **IFVG timeframe: the chart's own**, independent of the 15m/1h order blocks (which are always
+  15m/1h regardless of what period the chart itself is showing).
+- **IFVG display: inverted only.** A plain fair value gap (classic 3-candle imbalance: candle 1's
+  high below candle 3's low, or the reverse) is tracked internally the moment it forms but drawn
+  nowhere. Only once price CLOSES back through it in the direction that disproves its original
+  role does it invert and become visible — a failed bullish (support) gap flips to a bearish
+  inverse FVG, and the reverse. Once inverted, the SAME close-through rule chosen for order blocks
+  removes it again.
+
+**New files** (all fresh, no `OrbIx.Core` dependency):
+- `OrderBlockEngine.cs` — pure logic (no platform types beyond `DateTime`/`double`), one instance
+  per timeframe (15m, 1h), fed closed bars via `Feed(Bar)`. Also defines the shared `Bar` struct
+  (`OpenUtc, Open, High, Low, Close`) both engines use.
+- `FairValueGapEngine.cs` — pure logic, fed the chart's own closed bars.
+- `StructureBoxOverlay.cs` — ONE shared renderer for both features (same visual shape: a filled,
+  bordered, labelled box live since it formed, extending right — same "still extending" convention
+  already used for resting-order lines) — told apart only by the colours and pre-built label text
+  (`"15m OB - BULLISH"`, `"1H OB - BEARISH"`, `"IFVG - BULLISH"`) the caller supplies per box.
+- `FinchLiteIndicator.cs` wiring: `TryStartOrderBlocks()` (called from `TryInitialise`, wrapped in
+  its OWN try/catch per timeframe — deliberately non-fatal, since order blocks are additive on top
+  of Features 1-4 and a connector that can't supply 15m/1h aggregated history for some reason must
+  not take DOM/tape reading down with it); `DrainStructure()` (called from `OnPollTimer`, feeds
+  newly-closed bars from both HTF series and the chart's own series into their engines, rebuilds
+  the two paint drawables) — wrapped in its OWN try/catch SEPARATE from the existing DOM-pull
+  block, since an exception escaping a `Timer` callback entirely is unhandled and terminates the
+  whole platform process (the same reason ORB-IX's own fold is wrapped; this is the highest-risk
+  addition to the poll timer so far, touching more platform history-data surface than anything
+  else on it).
+- Backlog safety: the 15m/1h pulls are inherently bounded by `OrderBlockLookbackDays` (default 10)
+  at the `GetHistory` call itself. The chart's OWN history has no such bound — `chartBarsSeen`
+  starts at `-1` and seeds itself on the first poll to `Math.Max(0, count - 500)`, capping how far
+  back a long-running chart's already-loaded history gets backfilled in one burst, rather than
+  walking however many bars (potentially years) the chart happens to have.
+- New `InputParameter`s: `OrderBlock15mEnabled`/`OrderBlock1hEnabled` (both default true),
+  `OrderBlockPivotLookback` (default 2), `OrderBlockBullishColor`/`OrderBlockBearishColor`,
+  `OrderBlockLookbackDays` (default 10), `InverseFvgEnabled` (default true),
+  `InverseFvgBullishColor`/`InverseFvgBearishColor` — indices 50-55 and 60-62, fresh ranges (not
+  reusing the retired 16/40-44 delta-panel indices, same reasoning as every other retirement this
+  week).
+
+**Verified 2026-09-23**: `dotnet build ... -c Release -p:QuantowerSdkPath="...v1.147.4\bin\..."`
+— 0 errors (18 pre-existing-pattern nullable-annotation warnings, one more than before from the
+new `HistoricalData?` fields — same warning class as always, not new noise). Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum` confirms
+the deployed DLL matches. **NOT yet confirmed on a live chart** — this is real new algorithmic
+surface (swing-pivot detection, structure breaks, 3-candle imbalance, inversion tracking) that
+could not be visually verified without a live chart in this session; ask the operator to remove/
+re-add Finch-Lite and confirm: 15m and 1h order-block boxes appear labelled and coloured by
+direction, disappear when price closes through them, and the 1h boxes are visibly less frequent
+than the 15m ones; inverse FVG boxes only appear after a gap has been closed through once (never
+show a plain, not-yet-inverted gap).
+
+**FOLLOW-UP 2026-09-23 — "this is showing but it removed my large orders on the dom".** Turned
+out to be the operator's SAVED SETTINGS resetting to defaults on the fresh attach the new
+`InputParameter`s required (self-confirmed: "i got it working you reset my settings thats all") —
+not a code bug. Independently found and fixed a real, secondary issue while investigating though,
+worth keeping regardless: order-block and inverse-FVG boxes drew LAST in `OnPaintChart`, on top of
+everything else, and their boxes extend the full width out to the pane's own right edge — the
+exact same screen region the DOM ladder occupies — so a wide box sitting over it could visually
+wash the ladder's colours out even with settings otherwise correct. Reordered so the two structure
+overlays draw FIRST, as quiet background context, with the ladder/resting-order/big-trade signals
+layered on top of them — same "quiet backdrop, louder signal on top" convention already used
+between the ladder and resting-order lines.
+
+**Verified 2026-09-23**: `dotnet build ... -c Release -p:QuantowerSdkPath="...v1.147.4\bin\..."`
+— 0 errors. Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\
+FinchLiteIndicator.dll`, `sha256sum` confirms the deployed DLL matches.
 
 ### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
 **Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show

@@ -288,6 +288,73 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     private readonly BigTradeOverlay bigTradeOverlay = new();
     private volatile BigTradeDrawable bigTradeDrawable = BigTradeDrawable.Empty;
 
+    // ---- order blocks (feature 5, 2026-09-23) --------------------------------------------------
+    //
+    // "i would like to see the 15minute order blocks and 1hr order blocks that are labeled" — TWO
+    // independent higher-timeframe historical pulls, live-subscribed via Symbol.GetHistory (kept
+    // up to date by the platform itself, not by re-polling), completely separate from whatever
+    // period the CHART itself is showing. See OrderBlockEngine's own doc comment for the detection
+    // and invalidation rules — both explicit choices the operator made when asked.
+    [InputParameter("Order blocks: enable 15m", 50)]
+    public bool OrderBlock15mEnabled { get; set; } = true;
+
+    [InputParameter("Order blocks: enable 1h", 51)]
+    public bool OrderBlock1hEnabled { get; set; } = true;
+
+    /// <summary>Bars required on EACH side of a candidate before it counts as a confirmed swing
+    /// high/low — see OrderBlockEngine. Higher = fewer, more significant swings; lower = more,
+    /// noisier ones.</summary>
+    [InputParameter("Order blocks: swing pivot lookback (bars)", 52, 1, 20, 1, 0)]
+    public int OrderBlockPivotLookback { get; set; } = 2;
+
+    [InputParameter("Order blocks: bullish colour", 53)]
+    public Color OrderBlockBullishColor { get; set; } = Color.FromArgb(0x00, 0xE6, 0x76);
+
+    [InputParameter("Order blocks: bearish colour", 54)]
+    public Color OrderBlockBearishColor { get; set; } = Color.FromArgb(0xFF, 0x52, 0x52);
+
+    /// <summary>How far back each higher-timeframe pull loads on attach — bounds both API load and
+    /// how much backlog gets fed into the engine in one burst on the first poll after init.</summary>
+    [InputParameter("Order blocks: lookback (days)", 55, 1, 90, 1, 0)]
+    public int OrderBlockLookbackDays { get; set; } = 10;
+
+    private HistoricalData? ob15mHistory;
+    private HistoricalData? ob1hHistory;
+    private int ob15mBarsSeen;
+    private int ob1hBarsSeen;
+    private OrderBlockEngine? ob15mEngine;
+    private OrderBlockEngine? ob1hEngine;
+    private readonly StructureBoxOverlay orderBlockOverlay = new();
+    private volatile StructureBoxDrawable orderBlockDrawable = StructureBoxDrawable.Empty;
+
+    // ---- inverse fair value gaps (feature 6, 2026-09-23) ---------------------------------------
+    //
+    // "the ability to see inverse fairvalue gaps" — fed the CHART's own closed bars (the
+    // operator's own choice, independent of the 15m/1h order blocks above). See
+    // FairValueGapEngine's own doc comment for the detection/inversion rules.
+    [InputParameter("Inverse FVG: enable", 60)]
+    public bool InverseFvgEnabled { get; set; } = true;
+
+    [InputParameter("Inverse FVG: bullish colour", 61)]
+    public Color InverseFvgBullishColor { get; set; } = Color.FromArgb(0x00, 0xE6, 0x76);
+
+    [InputParameter("Inverse FVG: bearish colour", 62)]
+    public Color InverseFvgBearishColor { get; set; } = Color.FromArgb(0xFF, 0x52, 0x52);
+
+    private readonly FairValueGapEngine fvgEngine = new();
+
+    /// <summary>-1 means "not yet seeded" — the first poll after attach caps how far back into
+    /// the chart's OWN already-loaded history it backfills (see DrainStructure), rather than
+    /// walking however many bars the chart happens to have loaded, which could be years of data
+    /// on a long-running chart. Everything after that first seed processes incrementally, same as
+    /// the 15m/1h series.</summary>
+    private int chartBarsSeen = -1;
+
+    private const int MaxInitialChartBacklogBars = 500;
+
+    private readonly StructureBoxOverlay inverseFvgOverlay = new();
+    private volatile StructureBoxDrawable inverseFvgDrawable = StructureBoxDrawable.Empty;
+
     public FinchLiteIndicator()
     {
         this.Name = "Finch-Lite";
@@ -382,6 +449,8 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             symbol.NewLast += this.OnLast;
             symbol.NewLevel2 += this.OnLevel2;
 
+            this.TryStartOrderBlocks(symbol);
+
             var interval = Math.Max(this.PollIntervalMs, 50);
             this.pollTimer = new Timer(this.OnPollTimer, null, 0, interval);
             return true;
@@ -390,6 +459,46 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         {
             this.overlayFault = $"Finch-Lite failed to start: {ex.GetType().Name}: {ex.Message}";
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Best-effort — deliberately does NOT propagate a failure up to fail the whole indicator's
+    /// init. Order blocks are additive on top of Features 1-4; a connector that cannot supply
+    /// 15m/1h aggregated history for some reason should not take DOM/tape reading down with it.
+    /// A failure here is surfaced (briefly, on the next fault report) but never retried forever
+    /// the way TryInitialise's own required preconditions are.
+    /// </summary>
+    private void TryStartOrderBlocks(Qt.Symbol symbol)
+    {
+        var lookback = DateTime.UtcNow.AddDays(-Math.Max(1, this.OrderBlockLookbackDays));
+
+        if (this.OrderBlock15mEnabled && this.ob15mHistory is null)
+        {
+            try
+            {
+                this.ob15mHistory = symbol.GetHistory(Period.MIN15, symbol.HistoryType, lookback);
+                this.ob15mEngine = new OrderBlockEngine(this.OrderBlockPivotLookback);
+                this.ob15mBarsSeen = 0;
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = $"15m order blocks unavailable: {ex.GetType().Name}: {ex.Message}";
+            }
+        }
+
+        if (this.OrderBlock1hEnabled && this.ob1hHistory is null)
+        {
+            try
+            {
+                this.ob1hHistory = symbol.GetHistory(Period.HOUR1, symbol.HistoryType, lookback);
+                this.ob1hEngine = new OrderBlockEngine(this.OrderBlockPivotLookback);
+                this.ob1hBarsSeen = 0;
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = $"1h order blocks unavailable: {ex.GetType().Name}: {ex.Message}";
+            }
         }
     }
 
@@ -479,6 +588,21 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.bigTradeQueue.Clear();
         this.bigTrades.Clear();
         this.bigTradeDrawable = BigTradeDrawable.Empty;
+
+        this.ob15mHistory?.Dispose();
+        this.ob15mHistory = null;
+        this.ob1hHistory?.Dispose();
+        this.ob1hHistory = null;
+        this.ob15mEngine = null;
+        this.ob1hEngine = null;
+        this.ob15mBarsSeen = 0;
+        this.ob1hBarsSeen = 0;
+        this.orderBlockDrawable = StructureBoxDrawable.Empty;
+
+        this.fvgEngine.Reset();
+        this.chartBarsSeen = -1;
+        this.inverseFvgDrawable = StructureBoxDrawable.Empty;
+
         this.overlayFault = null;
     }
 
@@ -497,6 +621,20 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             return;
 
         this.DrainBigTrades();
+
+        // Own try/catch, deliberately separate from the DOM-pull block below: an exception
+        // escaping a Timer callback entirely is unhandled and terminates the whole platform
+        // process (the same reason ORB-IX's own fold is wrapped) — order blocks/IFVG touch more
+        // platform history-data surface than anything else on this timer, and a failure here must
+        // never take Features 1-4's own DOM/tape reading down with it.
+        try
+        {
+            this.DrainStructure();
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = $"Order blocks/IFVG failed: {ex.GetType().Name}: {ex.Message}";
+        }
 
         try
         {
@@ -792,6 +930,132 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.bigTradeDrawable = new BigTradeDrawable(this.bigTrades.ToArray());
     }
 
+    /// <summary>Reads one closed bar out of a platform history series at the given Begin-indexed
+    /// position. False for a bar this indicator's own view of the series does not (yet) hold.</summary>
+    private static bool TryReadBar(HistoricalData data, int index, out Bar bar)
+    {
+        bar = default;
+
+        if (data[index, SeekOriginHistory.Begin] is not HistoryItemBar item)
+            return false;
+
+        bar = new Bar(item.TimeLeft, item.Open, item.High, item.Low, item.Close);
+        return true;
+    }
+
+    /// <summary>
+    /// Feeds newly closed bars from the 15m/1h order-block series and the chart's own series into
+    /// their respective engines, then rebuilds the two paint drawables from whatever is currently
+    /// active. Runs on the poll timer alongside everything else — each series' own "how far have
+    /// we processed" index means a series with no new closed bar this cycle (15m/1h bars close far
+    /// less often than the poll interval) does no work at all.
+    /// </summary>
+    private void DrainStructure()
+    {
+        var obChanged = false;
+
+        if (this.OrderBlock15mEnabled && this.ob15mHistory is { } h15 && this.ob15mEngine is { } e15 && h15.Count > 1)
+        {
+            var closedUpTo = h15.Count - 1; // Count - 1 is the still-forming bar; never fed
+
+            for (var i = this.ob15mBarsSeen; i < closedUpTo; i++)
+            {
+                if (TryReadBar(h15, i, out var bar))
+                {
+                    e15.Feed(bar);
+                    obChanged = true;
+                }
+            }
+
+            this.ob15mBarsSeen = closedUpTo;
+        }
+
+        if (this.OrderBlock1hEnabled && this.ob1hHistory is { } h1h && this.ob1hEngine is { } e1h && h1h.Count > 1)
+        {
+            var closedUpTo = h1h.Count - 1;
+
+            for (var i = this.ob1hBarsSeen; i < closedUpTo; i++)
+            {
+                if (TryReadBar(h1h, i, out var bar))
+                {
+                    e1h.Feed(bar);
+                    obChanged = true;
+                }
+            }
+
+            this.ob1hBarsSeen = closedUpTo;
+        }
+
+        if (obChanged)
+        {
+            var boxes = new List<StructureBoxDraw>();
+
+            if (this.ob15mEngine is not null)
+            {
+                foreach (var z in this.ob15mEngine.Active)
+                {
+                    boxes.Add(new StructureBoxDraw(
+                        z.StartUtc, z.Top, z.Bottom, z.IsBullish,
+                        $"15m OB - {(z.IsBullish ? "BULLISH" : "BEARISH")}"));
+                }
+            }
+
+            if (this.ob1hEngine is not null)
+            {
+                foreach (var z in this.ob1hEngine.Active)
+                {
+                    boxes.Add(new StructureBoxDraw(
+                        z.StartUtc, z.Top, z.Bottom, z.IsBullish,
+                        $"1H OB - {(z.IsBullish ? "BULLISH" : "BEARISH")}"));
+                }
+            }
+
+            this.orderBlockDrawable = new StructureBoxDrawable(boxes.ToArray());
+        }
+
+        if (!this.InverseFvgEnabled)
+            return;
+
+        var chartData = this.HistoricalData;
+
+        if (chartData is null || chartData.Count <= 1)
+            return;
+
+        var chartClosedUpTo = chartData.Count - 1;
+
+        // First run after attach: cap how far back into whatever the chart already has loaded
+        // this backfills, rather than walking years of history on a long-running chart.
+        if (this.chartBarsSeen < 0)
+            this.chartBarsSeen = Math.Max(0, chartClosedUpTo - MaxInitialChartBacklogBars);
+
+        var fvgChanged = false;
+
+        for (var i = this.chartBarsSeen; i < chartClosedUpTo; i++)
+        {
+            if (TryReadBar(chartData, i, out var bar))
+            {
+                this.fvgEngine.Feed(bar);
+                fvgChanged = true;
+            }
+        }
+
+        this.chartBarsSeen = chartClosedUpTo;
+
+        if (fvgChanged)
+        {
+            var boxes = new StructureBoxDraw[this.fvgEngine.Active.Count];
+
+            for (var i = 0; i < boxes.Length; i++)
+            {
+                var z = this.fvgEngine.Active[i];
+                boxes[i] = new StructureBoxDraw(
+                    z.StartUtc, z.Top, z.Bottom, z.IsBullish, $"IFVG - {(z.IsBullish ? "BULLISH" : "BEARISH")}");
+            }
+
+            this.inverseFvgDrawable = new StructureBoxDrawable(boxes);
+        }
+    }
+
     private void ReportPollFault(string reason)
     {
         if (string.Equals(this.lastPollFault, reason, StringComparison.Ordinal))
@@ -831,8 +1095,47 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         // within one overlay's own set.
         var registry = new List<RectangleF>();
 
-        // The ladder draws FIRST, underneath — it is the quiet full-depth backdrop, and the
-        // large-order lines are the louder, highlighted signal that should sit on top of it.
+        // FIXED 2026-09-23 — "this is showing but it removed my large orders on the dom": order
+        // blocks and inverse FVGs used to draw LAST, on top of everything — their boxes span the
+        // full width out to the pane's own right edge, the exact same screen region the DOM
+        // ladder occupies, so a wide box sitting over it visually washed the ladder's colours out
+        // even though the ladder was still technically drawing underneath. Structure boxes now
+        // draw FIRST, as quiet background context, with every live signal (ladder, resting
+        // orders, big trades) layered on top of them — same "quiet backdrop, louder signal on
+        // top" ordering already used between the ladder and the resting-order lines below.
+        if (this.OrderBlock15mEnabled || this.OrderBlock1hEnabled)
+        {
+            try
+            {
+                this.orderBlockOverlay.Draw(
+                    graphics, window, this.orderBlockDrawable,
+                    new StructureBoxOverlay.Options(this.OrderBlockBullishColor, this.OrderBlockBearishColor),
+                    registry);
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = $"The order-block overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
+            }
+        }
+
+        if (this.InverseFvgEnabled)
+        {
+            try
+            {
+                this.inverseFvgOverlay.Draw(
+                    graphics, window, this.inverseFvgDrawable,
+                    new StructureBoxOverlay.Options(this.InverseFvgBullishColor, this.InverseFvgBearishColor),
+                    registry);
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = $"The inverse-FVG overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
+            }
+        }
+
+        // The ladder draws next, still underneath the resting-order/big-trade signals — it is the
+        // quiet full-depth backdrop, and the large-order lines are the louder, highlighted signal
+        // that should sit on top of it.
         try
         {
             this.domLadderOverlay.Draw(
@@ -876,6 +1179,35 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             this.overlayFault = $"The big-trade overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
         }
 
+        if (this.OrderBlock15mEnabled || this.OrderBlock1hEnabled)
+        {
+            try
+            {
+                this.orderBlockOverlay.Draw(
+                    graphics, window, this.orderBlockDrawable,
+                    new StructureBoxOverlay.Options(this.OrderBlockBullishColor, this.OrderBlockBearishColor),
+                    registry);
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = $"The order-block overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
+            }
+        }
+
+        if (this.InverseFvgEnabled)
+        {
+            try
+            {
+                this.inverseFvgOverlay.Draw(
+                    graphics, window, this.inverseFvgDrawable,
+                    new StructureBoxOverlay.Options(this.InverseFvgBullishColor, this.InverseFvgBearishColor),
+                    registry);
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = $"The inverse-FVG overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
+            }
+        }
     }
 
     public override void Dispose()
@@ -889,6 +1221,10 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.restingOrderOverlay.Dispose();
         this.domLadderOverlay.Dispose();
         this.bigTradeOverlay.Dispose();
+        this.orderBlockOverlay.Dispose();
+        this.inverseFvgOverlay.Dispose();
+        this.ob15mHistory?.Dispose();
+        this.ob1hHistory?.Dispose();
         this.faultFont.Dispose();
         this.faultBrush.Dispose();
         this.faultBack.Dispose();
