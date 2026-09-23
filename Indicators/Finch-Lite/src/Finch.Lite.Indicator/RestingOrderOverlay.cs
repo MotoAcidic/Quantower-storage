@@ -7,17 +7,24 @@ namespace FinchLite;
 
 /// <summary>One resting order level currently being tracked, ready to draw.</summary>
 /// <param name="Price">The book price this size is resting at.</param>
-/// <param name="Size">The number to SHOW — the peak size ever seen here while the level reads as
-/// a normal large order, or the size STILL REMAINING once it has started being filled (see
-/// <see cref="IsUnfinished"/>). Never shown once the level empties out entirely — a fully filled
-/// level is removed from the drawable altogether, not shown at zero.</param>
+/// <param name="Size">
+/// The LIVE current resting size, always — never a remembered peak. FIXED 2026-09-23 ("these
+/// orders need to update on the dom because i dont see these large orders still on the dom"):
+/// this used to show a remembered peak for anything not flagged <see cref="IsUnfinished"/>, back
+/// when that flag meant exactly "current is below peak." Once the trigger changed to a
+/// price-distance rule, a level far from price could shrink a lot without ever being flagged
+/// unfinished, and kept showing its stale original size instead of what the book — and this
+/// indicator's own DOM ladder, built fresh from the same poll — actually says is there right now.
+/// Never shown once the level empties out entirely — a fully filled level is removed from the
+/// drawable altogether, not shown at zero.</param>
 /// <param name="IsBid">True for a resting bid (a seller would have to hit it to clear it), false
 /// for a resting ask (a buyer would have to lift it).</param>
 /// <param name="IsUnfinished">
-/// True once SOME of the size originally seen here has been consumed but the level has not
-/// emptied out completely — "if its an unfinished auction it needs to label that and show how
-/// many more contracts are at that unfinished auction" (the operator's own ask, 2026-09-22).
-/// False for a level still sitting at its full original size.
+/// True once current market price has moved past this level by a configured distance while it is
+/// still resting — "unfinished auctions work were price moved past a price fast and left orders
+/// behind" (the operator's own definition, 2026-09-22), replacing an earlier "size dropped below
+/// its own peak" trigger that flagged ordinary book noise far too often. See
+/// <see cref="FinchLiteIndicator.ReconcileRestingLevels"/> for the actual distance check.
 /// </param>
 /// <param name="Absorbed">
 /// Running total of contracts that have traded THROUGH this level while it kept standing —

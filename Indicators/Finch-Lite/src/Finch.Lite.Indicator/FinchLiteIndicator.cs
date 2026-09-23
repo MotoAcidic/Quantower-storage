@@ -243,6 +243,16 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     [InputParameter("DOM ladder: row height (px)", 22, 1, 20, 1, 0)]
     public int DomLadderRowHeight { get; set; } = 4;
 
+    /// <summary>
+    /// FIXED 2026-09-23 — "now my dom on the right is super small on the order size": bars used to
+    /// scale against the single largest size anywhere in the scanned book that poll, so one rare
+    /// outlier (a 500+ contract level) squashed every ordinary level down to a sliver. Fixed
+    /// reference size now — a level at or above this fills the strip fully; anything bigger just
+    /// clips instead of shrinking everyone else's scale.
+    /// </summary>
+    [InputParameter("DOM ladder: size that fills the strip (contracts)", 23, 1, 1000000, 1, 0)]
+    public int DomLadderFillSize { get; set; } = 150;
+
     private readonly DomLadderOverlay domLadderOverlay = new();
     private volatile DomLadderDrawable domLadderDrawable = DomLadderDrawable.Empty;
 
@@ -685,8 +695,17 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             var absorbed = this.restingOrderAbsorbed.TryGetValue(kvp.Key, out var abs) ? abs : 0d;
             var firstSeenUtc = this.restingOrderFirstSeenUtc.TryGetValue(kvp.Key, out var seen) ? seen : nowUtc;
 
-            draws.Add(new RestingOrderDraw(
-                price, isUnfinished ? current : peak, isBid, isUnfinished, absorbed, firstSeenUtc));
+            // FIXED 2026-09-23 — "these orders need to update on the dom because i dont see these
+            // large orders still on the dom": this used to show PEAK for anything not flagged
+            // unfinished, which was correct back when "unfinished" meant exactly "current < peak"
+            // — the two conditions covered each other. Since yesterday's redesign, "unfinished"
+            // depends on PRICE having moved past the level, so a level far from price can shrink
+            // a great deal without ever being flagged unfinished — and was still showing its
+            // stale ORIGINAL peak number while the DOM ladder (built fresh from the same book
+            // every poll) correctly showed the smaller live size right next to it. ALWAYS show
+            // the live current size now; peak is bookkeeping only (raising the bar, absorption
+            // tracking), never what gets displayed.
+            draws.Add(new RestingOrderDraw(price, current, isBid, isUnfinished, absorbed, firstSeenUtc));
         }
 
         return new RestingOrderDrawable(draws.ToArray());
@@ -721,9 +740,9 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         }
     }
 
-    /// <summary>Every scanned level on both sides, normalised against the single largest size
-    /// currently on the book — bar LENGTH is a comparison, so it needs one shared scale rather
-    /// than a scale per side (which would make an equal bid and ask look different lengths).</summary>
+    /// <summary>Every scanned level on both sides — bar LENGTH scales against the configured
+    /// <see cref="DomLadderFillSize"/> at paint time now, not a per-poll max (see
+    /// <see cref="DomLadderOverlay"/>'s own doc comment for why that changed).</summary>
     private DomLadderDrawable BuildLadder(Level2Item[]? bids, Level2Item[]? asks)
     {
         if (!this.DomLadderEnabled)
@@ -735,27 +754,20 @@ public sealed class FinchLiteIndicator : Qt.Indicator
 
         var bars = new DomBarDraw[count];
         var i = 0;
-        var maxSize = 0d;
 
         if (bids is not null)
         {
             foreach (var item in bids)
-            {
                 bars[i++] = new DomBarDraw(item.Price, item.Size, IsBid: true);
-                if (item.Size > maxSize) maxSize = item.Size;
-            }
         }
 
         if (asks is not null)
         {
             foreach (var item in asks)
-            {
                 bars[i++] = new DomBarDraw(item.Price, item.Size, IsBid: false);
-                if (item.Size > maxSize) maxSize = item.Size;
-            }
         }
 
-        return new DomLadderDrawable(bars, maxSize);
+        return new DomLadderDrawable(bars);
     }
 
     /// <summary>Moves whatever the tick handler queued onto the list the paint actually reads,
@@ -826,7 +838,8 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             this.domLadderOverlay.Draw(
                 graphics, window, this.domLadderDrawable,
                 new DomLadderOverlay.Options(
-                    this.BidColor, this.AskColor, this.DomLadderWidth, this.DomLadderRowHeight));
+                    this.BidColor, this.AskColor, this.DomLadderWidth, this.DomLadderRowHeight,
+                    this.DomLadderFillSize));
         }
         catch (Exception ex)
         {

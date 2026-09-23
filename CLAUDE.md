@@ -59,9 +59,9 @@ instructions in `BUILD.md`; short version:
 ```bash
 dotnet build src/OrbIx.Quantower.Indicator/OrbIx.Quantower.Indicator.csproj -c Release \
   -p:Share=true \
-  -p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.3\bin\TradingPlatform.BusinessLayer.dll"
+  -p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.4\bin\TradingPlatform.BusinessLayer.dll"
 ```
-(`v1.147.3` as of 2026-09-15 - confirm against whatever's under `C:\Quantower\TradingPlatform\`
+(`v1.147.4` as of 2026-09-23 - confirm against whatever's under `C:\Quantower\TradingPlatform\`
 on the machine actually building; BUILD.md deliberately doesn't hard-code it since it moves on
 Quantower updates. **Quantower auto-updated from v1.146.18 to v1.147.3 mid-session on
 2026-09-15** - every DLL deployed earlier that day had been built against the now-stale
@@ -69,7 +69,14 @@ v1.146.18 SDK reference while the live platform had already moved to v1.147.3, a
 leading suspect for a same-day report of settings changes intermittently blanking the whole
 chart. Rebuilt against the correct current SDK and redeployed; if a similarly erratic "changing
 one setting breaks everything" report recurs, check this path mismatch FIRST, before
-suspecting the paint code.)
+suspecting the paint code. **IT HAPPENED AGAIN 2026-09-23**: Quantower auto-updated overnight
+from v1.147.3 to v1.147.4 with no warning; a Finch-Lite build against the old v1.147.3 path
+failed outright (MSB3245, "could not locate the assembly") rather than silently — a build
+FAILURE is the easy case; the 2026-09-15 incident was worse precisely because that stale
+reference still built and deployed something. Confirmed by listing
+`C:\Quantower\TradingPlatform\` before assuming the path in any older doc entry, this one
+included, is still current — treat every hard-coded `v1.147.x` string in this whole file as a
+snapshot of "true as of that entry's date," not a fact to trust going forward.)
 
 **Verified 2026-09-14**: builds clean (0 errors, 269 pre-existing nullable-annotation-
 context warnings from the source itself - not touched, not this repo's code to restyle) once
@@ -1339,6 +1346,64 @@ clamped so it never runs past the pane's right edge.
 **Verified 2026-09-23**: `dotnet build ... -c Release` — 0 errors. Deployed to
 `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
 confirms the deployed DLL matches. Not yet confirmed on a live chart.
+
+**ROOT CAUSE FOUND AND FIXED 2026-09-23 — large-order lines showed stale, no-longer-real sizes,
+disagreeing with this indicator's own DOM ladder right next to them.** Screenshot showed a dense
+stack of "ASK 75/73/159/113/..." lines the operator said were no longer really on the book —
+"these orders need to update on the dom because i dont see these large orders still on the dom...
+they need to update in real time." Root cause was a REGRESSION from yesterday's UA-trigger
+redesign, not a data-refresh problem: `ReconcileRestingLevels`'s final loop still displayed
+`isUnfinished ? current : peak` — correct back when `IsUnfinished` meant exactly "current is
+below peak" (the two conditions covered each other), but yesterday's redesign changed the trigger
+to a PRICE-DISTANCE rule instead. A large ask sitting well above current price can never be
+flagged unfinished under that rule (price hasn't crossed above it), so it kept displaying its
+remembered PEAK size no matter how much its live size had actually shrunk — while the DOM ladder
+(Feature 2, built fresh from the exact same poll's book every time) correctly showed the smaller
+live number right next to it, producing the mismatch. Fix: `RestingOrderDraw`'s `Size` now ALWAYS
+shows the live `current` size; `peak` is bookkeeping only from here on (raising the bar,
+absorption-delta comparisons) and is never again what gets displayed.
+
+**Also this same day**: Quantower auto-updated `v1.147.3` → `v1.147.4` overnight with no warning
+— see the auto-update lesson under ORB-IX's own build section above (now updated with a second
+occurrence). Rebuilt against `C:\Quantower\TradingPlatform\v1.147.4\bin\...` after the first build
+attempt failed outright with MSB3245 (the DLL simply couldn't be found) — a much easier failure
+mode to catch than the silent stale-build incident from 2026-09-15, but still worth checking
+first on any Quantower-adjacent build weirdness.
+
+**Verified 2026-09-23**: `dotnet build ... -c Release -p:QuantowerSdkPath="...v1.147.4\bin\..."`
+— 0 errors. Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\
+FinchLiteIndicator.dll`, `sha256sum` confirms the deployed DLL matches. Not yet confirmed on a
+live chart — ask the operator to remove/re-add Finch-Lite and confirm large-order line sizes now
+track the DOM ladder's own numbers in real time, including levels that have shrunk without price
+ever moving past them.
+
+**ROOT CAUSE FOUND AND FIXED 2026-09-23 (same day) — "now my dom on the right is super small on
+the order size".** `DomLadderOverlay` had scaled every bar's length against the single LARGEST
+size anywhere in that poll's scanned book (`DomLadderDrawable.MaxSize`) since Feature 2 was first
+built. A screenshot showed a rare 575-contract ask outlier had become that denominator, squashing
+every ordinary 20-150 contract level down to a near-invisible sliver — the ladder's entire visual
+scale rode on whatever the single biggest resting order happened to be at that instant, with no
+floor against one outlier wrecking it for everyone else. Fixed by scaling against a fixed,
+configurable reference size instead: new `DomLadderFillSize` `InputParameter` (default 150) — a
+level at or above it fills the strip fully (clipped via `Math.Clamp`, not stretched further), so
+one huge order no longer flattens everyone else's scale. `DomLadderDrawable.MaxSize` removed
+entirely; `BuildLadder` no longer computes a running max, just builds the bar array.
+`DomLadderOverlay.Options` gained `FillSize`, used directly at paint time instead of a value
+baked into the drawable at poll time.
+
+Caught and fixed one self-inflicted regression while removing `MaxSize`: `BuildLadder`'s
+`DomLadderEnabled` gate had lived INSIDE that method (return `Empty` when disabled) — it was the
+ONLY place that flag was ever checked, since the paint call site draws unconditionally. Making
+`BuildLadder` briefly `static` while restructuring nearly dropped that check silently (disabling
+the ladder would have stopped doing anything). Kept it as an instance method specifically to keep
+the enabled-gate in the one place it actually lived.
+
+**Verified 2026-09-23**: `dotnet build ... -c Release -p:QuantowerSdkPath="...v1.147.4\bin\..."`
+— 0 errors. Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\
+FinchLiteIndicator.dll`, `sha256sum` confirms the deployed DLL matches. Not yet confirmed on a
+live chart — ask the operator to remove/re-add Finch-Lite and confirm ordinary-sized DOM ladder
+bars are visibly longer again even when one outlier level is on the book, and that toggling `DOM
+ladder: enable` off still actually hides it.
 
 ### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
 **Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show

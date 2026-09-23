@@ -10,12 +10,9 @@ internal readonly record struct DomBarDraw(double Price, double Size, bool IsBid
 
 /// <summary>Immutable paint snapshot: the poll writes it, the paint reads it.</summary>
 /// <param name="Bars">Every level currently scanned, both sides.</param>
-/// <param name="MaxSize">The single largest size across BOTH sides — bar length is a comparison,
-/// so every bar shares one scale rather than each side scaling against its own max (which would
-/// make an equally-sized bid and ask draw as different lengths).</param>
-internal sealed record DomLadderDrawable(DomBarDraw[] Bars, double MaxSize)
+internal sealed record DomLadderDrawable(DomBarDraw[] Bars)
 {
-    public static readonly DomLadderDrawable Empty = new(Array.Empty<DomBarDraw>(), 0);
+    public static readonly DomLadderDrawable Empty = new(Array.Empty<DomBarDraw>());
 }
 
 /// <summary>
@@ -25,10 +22,22 @@ internal sealed record DomLadderDrawable(DomBarDraw[] Bars, double MaxSize)
 /// instead of only the levels that cleared the large-order threshold. Same red-bid/green-ask
 /// colouring as the large-order lines, at lower opacity so the highlighted large-order lines
 /// still read as the louder signal sitting on top of this quieter backdrop.
+///
+/// FIXED 2026-09-23 — "now my dom on the right is super small on the order size": every bar used
+/// to scale against the single LARGEST size seen anywhere in that poll's scanned book. One rare
+/// outlier (a 575-contract ask, say) became the denominator for EVERYTHING, squashing every
+/// ordinary 20-150 contract level down to a near-invisible sliver — the ladder's whole visual
+/// scale rode on whatever the single biggest resting order happened to be at that instant. Now
+/// scales against a fixed, configurable reference size (<see cref="Options.FillSize"/>) instead:
+/// a level at or above it fills the strip fully (clipped, not stretched further), so one huge
+/// order no longer flattens everything else's scale.
 /// </summary>
 internal sealed class DomLadderOverlay : IDisposable
 {
-    internal readonly record struct Options(Color BidColor, Color AskColor, float StripWidth, float RowHeight);
+    /// <param name="FillSize">The size, in contracts, that fills the strip fully. A level at or
+    /// above this clips at full width rather than stretching the scale further.</param>
+    internal readonly record struct Options(
+        Color BidColor, Color AskColor, float StripWidth, float RowHeight, double FillSize);
 
     private SolidBrush? bidBrush;
     private SolidBrush? askBrush;
@@ -37,7 +46,7 @@ internal sealed class DomLadderOverlay : IDisposable
 
     public void Draw(Graphics graphics, IChartWindow window, DomLadderDrawable drawable, in Options options)
     {
-        if (this.disposed || drawable.Bars.Length == 0 || drawable.MaxSize <= 0)
+        if (this.disposed || drawable.Bars.Length == 0 || options.FillSize <= 0)
             return;
 
         var converter = window.CoordinatesConverter;
@@ -61,9 +70,8 @@ internal sealed class DomLadderOverlay : IDisposable
                 if (!TryY(converter, bar.Price, pane.Top, pane.Bottom, out var y))
                     continue;
 
-                var width = (float)(bar.Size / drawable.MaxSize) * maxWidth;
-                if (width < 1f)
-                    width = 1f;
+                var width = (float)(bar.Size / options.FillSize) * maxWidth;
+                width = Math.Clamp(width, 1f, maxWidth);
 
                 var brush = bar.IsBid ? this.bidBrush! : this.askBrush!;
                 graphics.FillRectangle(brush, pane.Right - width, y - halfRow, width, options.RowHeight);
