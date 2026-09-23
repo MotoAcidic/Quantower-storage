@@ -1980,6 +1980,24 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
 
     private volatile DeltaLevelsDrawable deltaLevelsDrawable = DeltaLevelsDrawable.Empty;
 
+    // ---- Ocean Delta Cross (ported 2026-09-22 from the operator's own ATAS indicator) --------
+    //
+    // A richer sibling of the plain vertical flip marker above: same "session cumulative delta
+    // changed sign" event, fed through Ported/src/oceans-delta's own tested DeltaEngine instead
+    // of OrbIx.Core's simpler one, so the horizontal arm can show WHERE the flip was actually
+    // paid for (a one-sided cluster inside the crossing bar) rather than only WHEN it happened.
+    private readonly OceansDelta.DeltaEngine oceanDelta = new();
+    private readonly OceanDeltaCrossOverlay oceanDeltaCrossOverlay = new();
+    private volatile OceanCrossDrawable oceanCrossDrawable = OceanCrossDrawable.Empty;
+    private int oceanDeltaBarIndex;
+    private bool oceanDeltaNewSessionPending;
+
+    /// <summary>What a level inside the crossing bar has to clear before it counts as the cluster
+    /// that paid for the flip — same defaults the friend's own ATAS indicator ships.</summary>
+    private const int OceanClusterMinVolume = 60;
+    private const int OceanClusterMinDelta = 30;
+    private const int OceanClusterMinLeanPercent = 35;
+
     /// <summary>The last shelf scan, and the newest footprint it covered.</summary>
     private ShelfScan shelfScan = ShelfScan.Empty;
     private DateTime shelfScanNewest;
@@ -2272,6 +2290,7 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
     private double lastAsk = double.NaN;
 
     private readonly HhLlOverlay hhllOverlay = new();
+    private readonly SwingPointOverlay swingPointOverlay = new();
     private readonly List<DateTime> hhllBarOpen = new();
     private readonly List<double> hhllBarHigh = new();
     private readonly List<double> hhllBarLow = new();
@@ -2284,6 +2303,26 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
     private HhLlEngine? hhllEngine;
     private (int Left, int Right) hhllParams;
     private volatile HhLlDrawable hhllDrawable = HhLlDrawable.Empty;
+
+    // ---- Swing High and Low (ported 2026-09-22 from the operator's own ATAS indicator) -------
+    //
+    // Deliberately its OWN detector, not a re-skin of the HH/LL structure engine above — that one
+    // uses the Pine leftBars/rightBars confirmation rule and a different visual language (boxed
+    // "HH"/"HL" tags); this one is the simple symmetric N-bar pivot rule ATAS's own settings
+    // panel describes ("Period", "Include Equal"), read off the SAME already-maintained
+    // hhllBarOpen/High/Low arrays above rather than a second pass over HistoricalData.
+    private readonly List<SwingPointDraw> swingPoints = new();
+    private volatile SwingPointDrawable swingPointDrawable = SwingPointDrawable.Empty;
+    private int swingCheckedBar = -1;
+    private DateTime swingOriginUtc;
+
+    /// <summary>Bars on each side of a candidate pivot that must confirm it — ATAS's own
+    /// "Period" default from the reference screenshot.</summary>
+    private const int SwingPeriod = 10;
+
+    /// <summary>Whether an equal high/low still counts as the pivot (ties allowed) — ATAS's own
+    /// "Include Equal" default (checked) from the reference screenshot.</summary>
+    private const bool SwingIncludeEqual = true;
 
     private readonly FibOverlay fibOverlay = new();
 
@@ -2733,6 +2772,11 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
         this.hhllColorsApplied = false;
         this.hhllSeedReported = false;
 
+        this.swingPoints.Clear();
+        this.swingPointDrawable = SwingPointDrawable.Empty;
+        this.swingCheckedBar = -1;
+        this.swingOriginUtc = default;
+
         // Same reasoning: a wick-absorption zone measured against a different chart's bars
         // would anchor to a price/time that means nothing on the new chart.
         this.wickAbsorptionEngine = null;
@@ -2771,6 +2815,10 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
         this.zoneFault = string.Empty;
         this.deltaEngine = null;
         this.deltaFlips.Reset();
+        this.oceanDelta.Reset();
+        this.oceanCrossDrawable = OceanCrossDrawable.Empty;
+        this.oceanDeltaBarIndex = 0;
+        this.oceanDeltaNewSessionPending = false;
         this.shelfScan = ShelfScan.Empty;
         this.shelfScanKey = string.Empty;
         this.shelfScanNewest = default;
@@ -3036,6 +3084,11 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
                     // boundary would be this session wearing yesterday's verdict.
                     this.deltaFlips.OnSessionOpen(sessionOpen);
 
+                    // Same reasoning, for Ocean Delta Cross's own engine — consumed (and cleared)
+                    // the next time a bar is actually fed, since OceansDelta.DeltaEngine.Feed
+                    // takes newSession as a per-call flag rather than a separate reset method.
+                    this.oceanDeltaNewSessionPending = true;
+
                     // Same reasoning: a volume node from a prior session describes tape that is
                     // no longer trading. This is a fresh SessionProfile, not a cleared one -- the
                     // type carries no Clear() of its own.
@@ -3129,6 +3182,19 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
                     this.deltaFlips.ConfirmContracts = this.FlipConfirmContracts;
                     this.deltaFlips.MarkFirstSide = this.FlipMarkFirstSide;
                     this.deltaFlips.OnClosedBar(closedDelta, out _);
+
+                    this.oceanDelta.ConfirmContracts = this.FlipConfirmContracts;
+                    this.oceanDelta.MarkFirstSide = this.FlipMarkFirstSide;
+                    var isNewSession = this.oceanDeltaNewSessionPending;
+                    this.oceanDeltaNewSessionPending = false;
+                    if (this.oceanDelta.Feed(
+                            this.oceanDeltaBarIndex, closedDelta.CloseTimeUtc, (decimal)closedDelta.Delta,
+                            isNewSession, out var oceanFlip))
+                    {
+                        this.BuildOceanCross(oceanFlip, closedDelta);
+                    }
+                    this.oceanDeltaBarIndex++;
+
                     this.WriteParityLine(closedDelta, "live-ticks");
                     this.vwapSession.SampleBar(closedDelta.OpenTimeUtc);
                     this.vwapAnchored.SampleBar(closedDelta.OpenTimeUtc);
@@ -3174,6 +3240,7 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
             this.AdvanceContextRanges(nowUtc);
             this.SeedClosedSessionsFromBars(nowUtc);
             this.FeedHhLl();
+            this.BuildSwingPoints();
             this.FeedAnchorGate();
             this.BuildVolumeNodeDrawable();
             this.FeedWickAbsorption();
@@ -4719,6 +4786,10 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
     {
         this.deltaEngine = null;
         this.deltaFlips.Reset();
+        this.oceanDelta.Reset();
+        this.oceanCrossDrawable = OceanCrossDrawable.Empty;
+        this.oceanDeltaBarIndex = 0;
+        this.oceanDeltaNewSessionPending = false;
         this.shelfScan = ShelfScan.Empty;
         this.shelfScanKey = string.Empty;
         this.shelfScanNewest = default;
@@ -5042,6 +5113,162 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
             picked.RemoveRange(0, picked.Count - this.MaxDeltaFlips);
 
         return picked;
+    }
+
+    /// <summary>
+    /// Scans for newly-confirmable swing pivots: a bar is a swing high (low) once
+    /// <see cref="SwingPeriod"/> bars on EACH side confirm it is the extreme of that window — the
+    /// same symmetric N-bar pivot rule the operator's ATAS "Swing High and Low" settings panel
+    /// describes. Incremental, not a rescan: <see cref="swingCheckedBar"/> only advances once a
+    /// candidate has enough bars on its right to be judged, so a bar is examined exactly once.
+    ///
+    /// GUARDS AGAINST THE SAME ORIGIN-SHIFT HAZARD "Flow: trend lines" already hit once
+    /// (Quantower-storage/CLAUDE.md, 2026-09-16): hhllBarOpen can be rebuilt from a platform-
+    /// controlled "oldest loaded bar" that silently moves backward when the chart is panned,
+    /// renumbering every existing index without necessarily changing the array's own length —
+    /// the length-only check this method would otherwise share with FeedHhLl's own rebuild guard
+    /// is not enough on its own. Comparing the array's own first-bar TIME catches it here too.
+    /// </summary>
+    private void BuildSwingPoints()
+    {
+        var opens = this.hhllBarOpen;
+        var highs = this.hhllBarHigh;
+        var lows = this.hhllBarLow;
+
+        if (opens.Count == 0)
+            return;
+
+        var origin = opens[0];
+        if (origin != this.swingOriginUtc)
+        {
+            this.swingOriginUtc = origin;
+            this.swingCheckedBar = -1;
+            this.swingPoints.Clear();
+        }
+
+        var period = SwingPeriod;
+        var lastConfirmable = opens.Count - 1 - period;
+        var start = Math.Max(this.swingCheckedBar + 1, period);
+
+        for (var i = start; i <= lastConfirmable; i++)
+        {
+            var isHigh = true;
+            var isLow = true;
+
+            for (var j = i - period; j <= i + period && (isHigh || isLow); j++)
+            {
+                if (j == i)
+                    continue;
+
+                if (SwingIncludeEqual)
+                {
+                    if (highs[j] > highs[i]) isHigh = false;
+                    if (lows[j] < lows[i]) isLow = false;
+                }
+                else
+                {
+                    if (highs[j] >= highs[i]) isHigh = false;
+                    if (lows[j] <= lows[i]) isLow = false;
+                }
+            }
+
+            if (isHigh)
+                this.swingPoints.Add(new SwingPointDraw(opens[i], highs[i], IsHigh: true));
+
+            if (isLow)
+                this.swingPoints.Add(new SwingPointDraw(opens[i], lows[i], IsHigh: false));
+
+            this.swingCheckedBar = i;
+        }
+
+        // Bounded so a very long session does not grow this list forever — old pivots off the
+        // left edge of any chart a reader would actually be looking at.
+        const int maxKept = 1000;
+        if (this.swingPoints.Count > maxKept)
+            this.swingPoints.RemoveRange(0, this.swingPoints.Count - maxKept);
+
+        this.swingPointDrawable = new SwingPointDrawable(this.swingPoints.ToArray());
+    }
+
+    /// <summary>
+    /// Resolves one Ocean Delta Cross flip into a drawable cross — the horizontal arm's price
+    /// found by running the SAME cluster search the friend's ATAS indicator runs
+    /// (<see cref="OceansDelta.ClusterSearch"/>), fed from this indicator's OWN footprint engine
+    /// instead of ATAS's <c>candle.GetAllPriceLevels()</c>. Matched to the crossing bar's
+    /// footprint by open time, the same join key <see cref="ScanShelves"/> already uses for the
+    /// same reason (both series are built on the chart's own bar grid, but that is verified here,
+    /// not assumed) — a bar with no matching footprint just gets no cluster search, falling back
+    /// to the close, which is the honest answer for a bar this indicator cannot see the tape of.
+    /// </summary>
+    private void BuildOceanCross(OceansDelta.Flip flip, DeltaBar closedDelta)
+    {
+        var hits = new List<OceansDelta.ClusterHit>();
+
+        if (this.footprint is { } fp)
+        {
+            var found = false;
+            OrbCore.Features.FootprintEngine.BarFootprint match = default;
+
+            foreach (var bar in fp.ClosedBarFootprints)
+            {
+                if (bar.OpenTimeUtc != closedDelta.OpenTimeUtc)
+                    continue;
+
+                match = bar;
+                found = true;
+                break;
+            }
+
+            if (found)
+            {
+                var levels = new List<OceansDelta.PriceVolume>(match.Cells.Count);
+
+                foreach (var pair in match.Cells)
+                {
+                    if (pair.Value.Total <= 0)
+                        continue;
+
+                    levels.Add(new OceansDelta.PriceVolume
+                    {
+                        Price = (decimal)pair.Key,
+                        Volume = (decimal)pair.Value.Total,
+                        Bid = (decimal)pair.Value.BidVolume,
+                        Ask = (decimal)pair.Value.AskVolume,
+                    });
+                }
+
+                var filter = new OceansDelta.ClusterFilter
+                {
+                    MinVolume = OceanClusterMinVolume,
+                    MinDelta = OceanClusterMinDelta,
+                    MinLeanPercent = OceanClusterMinLeanPercent,
+                    Sign = flip.Sign,
+                };
+
+                hits = OceansDelta.ClusterSearch.Find(levels, filter);
+            }
+        }
+
+        var priceResult = OceansDelta.CrossMath.Price(
+            OceansDelta.CrossPriceMode.Cluster, (decimal)closedDelta.Close, hits);
+
+        var draw = new OceanCrossDraw(
+            closedDelta.CloseTimeUtc, flip.Sign > 0, (double)priceResult.Price,
+            priceResult.FromCluster, priceResult.Note);
+
+        var previous = this.oceanCrossDrawable.Crosses;
+        var updated = new OceanCrossDraw[previous.Length + 1];
+        Array.Copy(previous, updated, previous.Length);
+        updated[^1] = draw;
+
+        if (updated.Length > this.MaxDeltaFlips)
+        {
+            var trimmed = new OceanCrossDraw[this.MaxDeltaFlips];
+            Array.Copy(updated, updated.Length - this.MaxDeltaFlips, trimmed, 0, this.MaxDeltaFlips);
+            updated = trimmed;
+        }
+
+        this.oceanCrossDrawable = new OceanCrossDrawable(updated);
     }
 
     /// <summary>
@@ -8285,6 +8512,7 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
             // land on top of the grid rather than under it.
             this.DrawFib(graphics, registry);
             this.DrawHhLl(graphics, registry);
+            this.DrawSwingPoints(graphics);
             this.DrawWickAbsorption(graphics, registry);
             this.DrawVolumeNodes(graphics, registry);
             this.DrawAnchorGate(graphics, registry);
@@ -8295,6 +8523,7 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
             this.DrawImbalance(graphics, registry);
             this.DrawAbsorption(graphics, registry);
             this.DrawDeltaLevels(graphics, registry);
+            this.DrawOceanDeltaCross(graphics, registry);
 
             // BEFORE the ranges and the setup geometry, with the rest of the tape context. The
             // absorbed displays describe what the tape did; the opening range and the setup's
@@ -8560,6 +8789,27 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
         }
     }
 
+    private void DrawOceanDeltaCross(Graphics graphics, List<RectangleF> labelRegistry)
+    {
+        var window = this.CurrentChart?.MainWindow;
+        var drawable = this.oceanCrossDrawable;
+
+        if (window is null || drawable.Crosses.Length == 0)
+            return;
+
+        try
+        {
+            this.oceanDeltaCrossOverlay.Draw(graphics, window, drawable,
+                new OceanDeltaCrossOverlay.Options(this.DeltaFlipUpColor, this.DeltaFlipDownColor),
+                labelRegistry);
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = PathDisplay.Redact(
+                $"The Ocean Delta Cross overlay failed to draw: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     private void DrawDelta(Graphics graphics, List<RectangleF> labelRegistry)
     {
         var window = this.CurrentChart?.MainWindow;
@@ -8761,6 +9011,32 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
         {
             this.overlayFault = PathDisplay.Redact(
                 $"The HH/LL overlay failed to draw: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>Highest arrow colour, matching the operator's own ATAS reference (teal/green).</summary>
+    private static readonly Color SwingHighColor = Color.FromArgb(0x00, 0xC8, 0x93);
+
+    /// <summary>Lowest arrow colour, matching the operator's own ATAS reference (pink/red).</summary>
+    private static readonly Color SwingLowColor = Color.FromArgb(0xE6, 0x5A, 0x7A);
+
+    private void DrawSwingPoints(Graphics graphics)
+    {
+        var window = this.CurrentChart?.MainWindow;
+        var drawable = this.swingPointDrawable;
+
+        if (window is null || drawable.Points.Length == 0)
+            return;
+
+        try
+        {
+            this.swingPointOverlay.Draw(graphics, window, drawable,
+                new SwingPointOverlay.Options(SwingHighColor, SwingLowColor, 4f));
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = PathDisplay.Redact(
+                $"The swing point overlay failed to draw: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -9008,6 +9284,7 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
         this.overlay?.Dispose();
         this.overlay = null;
         this.hhllOverlay.Dispose();
+        this.swingPointOverlay.Dispose();
         this.wickAbsorptionOverlay.Dispose();
         this.anchorGateOverlay.Dispose();
         this.trendLineBreakOverlay.Dispose();
@@ -9018,6 +9295,7 @@ public sealed class FinchScalpingIndicator : Qt.Indicator
         this.imbalanceOverlay.Dispose();
         this.absorptionOverlay.Dispose();
         this.deltaLevelsOverlay.Dispose();
+        this.oceanDeltaCrossOverlay.Dispose();
         this.flowLevelsOverlay.Dispose();
         this.flowMarkersOverlay.Dispose();
         this.flowStatisticsOverlay.Dispose();

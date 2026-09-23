@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Finch-Lite (started 2026-09-22): a genuinely separate, minimal indicator — NOT a copy of
+    ORB-IX/Finch-Scalping and NOT compiling in OrbIx.Core at all. Finch-Scalping's own fold still
+    runs ORB-IX's full footprint/HH-LL/zone/Anchor-Gate machinery every ~100ms regardless of
+    which of its displays are actually turned on, because that machinery was only ever disabled
+    at the display layer, never removed from the fold sequence — the operator's own diagnosis of
+    why their charts had gotten slow. This project has none of that to disable: every feature
+    added here is the ONLY code running, one thing at a time, verified before the next is added.
+
+    net10.0-windows for the same reason as every other indicator project here: the installed
+    platform binds System.Runtime 10 and System.Drawing.Common 9, and net8.0-windows fails with
+    CS1705.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <AssemblyName>FinchLiteIndicator</AssemblyName>
+    <RootNamespace>FinchLite</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Share)' == 'true'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <Deterministic>true</Deterministic>
+    <PathMap>$(MSBuildThisFileDirectory)..\..\=/src/</PathMap>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>$(QuantowerSdkPath)</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

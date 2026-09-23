@@ -653,6 +653,693 @@ indicator so far has been the SAME settings-collision mechanism hitting a differ
 time — worth checking first, before assuming a code change broke something, whenever a feature
 that should be working goes missing or reappears unexpectedly.
 
+**Aside — ATAS X discovered and mapped (2026-09-21).** The operator installed a second platform,
+"ATAS X" (`D:\ATAS X` — the program's own install folder, NOT where custom indicators go).
+Custom indicator DLLs actually live in `%AppData%\ATAS X\Indicators\`; a friend-provided
+`OceansDelta.dll` the operator had staged in `Quantower-storage\Atas\` turned out to be already
+sitting there and byte-identical (`sha256sum` confirmed) — nothing needed copying. That same
+folder also holds `OceansPivotDecoder.dll`/`V2`, `FinchysCross.dll`, a stray Quantower-built
+`OrbIxIndicator.dll` (won't run in ATAS — different SDK, likely dropped there by accident), and
+a stale duplicate `OceansDelta(1).dll` with a DIFFERENT hash from the current one — worth
+cleaning up if the operator ever asks, not yet done since they hadn't decided.
+
+**Added 2026-09-22 - Ocean Delta Cross, ported from the operator's own ATAS indicator into
+Finch-Scalping** (`OceanDeltaCrossOverlay.cs`, new; `Ported/src/oceans-delta/DeltaMath.cs`
+compiled in by source — 123 tests + a mutation pass in that bundle's own suite, platform-free,
+same "compile the clean tree" reasoning as `oceans-anchor`). A richer sibling of the plain
+vertical flip marker already in Finch-Scalping: same "session cumulative delta confirmed a
+change of side" event, but now ALSO draws a horizontal arm at the price the flip was actually
+PAID FOR — the crossing bar's close by default, or (when a genuine one-sided cluster inside that
+bar clears volume/delta/lean thresholds, same defaults the friend's own ATAS indicator ships:
+60 volume / 30 delta / 35% lean) the cluster price itself, drawn DASHED when no cluster
+qualified rather than hidden ("a flip nobody paid for is still information" — copied verbatim
+from that bundle's own CLAUDE.md). Cluster search is fed from THIS indicator's OWN
+`FootprintEngine` (matched to the crossing bar by open time, the same join key `ScanShelves`
+already uses and for the same reason — verified, not assumed), not ATAS's
+`candle.GetAllPriceLevels()`. Feeds through `Ported/src/oceans-delta`'s own tested
+`OceansDelta.DeltaEngine` (decimal-based, separate from `OrbIx.Core.Features.DeltaFlipEngine`
+which still drives the plain vertical marker unchanged) rather than reimplementing the flip-arm/
+confirm-distance state machine a second time. **Deliberately NOT ported yet** — the richer ATAS
+original's multi-session flip-zone bands and "lines in the sand" iceberg levels — kept for later
+per this project's "one feature at a time" discipline; the cross itself was the part the operator
+actually asked for.
+
+**Added 2026-09-22 (same day) - Swing High and Low, ported from the operator's own ATAS
+indicator** (`SwingPointOverlay.cs`, new — simple up/down triangle arrows, matching the
+reference chart exactly). Deliberately a FRESH, standalone detector rather than a re-skin of the
+existing HH/LL structure engine, which uses a different confirmation rule (Pine's own
+leftBars/rightBars) and a different visual language (boxed "HH"/"HL" tags) — this one implements
+the plain symmetric N-bar pivot rule the operator's own ATAS settings screenshot describes
+("Period" = 10, "Include Equal" = checked): a bar is a swing high/low once `SwingPeriod` bars on
+EACH side confirm it is the window's own extreme. Reads off the ALREADY-maintained
+`hhllBarOpen`/`High`/`Low` arrays (no second pass over `HistoricalData`) and scans incrementally
+(`swingCheckedBar` cursor, each bar examined once) rather than rescanning from bar zero every
+fold. **Guards against the exact origin-shift hazard "Flow: trend lines" already hit once**
+(documented above, 2026-09-16): compares the array's own first-bar TIME each fold, not just its
+length, since panning can silently renumber every existing index without necessarily changing
+the array's own length — the bug class that slipped through a length-only check before. No
+`InputParameter`s exposed for `SwingPeriod`/`SwingIncludeEqual`/colours (`SwingHighColor`/
+`SwingLowColor`) — hardcoded consts, matching every other Finch-Scalping feature added since the
+settings-collision fix, since exposing them would just be more surface for the same collision
+class to eventually hit.
+
+**Verified 2026-09-22**: both features built together, `dotnet build ... -c Release` — 0 errors.
+Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Scalping\FinchScalpingIndicator.dll`,
+`sha256sum` confirms each deploy matched. Not yet confirmed on a live chart — that verification
+(does the cross's horizontal arm land at a sensible price, do the swing arrows match the ATAS
+reference visually) is still outstanding.
+
+### Finch-Lite (`Indicators/Finch-Lite/`) — added 2026-09-22
+
+**A THIRD, deliberately separate indicator** ("all these moving parts in quantower are making
+the charts super slow lets start a new indicator and add only 1 thing at a time and it doesnt
+need to be a port from the finch-scalping or anyhting we will build this on our own" — the
+operator's own words). Root cause of the slowness this responds to: Finch-Scalping is still, at
+its core, a literal copy of ORB-IX's ~9000-line fold sequence — every feature not currently
+wanted was only ever disabled at the DISPLAY layer (an `InputParameter` or a paint-time guard),
+never removed from the fold itself, so the full footprint engine, HH/LL engine, Anchor Gate
+absorption tests, zone detection, Wave1, anchored VWAP etc. all still run every ~100ms regardless
+of which of Finch-Scalping's own displays are switched on. Finch-Lite has none of that: it
+compiles in NOTHING from `OrbIx.Core` or `Ported/` at all, and its fold-equivalent only ever
+contains the features actually built so far.
+
+**Architecture**: `Indicators/Finch-Lite/src/Finch.Lite.Indicator/` — a single small `.csproj`
+(no `<Compile Include>` globs reaching into other projects — the SDK's own default globbing
+picks up this project's own files), referencing only the Quantower SDK itself
+(`TradingPlatform.BusinessLayer`) and `System.Drawing.Common`. `FinchLiteIndicator.cs` is a
+fresh, from-scratch `Qt.Indicator` — its `OnInit` uses the SAME retry-until-ready pattern
+Finch-Scalping had to relearn the hard way on 2026-09-18 (try once, and if the platform hasn't
+published what's needed yet, a one-second timer keeps retrying rather than giving up
+permanently) applied FROM THE START this time, plus an on-chart amber fault line
+(`overlayFault`) from the first build rather than added after a "why is nothing showing" report.
+
+**Feature 1 (2026-09-22) — large resting orders**: a full-pane-width horizontal line at any
+price currently carrying a resting bid or ask at or above a configurable size threshold
+(`LargeOrderMinSize`, default 100 contracts) — "an area marked out that has a lot of large
+resting orders" (the operator's own phrase). Colour is the operator's own explicit, deliberate
+choice, NOT this codebase's usual bullish=green/bearish=red convention: **red for a resting
+BID** (a seller would have to hit it to clear it) and **green for a resting ASK** (a buyer would
+have to lift it), each labelled with its side and size (`"BID 500"` / `"ASK 500"`).
+- **Pulled, not streamed** — reusing a hard-won platform fact from ORB-IX's own `PullBook`
+  method rather than re-discovering it: this connector's LIVE Level2 event stream arrives
+  stamped `"generated_from_level1"`, meaning the connector fabricates a book from the top-of-book
+  touch because it has nothing else to publish there (ORB-IX measured 19,762 such updates
+  carrying zero real depth). The platform's own PULL API,
+  `DepthOfMarket.GetDepthOfMarketAggregatedCollections`, returns the genuine book on the same
+  connection — confirmed by ORB-IX to return 50 real prices a side. Finch-Lite polls this
+  directly on its own `Timer` (`PollIntervalMs`, default 250ms) rather than subscribing to the
+  event stream at all, so it can never fall into that trap in the first place.
+  `GetMBOItems: false` — this feature shows AGGREGATE size resting at a price, not a breakdown of
+  individual orders; that distinction can be revisited if the operator ever wants literal
+  per-order counts.
+- `RestingOrderOverlay.cs` — a small, self-contained overlay (its own local `TryY` coordinate
+  helper, not shared with any other project) drawing the line + label per qualifying level.
+
+**Verified 2026-09-22**: `dotnet build src/Finch.Lite.Indicator/Finch.Lite.Indicator.csproj -c
+Release -p:Share=true -p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.3\bin\
+TradingPlatform.BusinessLayer.dll"` — 0 errors on the FIRST build (8 warnings total, all the
+same harmless nullable-annotation-context style noise every project here carries, none from
+inherited ORB-IX bulk this time — the whole point of starting clean). Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet confirmed on a live chart or checked for actual CPU/
+frame-time improvement over Finch-Scalping — both still outstanding. All `InputParameter` names
+here are unique to this indicator (never existed in ORB-IX), so the settings-collision class of
+bug documented at length under Finch-Scalping above cannot apply to this project.
+
+**Added 2026-09-22 (same day) - two session-specific thresholds instead of one** ("lets make the
+options work for asia session and one for ny session for the min amount of orders so its easier"
+— a single fixed "large" size does not fit both a thin overnight book and a busy NY day session).
+`LargeOrderMinSizeNy`/`LargeOrderMinSizeAsia` (defaults 100/50) replace the original single
+`LargeOrderMinSize`. Session windows are read in `America/New_York` wall-clock time via a plain
+`TimeZoneInfo.ConvertTimeFromUtc` check (no `OrbIx.Core.Sessions.SessionClock` — this project
+compiles in nothing from `OrbIx.Core` at all, and hand-rolling one time-of-day comparison is not
+worth breaking that), matching boundaries ORB-IX's own configuration already established for
+these same names rather than inventing a different convention here: NY session 09:30-18:00 ET
+(RTH open through GLOBEX's own 18:00 reopen), Asia session everything else — an EXHAUSTIVE two-
+way split of the full day, not a third "other" bucket the operator did not ask for. (Also fixed
+in passing: `LevelsToScan` and `BidColor` had accidentally been given the same `InputParameter`
+index, 12, while adding the two new thresholds — caught and renumbered before it could cause a
+settings mix-up of its own.)
+
+**Added 2026-09-22 (same day) - feature 2, a full-depth DOM ladder** (`DomLadderOverlay.cs`, new
+— "is there a way to show like a dom on the right hand side thats a bar so i can tell all
+resting orders"). The large-order lines from feature 1 only ever show levels that cleared the
+threshold; this draws a bar for EVERY level the same poll already scans, length proportional to
+size, along a configurable-width strip (`DomLadderWidth`, default 150px) on the pane's right
+edge — a "quiet backdrop" at lower opacity (alpha 120 vs. the large-order lines' own fuller
+colour) so the highlighted large-order lines still read as the louder signal sitting on top of
+it, drawn first specifically so the ordering holds. Both sides share ONE scale
+(`DomLadderDrawable.MaxSize`, the single largest size across bids AND asks) rather than each
+side scaling against its own max — scaling separately would draw an equally-sized bid and ask as
+different bar lengths, which would misrepresent the one thing a length-comparison ladder exists
+to show honestly. Fed from the SAME poll `BuildLadder` runs off of (`book.Bids`/`book.Asks`,
+already fetched for feature 1) — no second `DepthOfMarket` call, same "poll once, build every
+drawable from it" discipline the periodic-pull design already established.
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors after both additions. Deployed
+to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet confirmed on a live chart.
+
+**Added 2026-09-22 (same day) - feature 3, big trades** (`BigTradeOverlay.cs`, new — "a long bar
+that comes out and makes a line on the chart were on the specified value for large trades so i
+have a super clean line knowing were price would react off of"). A THIRD, distinct trigger from
+features 1/2: those read the resting BOOK (what's sitting there right now); this reads the TAPE
+(what already traded) via a `Symbol.NewLast` subscription — the first tick subscription this
+project has needed — and marks the price of every recent print at or above
+`BigTradeMinSize` (default 50) as a full-pane horizontal line, capped to the newest
+`BigTradeMaxKept` (default 10). Same colour language as the resting-order lines: green for a buy
+(lifted the ask), red for a sell (hit the bid); a print the feed cannot classify to a side is
+never queued at all — a line asserting "buyers did this" for a fill the feed itself would not
+attribute to a side would be a guess dressed up as a fact. **Kept the market-data thread
+discipline this codebase repeats everywhere else**: `OnLast` does nothing but a size comparison
+and a `ConcurrentQueue.Enqueue` — the actual list mutation and drawable rebuild happen in
+`DrainBigTrades()`, called from the existing poll timer rather than a new one.
+
+**Redesigned 2026-09-22 (same day) - features 1 and 2 both changed from a live-only snapshot to
+"remembered for the whole trading day".** Two follow-up asks landed together and turned out to
+be the same underlying request: "what i need is to see all the levels of the order book not just
+a small snap shot and for the large orders i define it makes the line extend so i can see them
+easily" (this was the answer to a clarifying question about an earlier, more narrowly-worded ask
+— "instead of levels to scan i want to do it by the current trading day which starts at 6pm
+EST" — that pointed at the real target once the operator restated it in their own words).
+- **`LevelsToScan` raised from 50 to 500** (range extended to 2000) — asking for more than
+  `GetDepthOfMarketAggregatedCollections` actually has to give is harmless on this connector
+  (ORB-IX already measured it topping out around 50 real prices a side), so this reads as "give
+  me everything the platform has" rather than a second, smaller ceiling stacked on top of the
+  platform's own.
+- **Large-order lines now persist for the whole trading day, not just while the order is still
+  resting.** `restingOrderMemory` (`Dictionary<(double Price, bool IsBid), RestingOrderDraw>`)
+  remembers every level that EVER cleared the threshold since the trading day opened, keeping
+  whichever size was LARGEST ever seen there (a level once carrying 800 contracts still says 800
+  after it thins out or gets pulled — relabelling it down as it fades would misreport what
+  actually happened there). `RestingOrderDrawable` is now built from this memory every poll,
+  not from the live book snapshot directly — the live snapshot only decides what to FOLD INTO
+  the memory, per `RememberLargeLevels`.
+- **Trading-day boundary is 18:00 America/New_York** (`TradingDayStart`, `TradingDayOpen`) — the
+  same GLOBEX-reopen convention this project's own NY/Asia threshold split already established,
+  reused here for consistency rather than inventing a second day-boundary rule. The memory clears
+  itself the first poll after a new trading day starts (`tradingDayStartUtc` comparison inside
+  `RememberLargeLevels`), and again on `OnClear` (a fresh attach starts the day's memory over,
+  consistent with this project's live-forward-only design — there is no historical backfill to
+  seed it from, by the same "never touch the historical volume-analysis API" discipline ORB-IX
+  established for its own live-only volume nodes).
+- The DOM ladder (feature 2) stays a pure live snapshot on purpose — it exists to show the
+  CURRENT shape of the book, not a day's history of it; only its scan depth changed.
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors after both changes (12 warnings
+total, all the same harmless nullable-annotation-context style noise every project here
+carries). Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\
+FinchLiteIndicator.dll`, `sha256sum` confirms the deployed DLL matches. Not yet confirmed on a
+live chart — in particular, whether `restingOrderMemory` accumulating unboundedly through a very
+active trading day becomes a real memory concern is unmeasured; worth revisiting if a session
+runs long and the operator notices anything.
+
+**Fixed 2026-09-22 (same day) - "some of the bid are a little hard to view"**, once large-order
+lines started persisting for the whole trading day (above) a busy price band could accumulate
+many close-together levels whose problems compounded: labels drew directly on top of each other
+(`RestingOrderOverlay` had no label-collision avoidance at all), and GDI+ does not cap
+accumulated alpha — several semi-transparent DOM-ladder rows stacked on the same pixels get MORE
+opaque, not less, so a dense cluster of adjacent levels washed out into one solid,
+undifferentiated red block rather than reading as several distinct sizes. Three fixes:
+- **`RestingOrderOverlay`** now sorts levels largest-first, skips a line within `MinLineGapPx`
+  (6px) of an already-drawn line on the SAME side (largest wins, so a dense cluster reads as its
+  few biggest levels instead of a solid wall of near-identical adjacent lines), and reserves
+  label space via the same collision-avoidance every other overlay in this codebase already uses
+  — a lower-priority label is dropped rather than drawn illegibly on top of one already placed.
+- **`DomLadderOverlay`**'s alpha lowered from 120 to 70, so overlapping rows in a busy band stay
+  visually distinct instead of saturating to one flat colour.
+- **One shared label registry** now covers BOTH `RestingOrderOverlay` and `BigTradeOverlay`
+  (previously `BigTradeOverlay` used its own separate, local registry) — a resting-order label
+  and a big-trade label landing at the same spot now also respect each other.
+
+**Fixed 2026-09-22 (same day) - "the colors are swaped the red should be on top and green on the
+bottom".** Not a bug in the literal sense — asks always rest ABOVE price and bids always rest
+BELOW it, which is the order book's own structure and not something this indicator rearranges —
+but the operator's actual intent was the COLOUR MEANING, not the book structure: they wanted the
+top (ask/resistance) red and the bottom (bid/support) green, matching this codebase's usual
+bullish=green/bearish=red convention, rather than the "bid=red, ask=green" they had originally
+specified when this feature was first built (2026-09-22, earlier the same day). Fixed by swapping
+`BidColor`'s and `AskColor`'s DEFAULT VALUES (bid now defaults green, ask now defaults red) —
+the property names and their meaning are unchanged, only which literal colour each defaults to.
+**Caught in the same pass**: `BigTradeOverlay`'s buy/sell colours were being derived from these
+same two properties (`Options(this.AskColor, this.BidColor)`), so the bid/ask swap would have
+silently flipped buy trades to red and sell trades to green too — buy/sell is a DIFFERENT axis
+(the aggressor, not which side of the book a price rested on) and swapping one should not have
+silently swapped the other. Given its own independent `BigTradeBuyColor`/`BigTradeSellColor`
+(green/red, unaffected by whatever `BidColor`/`AskColor` are set to).
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors after all three fixes. Deployed
+to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. **Confirmed working on a live chart the same day** — the
+operator's own words, "now lets make a backup of this its perfect."
+
+**Backed up 2026-09-22** at `Indicators/Backups/Finch-Lite-2026-09-22/` — a full source snapshot
+(`bin`/`obj` excluded, same convention as every other backup in this repo) plus the exact
+deployed `FinchLiteIndicator.dll` (`sha256sum`-confirmed identical to the live deployment at
+backup time), taken at this "all three features verified working" milestone specifically so
+there is a known-good restore point before any further changes. See that folder's own
+`README.md` for what state it captures and how to restore from it.
+
+**Fixed 2026-09-22 (same day) - a silent blind spot found while investigating "the dom on the
+right some how got removed"** after removing ORB-IX from the same chart. No on-chart fault box
+was showing, which meant `TryInitialise` had succeeded and the poll was not throwing — but a
+call that succeeds while `GetDepthOfMarketAggregatedCollections` happens to come back with an
+EMPTY book (zero bids AND zero asks — a dried-up feed, a connector hiccup, or some other cause
+not yet isolated) previously produced empty drawables with no diagnostic at all, indistinguishable
+from "the market is quiet right now" and from "something broke silently". `OnPollTimer` now
+reports this case the same way every other poll problem already is, so it is visible on the
+chart instead of a page that just looks clean with nothing on it and no way to tell why. This is
+a DIAGNOSTIC addition, not a confirmed root-cause fix — whether an empty book is actually what
+was happening in the reported case is still unconfirmed; the amber box appearing (or not) after
+this deploy is itself the next piece of evidence. Rebuilt (0 errors), redeployed, hash-verified.
+
+**ROOT CAUSE FOUND AND FIXED 2026-09-22 (same day) - Finch-Lite silently depended on ORB-IX
+being attached to the SAME chart to get real depth-of-market data, despite sharing zero code or
+data with it.** The amber box above confirmed the pull was returning a genuinely empty book;
+disconnecting and reconnecting the whole data feed did not fix it; adding ORB-IX back to the
+chart fixed it INSTANTLY, with everything Finch-Lite had already built up still present — proof
+nothing was actually broken or lost, only that depth data had stopped flowing.
+
+**The mechanism**: `Symbol.NewLevel2 +=` calls `SubscribeAction(Level2)` on the platform (read
+in the decompiled assembly — this exact fact is already documented in ORB-IX's own
+`OrbIxIndicator.cs`, `PullBook`'s doc comment, from a 2026-09-14 investigation into this same
+API). That subscription is what tells Quantower to keep requesting/maintaining live depth for a
+symbol from the connector AT ALL — `GetDepthOfMarketAggregatedCollections` (the PULL api this
+whole indicator is built around) reads from that SAME maintained depth, it is not an independent
+data source. ORB-IX subscribes to `NewLevel2` for its own unrelated reasons (its own footprint/
+flow ladder), and that subscription was incidentally the ONLY thing on the chart keeping depth
+alive for Finch-Lite's pull to read from. The moment ORB-IX was removed, nothing was left
+telling the platform to keep depth flowing, and the pull started returning nothing — not a bug
+in Finch-Lite's own logic, an unstated cross-indicator dependency this project was never
+supposed to have in the first place (its whole `.csproj` comment states the goal as "add only 1
+thing at a time... it doesnt need to be a port from finch-scalping or anything").
+
+**The fix**: `FinchLiteIndicator.OnLevel2` — a handler subscribed purely for this SIDE EFFECT,
+deliberately reading NOTHING from its own `Level2Quote`/`DOMQuote` payload (ORB-IX separately
+measured this connector's live Level2 EVENT stream as fabricated from the top-of-book touch,
+`"generated_from_level1"` — the same trap `RestingOrderOverlay`/`DomLadderOverlay`'s own doc
+comments already cite as the reason this project pulls instead of streams). Subscribed/
+unsubscribed alongside the existing `NewLast` wiring in `TryInitialise`/`OnClear`. Finch-Lite now
+holds its own Level2 subscription open and no longer depends on any other indicator being
+attached to the same chart for depth data to exist at all.
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet re-confirmed on a live chart WITHOUT ORB-IX attached
+— that is the actual test of this fix and is still outstanding. Worth remembering for ANY future
+indicator built in this repo that touches `DepthOfMarket`: the pull API is not self-sufficient on
+its own; something has to hold a `NewLevel2` subscription open first, even one that does nothing
+with what it receives.
+
+**Redesigned 2026-09-22 (same day) - large-order levels now resolve, instead of only ever
+persisting.** Two asks landed together: "once a bid has been filled i need it to disapear from
+the chart" and "if its an unfinished auction it needs to label that and show how many more
+contracts are at that unfinished auction". The earlier same-day "persist all day" redesign had
+gone too far in one direction — a level, once flagged, stayed at its peak size forever
+regardless of what actually happened to it. `RestingOrderDraw` gained an `IsUnfinished` flag (and
+its `Size` field now means "the number to SHOW", not always "the peak") and `restingOrderMemory`
+was replaced with `restingOrderPeaks` (`Dictionary<(double Price, bool IsBid), double>`, PEAK
+size only — never what to display) plus a new `ReconcileRestingLevels`, called once per poll
+instead of the old per-side `RememberLargeLevels`:
+- A remembered level absent from the current book (or at size 0) is REMOVED outright — "once a
+  bid has been filled ... disapear from the chart". The book alone cannot distinguish a genuine
+  fill from a plain cancel; this codebase already states elsewhere that where a real distinction
+  cannot be drawn, the honest thing is not to claim one — either way, nothing is left resting
+  there worth marking.
+- A remembered level still present but BELOW its recorded peak now draws as **"UNFINISHED
+  AUCTION — BID/ASK N LEFT"** instead of its ordinary label, with the REMAINING (current) size
+  shown, not the original peak — a deliberate departure from ATAS's own bar-footprint-based
+  "Unfinished Auction" (both sides trading at a bar's own extreme, see ORB-IX's
+  `UnfinishedAuctionScan.cs`) since Finch-Lite has no footprint/tape-correlation infrastructure
+  to build that exact concept from; this reuses the NAME for the closest concept this indicator
+  actually has the data to support honestly — a large resting order that started getting taken
+  but was not fully cleared.
+- A remembered level still present AT OR ABOVE peak is unchanged from before (persists, peak
+  raised if the book now shows more than last recorded).
+- Every dictionary mutation is collect-then-apply (`toRemove`/`toRaise` lists, applied after the
+  enumeration loop) rather than mutating `restingOrderPeaks` mid-foreach — removing a key during
+  enumeration is never safe in .NET, so this never relies on the narrower claim that updating an
+  existing key's value alone would have been.
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet confirmed on a live chart.
+
+**FEATURE 4 (2026-09-22, same day) — delta panel: "now lets add the delta at the bottom"**, the
+very first thing ever asked for across this indicator's whole history (back when it was still
+Finch-Scalping), now built fresh here with zero ORB-IX/Finch-Scalping code reused. New file
+`DeltaPanelOverlay.cs`: `DeltaBarDraw(DateTime OpenUtc, double Delta, double CumulativeAfter)`,
+`DeltaDrawable` (immutable paint snapshot, `Empty` static), `DeltaPanelOverlay` — a band anchored
+to the pane's own bottom edge showing a buy-minus-sell histogram plus a cumulative-delta line,
+independently discovered to use the same `Options(int HeightPx, Color UpColor, Color DownColor,
+double BarsWidth)` shape ORB-IX's own `ZoneOverlay.cs` already uses for the identical feature —
+not copied, converged on independently from the same problem.
+- `TryInitialise()` now also resolves the chart's own bar period (`ChartPeriod(HistoricalData?)`,
+  reading `HistoricalData.Aggregation as HistoryAggregationTime`) before starting the poll timer,
+  storing it in `deltaBarPeriod` — reusing the exact "retry until the platform actually has this
+  populated" discipline this project already documented for `Symbol`/`DepthOfMarket` above,
+  since a chart's `HistoricalData.Aggregation` can be transiently unpopulated right after attach
+  too.
+- `OnLast` now enqueues EVERY classified tick (buy/sell, not just ones over `BigTradeMinSize`)
+  onto a new `deltaTickQueue`, still doing nothing but the enqueue on the market-data thread —
+  same discipline as `bigTradeQueue`.
+- `DrainDeltaTicks()` (poll timer only) buckets queued ticks onto the chart's own bar period via
+  `Bucket(DateTime, TimeSpan) => new(ticks - (ticks % period.Ticks), Utc)`, closing a bucket into
+  `deltaBars` (capped at `MaxDeltaBarsKept = 2000`) when a tick's bucket moves past the currently
+  open one, and always including the still-forming bucket as a live, updating bar in the rebuilt
+  `deltaDrawable` — waiting for a bar to close before showing it at all would make the panel look
+  a whole bar-period behind. Cumulative delta resets at the same 18:00 America/New_York trading-
+  day boundary (`TradingDayStart`) already established for the large-order features — one
+  day-boundary convention for the whole indicator, not a second one invented for this feature.
+- New `InputParameter`s: `DeltaPanelEnabled` (default true), `DeltaPanelHeightPx` (default 110),
+  `DeltaUpColor`/`DeltaDownColor` (green/red, matching this codebase's usual convention).
+- Drawn in `OnPaintChart` gated on `DeltaPanelEnabled`, using `this.CurrentChart?.BarsWidth ?? 1d`
+  for histogram bar width (the established pattern every other bar-aligned overlay in this
+  codebase already uses). Disposed in `Dispose()`; all delta fields reset in `OnClear()`.
+
+**Same-day follow-ups, all in this one pass — absorption colour strength, and separating
+unfinished auctions from ordinary large orders visually:**
+- **"the strength of the color of the bids based on asorbstion were lets say sellers are
+  defending or an area were buyers are defending"** — a resting level's line now draws at colour
+  STRENGTH proportional to how many contracts have traded through it while it kept standing, not
+  a flat opacity for every qualifying level. New tracking alongside `restingOrderPeaks`:
+  `restingOrderLastSize` (the size actually observed last poll, per price+side) and
+  `restingOrderAbsorbed` (running total of size drops while the level stayed present — a refill
+  afterward does not erase this; the level still had to absorb that flow to still be there).
+  `ReconcileRestingLevels` computes the delta each poll (collect-then-apply, same discipline as
+  the existing `toRemove`/`toRaise` lists) and both new dictionaries clear alongside
+  `restingOrderPeaks` at the trading-day boundary and whenever a level fully empties out (a level
+  that reappears later is a NEW level, not a continuation of one already filled).
+  `RestingOrderDraw` gained an `Absorbed` field; `RestingOrderOverlay.Pen(Color, double strength)`
+  blends alpha from 70 (never yet absorbed anything) up to 220 (absorbed
+  `AbsorptionStrongContracts`, new `InputParameter`, default 200) — the stronger the colour, the
+  harder that side has defended the level. Pens are cached by the BLENDED colour's own ARGB value,
+  so this stays bounded to however many distinct strength buckets are actually on screen, not one
+  pen per level.
+- **"lets also make the unfinished auctions white because right now its laying out large orders
+  as unfinished auctions so its like bundling the two together"** — unfinished auctions previously
+  drew in the same bid/ask colour as an ordinary still-full-size large order (just with different
+  label text), so the two categories read as one at a glance. New `UnfinishedAuctionColor`
+  `InputParameter` (default white) always wins for an unfinished level regardless of side, drawn
+  at full strength (1.0) rather than the absorption-scaled strength above — a distinct, fixed
+  category marker, not a shade of the defense signal.
+- **"move that text over some so i can see the dom more clearer"** — the "UNFINISHED AUCTION —
+  BID/ASK N LEFT" (and ordinary "BID/ASK N") labels anchor at the pane's right edge, which is
+  exactly where the DOM ladder (Feature 2) draws its bars — labels were sitting on top of the
+  ladder. `RestingOrderOverlay.Options` gained `LabelInsetPx`; `OnPaintChart` now passes
+  `DomLadderWidth` as that inset whenever the ladder is enabled (0 otherwise), so labels always
+  clear the ladder strip instead of overlapping it.
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors (same pre-existing nullable-
+annotation warnings only). Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet confirmed on a live chart — ask the operator to
+remove/re-add Finch-Lite (new `InputParameter`s need a fresh attach to pick up their defaults)
+and confirm: the delta panel appears at the bottom and updates live; large-order lines now vary
+visibly in strength as they get hit and hold; unfinished auctions read as white, distinct from
+ordinary bid/ask lines; and the DOM ladder on the right is no longer covered by label text.
+
+**Same-day follow-up fixes (screenshot review) — delta panel readability, unfinished-auction
+label placement:**
+- **"the delta looks very weird and not like my old one"** — screenshot showed the delta band's
+  histogram/cumulative-line marks visually tangled with the candles behind them. Root cause: the
+  band's background was filled at 140/255 alpha, so the price action sitting in that same screen
+  region showed straight through instead of being hidden — every other Finch-Lite feature draws
+  ON the one price pane by design (no separate window), so a genuinely separate-reading panel
+  needs a NEAR-OPAQUE background to stand in for that separation, not a translucent tint. Raised
+  `DeltaPanelOverlay`'s background to 235/255 alpha (`Color.FromArgb(235, 12, 14, 20)`, same RGB
+  family the other overlays' label backgrounds already use), added a visible top border line
+  (`Color.FromArgb(150, Gray)`) so the panel's own top edge reads as a clean boundary rather than
+  fading into price above it, and raised the zero-line's own alpha from 90 to 130 so it stays
+  legible against the now much darker band.
+- **"lets make those lines come off the candle it self instead of the dom to keep it clean"** —
+  the unfinished-auction inset fix earlier this same day (above) kept those labels on the pane's
+  RIGHT edge, just pulled left of the DOM ladder strip; the operator wants them off that side
+  entirely. `RestingOrderOverlay.Draw` now anchors an `IsUnfinished` level's label at the pane's
+  LEFT edge (`pane.Left + 4f`, the same anchor `BigTradeOverlay`'s own labels already use)
+  instead of the right — the right side (DOM ladder + ordinary "BID/ASK N" labels) now stays
+  completely free of this category, while unfinished-auction text sits over near the candles on
+  the left. `LabelInsetPx` still applies to ordinary bid/ask labels, unchanged.
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet confirmed on a live chart.
+
+**Same-day follow-up round 2 (screenshot review) — delta panel redesigned into three rows,
+unfinished-auction lines now originate from their own candle:**
+- **"it needs to be volume as one catagory and session delta as another category and delta as
+  the other category"** — the single combined histogram+cumulative-line design read as one
+  blurred signal once the background was made opaque. `DeltaPanelOverlay` now splits its band
+  into three stacked, separately-scaled rows, top to bottom: **VOLUME** (total size traded per
+  bar, one neutral colour — new `DeltaVolumeColor` `InputParameter`, default cornflower blue —
+  since volume itself has no direction), **DELTA** (buy-minus-sell per bar, the up/down
+  histogram, unchanged design but confined to its own row with its own zero line), **SESSION
+  DELTA** (the running session total, now a dedicated row instead of sharing space with the
+  per-bar histogram). `DeltaBarDraw` gained a `Volume` field (`buy + sell` per bucket, computed
+  in `DrainDeltaTicks`'s `CloseBucket` and the still-forming-bucket path alongside `Delta`).
+  `DeltaPanelHeightPx`'s default raised 110 → 150 (three rows split three ways needs more total
+  height to stay legible) and its minimum raised 40 → 60 to match. Each row carries a small
+  left-aligned text label ("VOL" / "DELTA" / "SESSION DELTA") so the three are never ambiguous.
+- **"the unfished auctions need to be centered just to the right of the candle it comes off of"**
+  (illustrated with a manually-drawn ray starting just past a specific candle) — an unfinished
+  auction's line previously spanned the whole pane from the left edge, same as an ordinary
+  large-order line, which said nothing about when the level was actually noticed. New tracking:
+  `restingOrderFirstSeenUtc` (`Dictionary<(double Price, bool IsBid), DateTime>`), stamped with
+  the poll's own `nowUtc` the moment a level is first added in `AddNewLevels`, cleared alongside
+  `restingOrderPeaks`/`restingOrderLastSize`/`restingOrderAbsorbed` on removal and at the
+  trading-day boundary. `RestingOrderDraw` gained a `FirstSeenUtc` field. `RestingOrderOverlay`
+  gained a `TryX` helper (converts a UTC time to a pane-clamped pixel column, same shape as
+  `DeltaPanelOverlay`'s own) — an unfinished level's line now starts at `FirstSeenUtc`'s own
+  screen column and extends right to "now" (the same "still extending" convention already used
+  elsewhere in this codebase for live zones) instead of starting at the pane's left edge; its
+  label anchors just to the right of that same start column, clamped so it never runs past the
+  pane's own right edge. Ordinary (non-unfinished) large-order lines are unchanged — still full
+  pane width, still anchored right for their label.
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet confirmed on a live chart.
+
+**Same-day follow-up round 3 — unfinished-auction colour reverted, label shortened:**
+- **"lets color the unfinished auction line the acording color like we do for the large
+  orders"** — the dedicated white `UnfinishedAuctionColor` added earlier today is gone again;
+  an unfinished auction's line and label now use the same `BidColor`/`AskColor` (and the same
+  absorption-driven colour-strength scaling) as an ordinary large order. Index 16 (where
+  `UnfinishedAuctionColor` lived) is retired rather than reused, so a saved workspace still
+  carrying a value there simply has it ignored, not silently reinterpreted as something else.
+  `RestingOrderOverlay.Options` dropped its `UnfinishedColor` field.
+- **"lets shorten the words for unfinished auctions of UA - Bid and what not"** —
+  "UNFINISHED AUCTION — BID N LEFT" is now "UA - BID N" (and "UA - ASK N"), matching the
+  operator's own example. The line's own origin-based positioning (fixed earlier today — starts
+  at the level's `FirstSeenUtc` and extends right) is unchanged; only the colour and label text
+  changed here.
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet confirmed on a live chart.
+
+**Same-day follow-up round 4 — origin-based line span extended to ALL large-order lines, not
+just unfinished auctions:** "lets shorten the ask and bids for large orders as well instead of
+going all the way across the chart lets only go across like the ua does" — the origin-based line
+span fixed for unfinished auctions earlier today (start at `FirstSeenUtc`'s own screen column,
+extend right to "now") now applies unconditionally to every resting-order line, ordinary and
+unfinished alike; the `level.IsUnfinished &&` guard on the `TryX` call was simply dropped.
+Ordinary large-order labels are UNCHANGED — still anchor near the pane's right edge, inset clear
+of the DOM ladder; only the LINE's own span changed. `restingOrderFirstSeenUtc` already existed
+for every tracked level (not only unfinished ones), so no new tracking was needed for this.
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet confirmed on a live chart.
+
+**Same-day round 5 — delta panel redesign abandoned; ported ORB-IX's own design instead:**
+"lets not use this one and rip out the delta at the bottom from the orb-ix if tat makes it
+easier" — rather than a third from-scratch redesign, `DeltaPanelOverlay.cs` is now a direct COPY
+of ORB-IX's own `DeltaPanelOverlay` (`OrbIx.Quantower.Indicator/ZoneOverlay.cs`) — the single-band
+design (one shared row: per-bar delta histogram + session cumulative-delta polyline) the operator
+was already used to, in place of both this same day's earlier attempts (the original combined
+band, then the three-row volume/delta/session-delta split).
+- **Not a shared dependency** — no reference to `OrbIx.Core`, no shared assembly. The drawing
+  code is copied and re-typed against Finch-Lite's own `DeltaBarDraw` (reverted to just
+  `OpenUtc`/`Delta`/`CumulativeAfter`, dropping the `Volume` field the three-row attempt added).
+  Finch-Lite's zero-dependency architecture stays intact — this is a port, the same way the
+  project's own founding principle already allows for ("it doesn't need to be a port from the
+  finch-scalping" was about not COPYING that codebase wholesale, not a ban on borrowing a design
+  the operator explicitly asks for by name).
+- **Deliberately NOT ported**: ORB-IX's divergence markers and its research status line
+  (data source / unclassified-% / parity) — both read from ORB-IX's own historical-volume-
+  analysis delta engine, which Finch-Lite has no equivalent of and was never asked to build.
+  Finch-Lite's bars still come from live ticks only (`FinchLiteIndicator.DrainDeltaTicks`,
+  unchanged).
+- **Kept from this project's own earlier attempt**: the near-opaque background fix (235/255
+  alpha with a visible top border), rather than reintroducing ORB-IX's own original 140/255 —
+  the exact "candles show through and blend with the histogram" problem this same session
+  already diagnosed and fixed here is present in ORB-IX's original too, it just never surfaced
+  there; no reason to bring back a known problem while porting the rest of the look.
+- `DeltaPanelHeightPx` reverted 150 → 110 default (min 60 → 40), matching a single band's own
+  sizing instead of three stacked rows. `DeltaVolumeColor` `InputParameter` removed (retired,
+  not reused — same reasoning as the earlier `UnfinishedAuctionColor` retirement above).
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet confirmed on a live chart.
+
+**ROOT CAUSE FOUND AND FIXED 2026-09-22 (same day) — the delta panel was nearly empty because
+`OnLast` was silently dropping most prints, not because the market was quiet.** Screenshot on
+MGC/Rithmic showed a near-blank delta band (one lone bar) against a reference platform's dense,
+gap-free histogram — "why is the delta at the bottom showing like this still and not like this".
+`OnLast` originally trusted ONLY `Last.AggressorFlag`, dropping any print flagged neither Buy nor
+Sell from both `deltaTickQueue` and `bigTradeQueue` entirely. This codebase already found and
+NAMED this exact class of problem: ORB-IX's own `AggressorConvention`
+(`OrbIx.Core/Features/AggressorConvention.cs`) measured that a vendor's aggressor flag can be
+missing, sparse, or even INVERTED, and classifies a print from its own GEOMETRY against the
+quote instead — a print at or above the ask was taken by a buyer lifting the offer, a print at
+or below the bid was hit into a resting bid, inclusive on both touches (a strict cross would
+discard nearly every print, since a touch is the overwhelmingly common case). New
+`FinchLiteIndicator.TryClassify(Qt.Symbol, Last, out bool isBuy)`: trusts `AggressorFlag` FIRST
+when it says Buy or Sell outright; only when it says neither does it fall back to comparing
+`last.Price` against `symbol.Bid`/`symbol.Ask` (the current quote, same proxy-for-quote-at-print
+technique ORB-IX's own `OnLast` already uses). A print strictly inside the spread, or a quote
+that's missing/locked/crossed, still carries no evidence and is still dropped, not guessed — same
+"no guess dressed up as fact" discipline this method already had, just no longer throwing away
+prints a flag never bothered to mark. Applies to both the delta panel and the big-trade lines
+(Feature 3), since both read the same classification.
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches.
+
+**FEATURE 4 REMOVED 2026-09-22 (same day) — "lets just remove the delta bar its not helpful at
+all."** After five rounds of iteration this same day (fresh combined band → three-row split →
+ORB-IX-ported single band → tick-classification fix), the operator decided the feature itself
+wasn't earning its place, not that any particular version of it was wrong. Fully torn out:
+- Deleted `DeltaPanelOverlay.cs` (the `DeltaBarDraw`/`DeltaDrawable`/`DeltaPanelOverlay` types and
+  drawing code).
+- Removed all delta fields/state from `FinchLiteIndicator.cs`: `DeltaPanelEnabled`,
+  `DeltaPanelHeightPx`, `DeltaUpColor`, `DeltaDownColor` (`InputParameter` indices 40-43, now
+  retired — not reused, same convention as the earlier `UnfinishedAuctionColor` retirement),
+  `deltaBarPeriod`, `deltaTickQueue`, `deltaBars`, `deltaBucketOpen`/`deltaBucketOpenUtc`/
+  `deltaBucketBuy`/`deltaBucketSell`, `deltaCumulative`, `deltaDayStartUtc`, `deltaPanelOverlay`,
+  `deltaDrawable`, `MaxDeltaBarsKept`.
+- Removed the `DrainDeltaTicks()` method entirely and its call from `OnPollTimer`.
+- Removed the chart-bar-period gate from `TryInitialise()` (`ChartPeriod(HistoricalData?)` and its
+  "waiting for the chart to publish its own bar period" retry) — nothing else in Finch-Lite needs
+  the chart's own period now that delta bucketing is gone, so `TryInitialise` no longer waits on
+  it. The `ChartPeriod` helper method was deleted too (no remaining callers).
+- Removed the delta paint call from `OnPaintChart` and `deltaPanelOverlay.Dispose()` from
+  `Dispose()`; removed all delta-field resets from `OnClear()`.
+- **Kept**: `FinchLiteIndicator.TryClassify` (the geometry-fallback aggressor classifier fixed
+  earlier this same day) — it still serves `BigTradeOverlay`'s buy/sell classification (Feature
+  3), so it stays even though the feature that first exposed its importance is gone. `OnLast` no
+  longer enqueues onto a delta queue, only the big-trade queue when a print clears
+  `BigTradeMinSize`.
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet confirmed on a live chart.
+
+**ROOT CAUSE FOUND AND FIXED 2026-09-22 (same day) — some large-order lines flashed between
+"BID N" and "UA - BID N" every ~250ms.** "why do some of the line flash between UA and bid i
+have seen it happen a few times now" — `isUnfinished` in `ReconcileRestingLevels` was a bare
+`current < peak` comparison with no dead zone. A price level often carries orders from MULTIPLE
+participants, not just the one large order this feature is tracking; ordinary unrelated add/
+cancel churn at that exact price can wobble the aggregate size by a contract or two poll to
+poll, crossing under the recorded peak on one poll and back over it on the next — toggling the
+label and colour every poll. New `UnfinishedDropThresholdPct` `InputParameter` (index 17,
+default 10): a level now only reads as unfinished once it has dropped by at least this many
+PERCENT of its own recorded peak (`current <= peak * (1 - pct/100)`), so routine single-digit-
+contract noise stays under the bar while a real fill big enough to matter still clears it easily.
+Only the entry condition changed — peak-raising (`toRaise`) and absorption accumulation are
+unaffected, since neither of those flickers (peak only ever rises, absorbed only ever
+accumulates).
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches.
+
+**BIG ROUND 2026-09-22 (same day) — "lets work on adding tiered absorbtion that is color
+cordinated also mark out were big trades happened", plus two bugs found via screenshot review
+that landed in the same pass:**
+
+1. **Tiered absorption colour.** Asked which style via `AskUserQuestion`; the operator picked
+   "same hue, discrete steps" over an independent heat-map ramp — bid stays green, ask stays red,
+   always. `RestingOrderOverlay`'s continuous alpha fade replaced with `AbsorptionTier(double
+   fraction)`, five fixed steps against `AbsorptionStrongContracts`: fresh (alpha 70) → light
+   (120, ≥25%) → moderate (170, ≥50%) → strong (210, ≥75%) → maxed out (255 AND a thicker 2.5px
+   line, ≥100%) — the top tier gets an extra visual cue since "fully proven" is worth more than
+   one more alpha step alone can say. `Pen()` cache key extended to `(Argb, Width)` since the
+   maxed tier now varies width too.
+
+2. **Mark out where big trades happened.** The persisting horizontal line (Feature 3) says WHERE
+   but never WHEN. `BigTradeDraw` gained a `TimeUtc` field (from `last.Time`); `BigTradeOverlay`
+   now also drops a filled circle at the exact (time, price) of the print, radius scaled by size
+   relative to `BigTradeMinSize` on a square-root curve (`MarkerRadius`, clamped 3-14px) so a
+   10x-threshold print reads bigger without a 10x-wider circle, plus a thin dark border for
+   contrast against candles. New `MinSize` field on `BigTradeOverlay.Options`.
+
+3. **ROOT CAUSE FOUND AND FIXED — "why is the unflished auction levels moving they should be
+   static lines".** A price briefly missing from ONE poll's returned depth snapshot (the
+   platform's own pull is not perfectly stable poll to poll for deeper levels, independent of
+   anything actually trading) was removed outright and, the instant it reappeared, re-added as a
+   brand-new level — resetting `restingOrderFirstSeenUtc` to that instant, walking the line's own
+   origin rightward every time it happened. New `restingOrderMissingPolls`
+   (`Dictionary<(double,bool), int>`, consecutive-miss counter) and `MissingPollGrace = 2`: only
+   past 2 consecutive misses is a level actually removed; a shorter blip keeps the level (and its
+   origin, peak, and absorbed history) fully intact. Reset to zero the moment the level is seen
+   again — a miss streak never carries across a good poll.
+
+4. **REDEFINED — "unfinished auctions work were price moved past a price fast and left orders
+   behind that is what is considered a unfinished auction".** Screenshot review showed the OLD
+   trigger (current size dropped some % below its own recorded peak) flagging dozens of
+   2-19-contract "UA" levels while price sat essentially still — the size-drop signal was simply
+   too noisy and didn't match what the operator actually means by the term. Asked via
+   `AskUserQuestion` whether to detect this by DISTANCE (price has already moved a meaningful
+   amount past the level) or by SPEED (a rolling price-velocity check, needing new tracking
+   machinery); operator picked distance. New `UnfinishedDistanceTicks` `InputParameter` (default
+   8, replacing the retired `UnfinishedDropThresholdPct` from earlier today) — a level now reads
+   as unfinished once the CURRENT BOOK'S OWN MID PRICE (best bid + best ask, from the exact same
+   snapshot the poll already pulled — no extra call) has moved at least this many ticks
+   (`Symbol.TickSize`) past the level's own price, in the direction that would have consumed it —
+   below a bid, above an ask. The size no longer has to have dropped AT ALL: "left orders behind"
+   means the orders are still resting there, whatever their size, once price has moved on. Applies
+   only to entries already in `restingOrderPeaks` (large-order-qualified levels), which is what
+   the operator meant by "should only happen on the large order lines that appear" — true by
+   construction, since this loop never visits anything else.
+
+5. **New size filter.** "i also need a setting to allow me to filter out the size of the
+   unfinished auctions so if they are low then i dont need to see them" — new
+   `UnfinishedMinRemainingSize` `InputParameter` (default 0 = show all, matching prior behaviour).
+   DISPLAY-only: a level below this remaining size is skipped from the drawable but stays fully
+   tracked (peak, absorption, origin, miss-grace) — it can still reappear in the drawable later if
+   its remaining size changes, or continue accumulating absorption/tier colour in the background
+   even while hidden.
+
+**Files touched**: `RestingOrderOverlay.cs` (tiered pens, `AbsorptionTier`), `BigTradeOverlay.cs`
+(`TimeUtc`, marker drawing, `MarkerBrush`/`TryX`), `FinchLiteIndicator.cs` (all five items above —
+new fields/dictionaries/`InputParameter`s, `ReconcileRestingLevels` rewritten for the miss-grace
+and distance-based trigger, `OnLast`/paint-call site updates for the marker fields).
+
+**Verified 2026-09-22**: `dotnet build ... -c Release` — 0 errors. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet confirmed on a live chart — ask the operator to
+remove/re-add Finch-Lite (new `InputParameter`s need a fresh attach) and confirm: absorption
+colour visibly steps between a handful of distinct strengths rather than fading smoothly; big
+trades show a sized dot at the exact print location in addition to the standing line; UA lines no
+longer creep/jump; and far fewer, more meaningful UA levels appear (only once price has actually
+moved past them), filterable further by `UnfinishedMinRemainingSize` if still noisy.
+
+**FOLLOW-UP 2026-09-23 — big-trade label moved off the fixed left edge.** Screenshot showed a
+"SELL 54" label pinned at the pane's far left while its line/marker sat near the current price on
+the right — "lets make this text more in the center instead of the far left". `BigTradeOverlay`'s
+label now anchors just to the right of the print's own marker (same `TryX(trade.TimeUtc)` already
+used to place the marker) instead of always at `pane.Left + 4f`, falling back to the old left-edge
+anchor only when the print's own time can't be placed on screen (scrolled out of view), and
+clamped so it never runs past the pane's right edge.
+
+**Verified 2026-09-23**: `dotnet build ... -c Release` — 0 errors. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet confirmed on a live chart.
+
 ### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
 **Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show
 delta, DOM/resting orders, absorption, auto-drawn fib, and FRVP+AVP (higher/lower timeframe

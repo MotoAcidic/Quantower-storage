@@ -55,6 +55,15 @@
              Exclude="..\..\..\ORB-IX\src\OrbIx.Quantower.Indicator\bin\**;..\..\..\ORB-IX\src\OrbIx.Quantower.Indicator\obj\**;..\..\..\ORB-IX\src\OrbIx.Quantower.Indicator\OrbIxIndicator.cs" />
 
     <Compile Include="..\..\..\..\Ported\src\oceans-anchor\Anchor*.cs" />
+
+    <!--
+      Ocean Delta Cross's pure logic (DeltaEngine/ClusterSearch/CrossMath/ZoneMath) — platform-
+      free, 123 tests + a mutation pass in the Ported/ bundle's own suite, the same "compile the
+      clean tree" reasoning as everything else compiled in by source here. Only DeltaMath.cs: the
+      indicator file (OceansDeltaIndicator.cs) is ATAS-specific (RenderContext, ChartInfo, etc.)
+      and is read for reference only, never compiled.
+    -->
+    <Compile Include="..\..\..\..\Ported\src\oceans-delta\DeltaMath.cs" />
   </ItemGroup>
 
   <ItemGroup>
