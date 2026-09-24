@@ -11,12 +11,8 @@ namespace FinchLite;
 /// <param name="IsBuy">True if the aggressor bought (lifted the ask), false if they sold (hit
 /// the bid) — unclassified prints are never queued in the first place, see
 /// <see cref="FinchLiteIndicator.OnLast"/>.</param>
-/// <param name="TimeUtc">
-/// When the print actually happened. The persisting horizontal line says nothing about WHEN — it
-/// spans the whole pane on purpose, as a standing reference level. This is what lets the overlay
-/// also drop a marker at the exact bar the print traded on — "mark out were big trades happened"
-/// (the operator's own ask, 2026-09-22).
-/// </param>
+/// <param name="TimeUtc">When the print actually happened — where the marker (and its label)
+/// anchor. See the class-level doc comment for why there's no persisting line anymore.</param>
 internal readonly record struct BigTradeDraw(double Price, double Size, bool IsBuy, DateTime TimeUtc);
 
 /// <summary>Immutable paint snapshot: the poll drains the tick queue into this, the paint reads it.</summary>
@@ -27,17 +23,22 @@ internal sealed record BigTradeDrawable(BigTradeDraw[] Trades)
 
 /// <summary>
 /// "A long bar that comes out and makes a line on the chart... so i have a super clean line
-/// knowing were price would react off of" (the operator's own ask, 2026-09-22) — a full-pane
-/// horizontal line at the price of every recent print at or above the size threshold. Reads the
-/// TAPE (what already traded), unlike <see cref="RestingOrderOverlay"/> and
-/// <see cref="DomLadderOverlay"/> above it, which both read the resting book. Same colour
-/// language as those: green for a buy (lifted the ask), red for a sell (hit the bid).
+/// knowing were price would react off of" (the operator's own ask, 2026-09-22) — marks every
+/// recent print at or above the size threshold. Reads the TAPE (what already traded), unlike
+/// <see cref="RestingOrderOverlay"/> and <see cref="DomLadderOverlay"/> above it, which both read
+/// the resting book. Same colour language as those: green for a buy (lifted the ask), red for a
+/// sell (hit the bid).
 ///
-/// ADDED 2026-09-22 (same day) — "mark out were big trades happened": the line alone says WHERE
-/// (the price) but not WHEN — it spans the whole visible pane on purpose, as a standing reference
-/// level. A filled circle now also drops at the exact (time, price) the print traded at, sized by
-/// how far the print cleared the minimum threshold, so a glance at the chart shows both the
-/// standing level AND the specific bar that made it.
+/// ADDED 2026-09-22 (same day) — "mark out were big trades happened": a filled circle drops at
+/// the exact (time, price) the print traded at, sized by how far the print cleared the minimum
+/// threshold.
+///
+/// REMOVED 2026-09-23 — "i love the bubble it makes and text next to it but i dont want the line
+/// that goes all the way through my chart": the original design also drew a full-pane-width
+/// standing reference line at the print's price (the very first version of this feature, before
+/// the marker existed); the operator liked the marker+label but explicitly did not want the line
+/// alongside it. Gone now, along with the now-unused per-colour `Pen` cache that only that line
+/// used.
 /// </summary>
 internal sealed class BigTradeOverlay : IDisposable
 {
@@ -46,7 +47,6 @@ internal sealed class BigTradeOverlay : IDisposable
     private readonly Font font = new(FontFamily.GenericSansSerif, 8f, FontStyle.Bold);
     private readonly SolidBrush labelBack = new(Color.FromArgb(190, 16, 18, 24));
     private readonly Pen markerBorderPen = new(Color.FromArgb(210, 16, 18, 24), 1f);
-    private readonly Dictionary<int, Pen> pens = new();
     private readonly Dictionary<int, SolidBrush> labelBrushes = new();
     private readonly Dictionary<int, SolidBrush> markerBrushes = new();
     private bool disposed;
@@ -75,7 +75,6 @@ internal sealed class BigTradeOverlay : IDisposable
                     continue;
 
                 var colour = trade.IsBuy ? options.BuyColor : options.SellColor;
-                graphics.DrawLine(this.Pen(colour), pane.Left, y, pane.Right, y);
 
                 // FIXED 2026-09-23 — "lets make this text more in the center instead of the far
                 // left": the label used to always anchor at the pane's fixed left edge, however
@@ -167,18 +166,6 @@ internal sealed class BigTradeOverlay : IDisposable
         return true;
     }
 
-    private Pen Pen(Color colour)
-    {
-        var key = colour.ToArgb();
-        if (!this.pens.TryGetValue(key, out var pen))
-        {
-            pen = new Pen(Color.FromArgb(200, colour), 1.5f);
-            this.pens[key] = pen;
-        }
-
-        return pen;
-    }
-
     private SolidBrush LabelBrush(Color colour)
     {
         var key = colour.ToArgb();
@@ -213,11 +200,9 @@ internal sealed class BigTradeOverlay : IDisposable
         this.labelBack.Dispose();
         this.markerBorderPen.Dispose();
 
-        foreach (var pen in this.pens.Values) pen.Dispose();
         foreach (var brush in this.labelBrushes.Values) brush.Dispose();
         foreach (var brush in this.markerBrushes.Values) brush.Dispose();
 
-        this.pens.Clear();
         this.labelBrushes.Clear();
         this.markerBrushes.Clear();
     }

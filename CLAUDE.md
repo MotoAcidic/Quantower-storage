@@ -1516,6 +1516,46 @@ between the ladder and resting-order lines.
 — 0 errors. Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\
 FinchLiteIndicator.dll`, `sha256sum` confirms the deployed DLL matches.
 
+**FOLLOW-UP 2026-09-23 — big-trade standing line removed, marker+label kept.** "for those large
+sells i love the bubble it makes and text next to it but i dont want the line that goes all the
+way through my chart" — `BigTradeOverlay` dropped the `graphics.DrawLine(...)` call that drew a
+full-pane-width standing reference line at the print's price (the ORIGINAL design for this
+feature, before the marker existed); the marker circle and its "BUY N"/"SELL N" label are
+unchanged. The now-unused per-colour `Pen` cache that only that line used was removed too (`pens`
+dictionary, `Pen()` method, its disposal).
+
+**Verified 2026-09-23**: `dotnet build ... -c Release -p:QuantowerSdkPath="...v1.147.4\bin\..."`
+— 0 errors. Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\
+FinchLiteIndicator.dll`, `sha256sum` confirms the deployed DLL matches.
+
+**ROOT CAUSE FOUND AND FIXED 2026-09-23 (same day) — sub-threshold levels lingered
+indefinitely, only vanishing on a refresh.** "some of the orders dont disapear or correlate
+because when i refresh my screen some of these lines go away like these 6 asks and super small
+orders when i have my filter set to 50" — screenshots showed "ASK 4"/"ASK 7"/"BID 9"/"BID 12"
+plain (non-UA) labels well below a 50-contract filter. Root cause: a level that qualified at its
+PEAK, then shrank far below the qualifying threshold, kept being tracked (and, per yesterday's
+stale-peak fix, shown at its live current size) indefinitely as long as price never moved past it
+— nothing in `ReconcileRestingLevels` ever re-checked a tracked level against the threshold that
+let it in, only against zero (fully gone) or the price-distance rule (unfinished). A fresh
+restart never showed these in the first place, since `AddNewLevels` never tracks a level under
+threshold to begin with — the "refresh makes them disappear" symptom was that correct behaviour
+finally getting applied, once, at the moment of restart, while the running indicator never
+re-applied it continuously. Fixed by moving the price-distance ("left behind") computation
+earlier in the method (before the removal-decision loop, not just before the draw loop) and
+adding: a tracked level whose CURRENT size has fallen below the qualifying threshold AND has NOT
+been left behind by price is now removed outright, same as a level that's gone to zero. A level
+that HAS been left behind (price moved past it) is deliberately exempt from this — that is
+exactly what unfinished-auction status is for, and it stays filterable separately via
+`UnfinishedMinRemainingSize` regardless of how far below the general threshold it's shrunk.
+
+**Verified 2026-09-23**: `dotnet build ... -c Release -p:QuantowerSdkPath="...v1.147.4\bin\..."`
+— 0 errors. Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\
+FinchLiteIndicator.dll`, `sha256sum` confirms the deployed DLL matches. Not yet confirmed on a
+live chart — restart Quantower (not remove/re-add — see the correction note at the top of this
+section) and confirm sub-threshold plain "ASK N"/"BID N" labels no longer linger; a level whose
+size drops below the filter should disappear on its own, without needing a refresh, unless price
+has genuinely moved past it (in which case it should read "UA - ..." instead).
+
 ### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
 **Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show
 delta, DOM/resting orders, absorption, auto-drawn fib, and FRVP+AVP (higher/lower timeframe

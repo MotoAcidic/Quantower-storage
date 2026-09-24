@@ -721,6 +721,18 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         var currentBid = ToLookup(bids);
         var currentAsk = ToLookup(asks);
 
+        // "unfinished auctions work were price moved past a price fast and left orders behind"
+        // (the operator's own definition, 2026-09-22) — current market price, read from the SAME
+        // book snapshot this poll already pulled, no extra call needed. Computed HERE, before the
+        // removal decision below, rather than only later when building draws — the removal
+        // decision needs to know whether a shrunk level has been "left behind" by price too (see
+        // FIXED 2026-09-23 note below).
+        var bestBid = currentBid.Count > 0 ? currentBid.Keys.Max() : double.NaN;
+        var bestAsk = currentAsk.Count > 0 ? currentAsk.Keys.Min() : double.NaN;
+        var midPrice = double.IsNaN(bestBid) || double.IsNaN(bestAsk) ? double.NaN : (bestBid + bestAsk) / 2.0;
+        var tickSize = this.symbol?.TickSize ?? 0d;
+        var distanceThreshold = tickSize > 0 ? this.UnfinishedDistanceTicks * tickSize : double.NaN;
+
         var toRemove = new List<(double Price, bool IsBid)>();
         var toRaise = new List<((double Price, bool IsBid) Key, double NewPeak)>();
         var toAbsorb = new List<((double Price, bool IsBid) Key, double Delta)>();
@@ -752,6 +764,27 @@ public sealed class FinchLiteIndicator : Qt.Indicator
 
             if (this.restingOrderMissingPolls.ContainsKey(kvp.Key))
                 toSeenAgain.Add(kvp.Key);
+
+            // FIXED 2026-09-23 — "these orders dont disapear or correlate... super small orders
+            // when i have my filter set to 50": a level that qualified at its PEAK, then shrank
+            // well below the qualifying threshold, used to keep being tracked (and shown, at its
+            // live current size per yesterday's stale-peak fix) indefinitely as long as price
+            // never moved past it — "ASK 4", "ASK 7", "BID 9" while the filter reads 50. A fresh
+            // restart never showed these at all, because AddNewLevels below never tracks a level
+            // under the threshold in the first place; the running indicator should not either.
+            // UNLESS price has already left it behind (the same distance check the unfinished-
+            // auction label uses) — that is a deliberate exception: a level price ran through IS
+            // still worth marking as "UA" even far below the general threshold, filterable
+            // separately via UnfinishedMinRemainingSize. Only a level BELOW threshold and NOT
+            // left behind is dropped here.
+            var isLeftBehindNow = !double.IsNaN(midPrice) && !double.IsNaN(distanceThreshold)
+                && (isBid ? midPrice < price - distanceThreshold : midPrice > price + distanceThreshold);
+
+            if (currentSize < threshold && !isLeftBehindNow)
+            {
+                toRemove.Add(kvp.Key);
+                continue;
+            }
 
             // Dropped since last poll but still standing = something traded through it while it
             // held its ground — "sellers are defending" / "buyers are defending" (the operator's
@@ -791,15 +824,7 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         AddNewLevels(currentBid, isBid: true);
         AddNewLevels(currentAsk, isBid: false);
 
-        // "unfinished auctions work were price moved past a price fast and left orders behind"
-        // (the operator's own definition, 2026-09-22) — current market price, read from the SAME
-        // book snapshot this poll already pulled, no extra call needed.
-        var bestBid = currentBid.Count > 0 ? currentBid.Keys.Max() : double.NaN;
-        var bestAsk = currentAsk.Count > 0 ? currentAsk.Keys.Min() : double.NaN;
-        var midPrice = double.IsNaN(bestBid) || double.IsNaN(bestAsk) ? double.NaN : (bestBid + bestAsk) / 2.0;
-        var tickSize = this.symbol?.TickSize ?? 0d;
-        var distanceThreshold = tickSize > 0 ? this.UnfinishedDistanceTicks * tickSize : double.NaN;
-
+        // midPrice/distanceThreshold already computed above, before the removal-decision loop.
         var draws = new List<RestingOrderDraw>(this.restingOrderPeaks.Count);
 
         foreach (var kvp in this.restingOrderPeaks)
