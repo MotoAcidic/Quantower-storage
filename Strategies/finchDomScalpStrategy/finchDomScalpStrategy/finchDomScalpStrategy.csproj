@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Platforms>AnyCPU</Platforms>
+    <AlgoType>Strategy</AlgoType>
+    <AssemblyName>finchDomScalpStrategy</AssemblyName>
+    <RootNamespace>finchDomScalpStrategy</RootNamespace>
+    <StartAction>Program</StartAction>
+    <!-- CONFIRM against whatever's under C:\Quantower\TradingPlatform\ on the machine actually
+         building; Quantower auto-updates itself with no warning (already hit twice this project's
+         own history — v1.146.18 to v1.147.3, then v1.147.3 to v1.147.4; see
+         Quantower-storage/CLAUDE.md). -->
+    <StartProgram>C:\Quantower\TradingPlatform\v1.147.4\Console.StarterNew.exe</StartProgram>
+    <StartArguments>--address 127.0.0.1 --port 62744</StartArguments>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+     <OutputPath>C:\Quantower\Settings\Scripts\Strategies\finchDomScalpStrategy</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+     <OutputPath>C:\Quantower\Settings\Scripts\Strategies\finchDomScalpStrategy</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>C:\Quantower\TradingPlatform\v1.147.4\bin\TradingPlatform.BusinessLayer.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <!--
+      Compiled IN, not referenced: same reasoning as OrbIx.Quantower.Indicator.csproj's own
+      comment and directionAbsorptionScalpStrategy.csproj's own copy of it, which this repeats
+      because it applies here with equal force. Quantower loads scripts with
+      Assembly.Load(bytes) and caches them keyed by assembly FullName: a shared
+      Finch.Lite.Indicator.dll would present the identical identity from two different script
+      folders (this strategy's, and Finch-Lite's own), and whichever loads first wins the shared
+      cache key for BOTH.
+
+      This is what lets this strategy trade off the EXACT SAME resting-order/absorption/
+      unfinished-auction detection and inverse-fair-value-gap logic the Finch-Lite INDICATOR
+      draws, rather than a second, independently-maintained copy that could drift from what the
+      chart actually shows.
+
+      TRADE-OFF, STATED: this strategy's copy of these three files is a frozen snapshot as of
+      its own last build. A later fix or tuning change to Finch-Lite's own copy does not reach
+      this strategy until it is rebuilt.
+
+      Deliberately NOT included: OrderBlockEngine.cs (order blocks were not part of this
+      strategy's own ask), StructureBoxOverlay.cs/RestingOrderOverlay.cs/DomLadderOverlay.cs/
+      BigTradeOverlay.cs/DeltaPanelOverlay.cs (paint-only, a Strategy never draws), and
+      FinchLiteIndicator.cs itself (the platform Indicator/Timer/paint scaffolding — this
+      strategy is its own Quantower Strategy with its own lifecycle, not a second indicator).
+    -->
+    <Compile Include="..\..\..\Indicators\Finch-Lite\src\Finch.Lite.Indicator\Bar.cs" />
+    <Compile Include="..\..\..\Indicators\Finch-Lite\src\Finch.Lite.Indicator\RestingOrderEngine.cs" />
+    <Compile Include="..\..\..\Indicators\Finch-Lite\src\Finch.Lite.Indicator\FairValueGapEngine.cs" />
+  </ItemGroup>
+</Project>

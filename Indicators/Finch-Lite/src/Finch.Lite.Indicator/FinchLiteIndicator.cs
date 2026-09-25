@@ -107,7 +107,7 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     /// <summary>
     /// "the strength of the color of the bids based on asorbstion were lets say sellers are
     /// defending or an area were buyers are defending" (the operator's own ask, 2026-09-22) —
-    /// how many contracts <see cref="restingOrderAbsorbed"/> has to reach before a level's line
+    /// how many contracts <see cref="RestingOrderEngine.RestingLevel.Absorbed"/> has to reach before a level's line
     /// draws at full colour strength. A level that just qualified (nothing traded through it
     /// yet) draws faint; one that has stood through this many contracts while still holding
     /// draws fully saturated — the stronger the colour, the harder that side is defending.
@@ -154,62 +154,24 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         return TimeZoneInfo.ConvertTimeToUtc(open, SessionZone);
     }
 
-    /// <summary>
-    /// The PEAK size ever seen at each level that cleared the threshold today, keyed by
-    /// price+side — a large order still draws its line for the rest of the trading day even
-    /// after some of it trades off, per "for the large orders i define it makes the line extend
-    /// so i can see them easily" (the operator's own words, 2026-09-22).
-    ///
-    /// REDESIGNED 2026-09-22 (same day) to also resolve two follow-up asks: "once a bid has been
-    /// filled i need it to disapear from the chart" and "if its an unfinished auction it needs
-    /// to label that and show how many more contracts are at that unfinished auction". This
-    /// dictionary now holds ONLY the peak — never what to display — because "unfinished" status
-    /// is a comparison between this peak and the level's CURRENT size in the live book, redone
-    /// fresh every poll in <see cref="ReconcileRestingLevels"/>: gone entirely from the book (or
-    /// down to zero) removes the entry outright (filled/cancelled — the book alone cannot tell
-    /// those apart, and either way nothing is left resting there to mark); still present but
-    /// below peak draws as UNFINISHED with the REMAINING size; still present at or above peak
-    /// draws normally and the peak is raised to match.
-    /// </summary>
-    private readonly Dictionary<(double Price, bool IsBid), double> restingOrderPeaks = new();
-
-    /// <summary>The size actually observed at each tracked level on the PREVIOUS poll — the only
-    /// way to tell "this level just got hit" from "this level just got bigger" is to compare
-    /// against what was there last time, not against the peak.</summary>
-    private readonly Dictionary<(double Price, bool IsBid), double> restingOrderLastSize = new();
-
-    /// <summary>Running total of contracts that have traded through each tracked level while it
-    /// kept standing — see <see cref="RestingOrderDraw.Absorbed"/> for the full design. Cleared
-    /// alongside <see cref="restingOrderPeaks"/> at the trading-day boundary and whenever a level
-    /// disappears from the book entirely (a level that comes back later is a NEW level, not a
-    /// continuation of one already fully filled).</summary>
-    private readonly Dictionary<(double Price, bool IsBid), double> restingOrderAbsorbed = new();
-
-    /// <summary>The poll timestamp each currently-tracked level was FIRST flagged — "centered
-    /// just to the right of the candle it comes off of" (the operator's own ask, 2026-09-22, for
-    /// unfinished auctions specifically): a line drawn full-pane-width from a fixed screen edge
-    /// says nothing about WHEN the level was noticed, while a line starting at its own origin
-    /// time and extending right (the same "still extending" convention this codebase already
-    /// uses for zones that remain live) reads as "this began here." Cleared alongside
-    /// <see cref="restingOrderPeaks"/> for the same reasons.</summary>
-    private readonly Dictionary<(double Price, bool IsBid), DateTime> restingOrderFirstSeenUtc = new();
+    /// <summary>The chart's bar period, or null when it has none yet (a tick/Renko/range-bar
+    /// chart genuinely has no time period, or the platform hasn't published
+    /// <see cref="HistoricalData.Aggregation"/> yet — the two are indistinguishable from here, so
+    /// the delta panel just keeps checking every poll rather than gating startup on it).</summary>
+    private static TimeSpan? ChartPeriod(HistoricalData? data) =>
+        data?.Aggregation is HistoryAggregationTime time && time.Period.Duration > TimeSpan.Zero
+            ? time.Period.Duration
+            : null;
 
     /// <summary>
-    /// FIXED 2026-09-22 — "why is the unflished auction levels moving they should be static
-    /// lines": a level briefly missing from ONE poll's returned depth snapshot (the platform's
-    /// own pull is not perfectly stable poll to poll for deeper levels, independent of anything
-    /// actually trading) was removed outright and, the moment it reappeared, re-added as a brand
-    /// new level — resetting <see cref="restingOrderFirstSeenUtc"/> to that instant, which walked
-    /// the line's own origin rightward every time it happened. Counts CONSECUTIVE misses per
-    /// level; only removal past <see cref="MissingPollGrace"/> counts as genuinely gone. Cleared
-    /// on removal, and whenever the level is seen again (a miss streak does not carry across a
-    /// good poll in between).
+    /// EXTRACTED 2026-09-25 into <c>RestingOrderEngine.cs</c> — Finch-Lite's own large-order/
+    /// absorption/unfinished-auction detection, now a standalone class so `finchDomScalpStrategy`
+    /// can trade off the EXACT SAME logic this indicator draws, not a second copy that could
+    /// drift. See that file's own doc comment for the full design history (peak-vs-current,
+    /// poll-miss grace, sub-threshold removal, price-distance unfinished-auction trigger, etc.) —
+    /// none of that reasoning changed, only where it lives.
     /// </summary>
-    private readonly Dictionary<(double Price, bool IsBid), int> restingOrderMissingPolls = new();
-
-    /// <summary>Consecutive polls a level may go missing from the returned book before it is
-    /// actually removed — see <see cref="restingOrderMissingPolls"/>.</summary>
-    private const int MissingPollGrace = 2;
+    private readonly RestingOrderEngine restingOrderEngine = new();
 
     /// <summary>
     /// "i also need a setting to allow me to filter out the size of the unfinished auctions so if
@@ -222,8 +184,6 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     /// </summary>
     [InputParameter("Large order: hide unfinished auctions below (contracts)", 18, 0, 100000, 1, 0)]
     public int UnfinishedMinRemainingSize { get; set; } = 0;
-
-    private DateTime tradingDayStartUtc;
 
     private readonly RestingOrderOverlay restingOrderOverlay = new();
     private volatile RestingOrderDrawable restingOrderDrawable = RestingOrderDrawable.Empty;
@@ -287,6 +247,88 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     private readonly List<BigTradeDraw> bigTrades = new();
     private readonly BigTradeOverlay bigTradeOverlay = new();
     private volatile BigTradeDrawable bigTradeDrawable = BigTradeDrawable.Empty;
+
+    // ---- delta panel (feature 7, 2026-09-23 — REBUILT; first removed same week) ----------------
+    //
+    // "i really need the delta that was in that finch-scalping at the bottom of my chart so i can
+    // tell when the delta flips" — this indicator's own delta panel was fully torn out earlier
+    // this same week ("its not helpful at all"); it's back now for a narrower, specific reason
+    // (spotting a flip), not just "show delta" again. See DeltaPanelOverlay's own doc comment for
+    // the flip-marker design.
+    [InputParameter("Delta panel: enable", 70)]
+    public bool DeltaPanelEnabled { get; set; } = true;
+
+    // RAISED 2026-09-23 (same day) from 110 to 150, min 40 to 60 — "now i need to see the
+    // session delta and delta and volume like in the finch-scalping": the panel is back to
+    // three stacked rows (this indicator built the same split once before), and 110px split
+    // three ways left each row too thin to read.
+    [InputParameter("Delta panel: height (px)", 71, 60, 300, 10, 0)]
+    public int DeltaPanelHeightPx { get; set; } = 150;
+
+    [InputParameter("Delta panel: up colour", 72)]
+    public Color DeltaUpColor { get; set; } = Color.FromArgb(0x00, 0xE6, 0x76);
+
+    [InputParameter("Delta panel: down colour", 73)]
+    public Color DeltaDownColor { get; set; } = Color.FromArgb(0xFF, 0x52, 0x52);
+
+    [InputParameter("Delta panel: show flip marker", 74)]
+    public bool DeltaFlipMarkerEnabled { get; set; } = true;
+
+    /// <summary>The volume row's own colour — volume itself has no direction, so it gets one
+    /// neutral colour rather than the up/down pair the delta row below it uses.</summary>
+    [InputParameter("Delta panel: volume colour", 75)]
+    public Color DeltaVolumeColor { get; set; } = Color.FromArgb(0x64, 0x95, 0xED);
+
+    /// <summary>The chart's own bar period — resolved lazily on the poll timer (see
+    /// DrainDeltaTicks) rather than gating the whole indicator's startup on it the way the
+    /// original delta panel once did; a connector slow to publish the chart's period should not
+    /// hold up Features 1-3, same "additive, never fatal" discipline order blocks already use.
+    /// </summary>
+    private TimeSpan deltaBarPeriod;
+
+    /// <summary>Raw classified ticks, queued off the market-data thread exactly like
+    /// <see cref="bigTradeQueue"/> — bucketing into bars happens on the poll timer, never in
+    /// <see cref="OnLast"/> itself.</summary>
+    private readonly ConcurrentQueue<(DateTime TimeUtc, double Size, bool IsBuy)> deltaTickQueue = new();
+
+    /// <summary>
+    /// FIXED 2026-09-23 — "i need it to continue with the delta for each candle not just static
+    /// on 1 candle": the original design closed a bar only when a NEW classified tick arrived
+    /// with a different bucket time than the one currently open — so a candle that happened to
+    /// receive zero classified prints (this connector's aggressor flag is already known to be
+    /// sparse; see `TryClassify`'s own doc comment) got no bar at all, not even a zero one,
+    /// leaving the panel with real gaps and looking frozen through any quiet stretch. Classified
+    /// ticks now accumulate here, keyed by which BAR they belong to, and are only ever consumed
+    /// when that bar ACTUALLY CLOSES on the chart (see <see cref="DrainDeltaTicks"/>) — so every
+    /// chart candle gets exactly one delta bar, zero-delta if it received no classified prints,
+    /// never skipped.
+    /// </summary>
+    private readonly Dictionary<DateTime, (double Buy, double Sell)> deltaPending = new();
+
+    /// <summary>-1 means "not yet seeded" — same first-poll backlog cap as `chartBarsSeen` uses
+    /// for the same reason (a long-running chart could have years of already-loaded history).
+    /// </summary>
+    private int deltaChartBarsSeen = -1;
+
+    private readonly List<DeltaBarDraw> deltaBars = new();
+    private double deltaCumulative;
+    private DateTime deltaDayStartUtc;
+
+    /// <summary>Null until the first non-zero session cumulative delta is seen; +1/-1 afterward.
+    /// A flip is a sign change against this, so an exactly-zero bar in between two same-signed
+    /// bars is not mistaken for two flips.</summary>
+    private int? deltaLastCumulativeSign;
+
+    private DateTime? deltaFlipUtc;
+    private bool deltaFlipIsUp;
+
+    private readonly DeltaPanelOverlay deltaPanelOverlay = new();
+    private volatile DeltaDrawable deltaDrawable = DeltaDrawable.Empty;
+
+    /// <summary>Bars kept on screen at once — bounded so a long session does not grow this list
+    /// forever; old bars scroll off the left edge of any chart a reader would actually be looking
+    /// at anyway.</summary>
+    private const int MaxDeltaBarsKept = 2000;
 
     // ---- order blocks (feature 5, 2026-09-23) --------------------------------------------------
     //
@@ -521,6 +563,8 @@ public sealed class FinchLiteIndicator : Qt.Indicator
 
         if (last.Size >= this.BigTradeMinSize)
             this.bigTradeQueue.Enqueue(new BigTradeDraw(last.Price, last.Size, isBuy, last.Time));
+
+        this.deltaTickQueue.Enqueue((last.Time, last.Size, isBuy));
     }
 
     /// <summary>
@@ -578,12 +622,7 @@ public sealed class FinchLiteIndicator : Qt.Indicator
 
         this.symbol = null;
         this.restingOrderDrawable = RestingOrderDrawable.Empty;
-        this.restingOrderPeaks.Clear();
-        this.restingOrderLastSize.Clear();
-        this.restingOrderAbsorbed.Clear();
-        this.restingOrderFirstSeenUtc.Clear();
-        this.restingOrderMissingPolls.Clear();
-        this.tradingDayStartUtc = default;
+        this.restingOrderEngine.Reset();
         this.domLadderDrawable = DomLadderDrawable.Empty;
         this.bigTradeQueue.Clear();
         this.bigTrades.Clear();
@@ -603,6 +642,18 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.chartBarsSeen = -1;
         this.inverseFvgDrawable = StructureBoxDrawable.Empty;
 
+        this.deltaTickQueue.Clear();
+        this.deltaPending.Clear();
+        this.deltaChartBarsSeen = -1;
+        this.deltaBars.Clear();
+        this.deltaCumulative = 0d;
+        this.deltaDayStartUtc = default;
+        this.deltaLastCumulativeSign = null;
+        this.deltaFlipUtc = null;
+        this.deltaFlipIsUp = false;
+        this.deltaBarPeriod = default;
+        this.deltaDrawable = DeltaDrawable.Empty;
+
         this.overlayFault = null;
     }
 
@@ -621,6 +672,15 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             return;
 
         this.DrainBigTrades();
+
+        try
+        {
+            this.DrainDeltaTicks();
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = $"Delta panel failed: {ex.GetType().Name}: {ex.Message}";
+        }
 
         // Own try/catch, deliberately separate from the DOM-pull block below: an exception
         // escaping a Timer callback entirely is unhandled and terminates the whole platform
@@ -692,215 +752,41 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     }
 
     /// <summary>
-    /// Rolls <see cref="restingOrderMemory"/) over at the trading-day boundary, then folds this
-    /// poll's qualifying levels into it — keeping whichever size is LARGER between what is
-    /// already remembered for that price+side and what was just seen, per the "remembers the
-    /// peak, not the current" design stated on the field itself.
-    /// </summary>
-    /// <summary>
-    /// Reconciles <see cref="restingOrderPeaks"/> against the CURRENT book on both sides, then
-    /// builds the drawable from the result — see the field's own doc comment for the full
-    /// design. Collect-then-apply throughout rather than mutating a `Dictionary` mid-enumeration
-    /// (updating an existing key's VALUE is safe to do during enumeration in practice, but this
-    /// does not rely on that — removals are never safe, so neither path does).
+    /// EXTRACTED 2026-09-25 — the actual reconciliation logic now lives in
+    /// <see cref="RestingOrderEngine"/> (see that file for the full design history). This is a
+    /// thin wrapper: compute the two platform-facing inputs the engine can't compute itself
+    /// (current book mid price, the distance threshold in price units, the trading-day boundary),
+    /// call the engine, map its results to the paint drawable, and apply the DISPLAY-only
+    /// <see cref="UnfinishedMinRemainingSize"/> filter (a decision about what to SHOW, not what
+    /// to track — kept here rather than in the engine so the strategy that reuses the same engine
+    /// can decide independently whether to trade a small unfinished-auction remainder).
     /// </summary>
     private RestingOrderDrawable ReconcileRestingLevels(
         DateTime nowUtc, Level2Item[]? bids, Level2Item[]? asks, int threshold)
     {
-        var dayStart = TradingDayStart(nowUtc);
-        if (dayStart != this.tradingDayStartUtc)
-        {
-            this.tradingDayStartUtc = dayStart;
-            this.restingOrderPeaks.Clear();
-            this.restingOrderLastSize.Clear();
-            this.restingOrderAbsorbed.Clear();
-            this.restingOrderFirstSeenUtc.Clear();
-            this.restingOrderMissingPolls.Clear();
-        }
-
-        var currentBid = ToLookup(bids);
-        var currentAsk = ToLookup(asks);
-
-        // "unfinished auctions work were price moved past a price fast and left orders behind"
-        // (the operator's own definition, 2026-09-22) — current market price, read from the SAME
-        // book snapshot this poll already pulled, no extra call needed. Computed HERE, before the
-        // removal decision below, rather than only later when building draws — the removal
-        // decision needs to know whether a shrunk level has been "left behind" by price too (see
-        // FIXED 2026-09-23 note below).
-        var bestBid = currentBid.Count > 0 ? currentBid.Keys.Max() : double.NaN;
-        var bestAsk = currentAsk.Count > 0 ? currentAsk.Keys.Min() : double.NaN;
+        var bestBid = bids is { Length: > 0 } ? bids.Max(b => b.Price) : double.NaN;
+        var bestAsk = asks is { Length: > 0 } ? asks.Min(a => a.Price) : double.NaN;
         var midPrice = double.IsNaN(bestBid) || double.IsNaN(bestAsk) ? double.NaN : (bestBid + bestAsk) / 2.0;
         var tickSize = this.symbol?.TickSize ?? 0d;
         var distanceThreshold = tickSize > 0 ? this.UnfinishedDistanceTicks * tickSize : double.NaN;
+        var dayStart = TradingDayStart(nowUtc);
 
-        var toRemove = new List<(double Price, bool IsBid)>();
-        var toRaise = new List<((double Price, bool IsBid) Key, double NewPeak)>();
-        var toAbsorb = new List<((double Price, bool IsBid) Key, double Delta)>();
-        var toMiss = new List<((double Price, bool IsBid) Key, int Missed)>();
-        var toSeenAgain = new List<(double Price, bool IsBid)>();
+        var levels = this.restingOrderEngine.Reconcile(
+            nowUtc, dayStart, bids, asks, threshold, midPrice, distanceThreshold);
 
-        foreach (var kvp in this.restingOrderPeaks)
+        var draws = new List<RestingOrderDraw>(levels.Count);
+
+        foreach (var level in levels)
         {
-            var (price, isBid) = kvp.Key;
-            var lookup = isBid ? currentBid : currentAsk;
+            if (level.IsUnfinished && level.Current < this.UnfinishedMinRemainingSize)
+                continue; // still tracked by the engine, just not worth showing at this size
 
-            if (!lookup.TryGetValue(price, out var currentSize) || currentSize <= 0)
-            {
-                // FIXED 2026-09-22 — "why is the unflished auction levels moving they should be
-                // static lines": the platform's own pull is not perfectly stable poll to poll for
-                // deeper levels — a price missing from ONE poll's snapshot is not necessarily
-                // filled or cancelled. Only past MissingPollGrace CONSECUTIVE misses is it treated
-                // as genuinely gone ("once a bid has been filled i need it to disapear from the
-                // chart"); a shorter blip keeps the level (and its origin time) intact.
-                var missed = this.restingOrderMissingPolls.TryGetValue(kvp.Key, out var m) ? m + 1 : 1;
-
-                if (missed > MissingPollGrace)
-                    toRemove.Add(kvp.Key);
-                else
-                    toMiss.Add((kvp.Key, missed));
-
-                continue;
-            }
-
-            if (this.restingOrderMissingPolls.ContainsKey(kvp.Key))
-                toSeenAgain.Add(kvp.Key);
-
-            // FIXED 2026-09-23 — "these orders dont disapear or correlate... super small orders
-            // when i have my filter set to 50": a level that qualified at its PEAK, then shrank
-            // well below the qualifying threshold, used to keep being tracked (and shown, at its
-            // live current size per yesterday's stale-peak fix) indefinitely as long as price
-            // never moved past it — "ASK 4", "ASK 7", "BID 9" while the filter reads 50. A fresh
-            // restart never showed these at all, because AddNewLevels below never tracks a level
-            // under the threshold in the first place; the running indicator should not either.
-            // UNLESS price has already left it behind (the same distance check the unfinished-
-            // auction label uses) — that is a deliberate exception: a level price ran through IS
-            // still worth marking as "UA" even far below the general threshold, filterable
-            // separately via UnfinishedMinRemainingSize. Only a level BELOW threshold and NOT
-            // left behind is dropped here.
-            var isLeftBehindNow = !double.IsNaN(midPrice) && !double.IsNaN(distanceThreshold)
-                && (isBid ? midPrice < price - distanceThreshold : midPrice > price + distanceThreshold);
-
-            if (currentSize < threshold && !isLeftBehindNow)
-            {
-                toRemove.Add(kvp.Key);
-                continue;
-            }
-
-            // Dropped since last poll but still standing = something traded through it while it
-            // held its ground — "sellers are defending" / "buyers are defending" (the operator's
-            // own words, 2026-09-22). A refill afterward does not erase this; the level still had
-            // to absorb that flow to still be here.
-            if (this.restingOrderLastSize.TryGetValue(kvp.Key, out var lastSize) && lastSize > currentSize)
-                toAbsorb.Add((kvp.Key, lastSize - currentSize));
-
-            if (currentSize > kvp.Value)
-                toRaise.Add((kvp.Key, currentSize));
-        }
-
-        foreach (var key in toRemove)
-        {
-            this.restingOrderPeaks.Remove(key);
-            this.restingOrderLastSize.Remove(key);
-            this.restingOrderAbsorbed.Remove(key);
-            this.restingOrderFirstSeenUtc.Remove(key);
-            this.restingOrderMissingPolls.Remove(key);
-        }
-
-        foreach (var (key, missed) in toMiss)
-            this.restingOrderMissingPolls[key] = missed;
-
-        foreach (var key in toSeenAgain)
-            this.restingOrderMissingPolls.Remove(key);
-
-        foreach (var (key, peak) in toRaise)
-            this.restingOrderPeaks[key] = peak;
-
-        foreach (var (key, delta) in toAbsorb)
-        {
-            this.restingOrderAbsorbed[key] =
-                this.restingOrderAbsorbed.TryGetValue(key, out var existing) ? existing + delta : delta;
-        }
-
-        AddNewLevels(currentBid, isBid: true);
-        AddNewLevels(currentAsk, isBid: false);
-
-        // midPrice/distanceThreshold already computed above, before the removal-decision loop.
-        var draws = new List<RestingOrderDraw>(this.restingOrderPeaks.Count);
-
-        foreach (var kvp in this.restingOrderPeaks)
-        {
-            var (price, isBid) = kvp.Key;
-            var peak = kvp.Value;
-            var lookup = isBid ? currentBid : currentAsk;
-            var current = lookup.TryGetValue(price, out var size) ? size : 0d;
-
-            // Recorded here, not up above — this loop already touches every currently-tracked
-            // level once, and next poll's absorption comparison needs THIS poll's observed size,
-            // not the peak.
-            this.restingOrderLastSize[kvp.Key] = current;
-
-            // "unfinished auctions should only happen on the large order lines that appear
-            // because that would mean price moved through that large amount of orders and didnt
-            // fill them all" (the operator's own words) — this loop only ever visits entries in
-            // restingOrderPeaks, i.e. levels that already cleared the large-order threshold, so
-            // that half is true by construction. The other half: price (the current book's own
-            // mid) has to have moved past this level's own price by the configured distance, in
-            // the direction that would have consumed it — a bid left behind once price fell
-            // below it, an ask left behind once price rose above it. Still resting (current > 0)
-            // is the only size requirement — "left orders behind" means the orders are still
-            // there, whether or not any of them actually got taken.
-            var isUnfinished = current > 0 && !double.IsNaN(midPrice) && !double.IsNaN(distanceThreshold)
-                && (isBid ? midPrice < price - distanceThreshold : midPrice > price + distanceThreshold);
-
-            if (isUnfinished && current < this.UnfinishedMinRemainingSize)
-                continue; // still tracked, just not worth showing at this remaining size
-
-            var absorbed = this.restingOrderAbsorbed.TryGetValue(kvp.Key, out var abs) ? abs : 0d;
-            var firstSeenUtc = this.restingOrderFirstSeenUtc.TryGetValue(kvp.Key, out var seen) ? seen : nowUtc;
-
-            // FIXED 2026-09-23 — "these orders need to update on the dom because i dont see these
-            // large orders still on the dom": this used to show PEAK for anything not flagged
-            // unfinished, which was correct back when "unfinished" meant exactly "current < peak"
-            // — the two conditions covered each other. Since yesterday's redesign, "unfinished"
-            // depends on PRICE having moved past the level, so a level far from price can shrink
-            // a great deal without ever being flagged unfinished — and was still showing its
-            // stale ORIGINAL peak number while the DOM ladder (built fresh from the same book
-            // every poll) correctly showed the smaller live size right next to it. ALWAYS show
-            // the live current size now; peak is bookkeeping only (raising the bar, absorption
-            // tracking), never what gets displayed.
-            draws.Add(new RestingOrderDraw(price, current, isBid, isUnfinished, absorbed, firstSeenUtc));
+            draws.Add(new RestingOrderDraw(
+                level.Price, level.Current, level.IsBid, level.IsUnfinished, level.Absorbed,
+                level.FirstSeenUtc));
         }
 
         return new RestingOrderDrawable(draws.ToArray());
-
-        void AddNewLevels(Dictionary<double, double> lookup, bool isBid)
-        {
-            foreach (var (price, size) in lookup)
-            {
-                if (size < threshold)
-                    continue;
-
-                var key = (price, isBid);
-                if (!this.restingOrderPeaks.ContainsKey(key))
-                {
-                    this.restingOrderPeaks[key] = size;
-                    this.restingOrderFirstSeenUtc[key] = nowUtc;
-                }
-            }
-        }
-
-        static Dictionary<double, double> ToLookup(Level2Item[]? items)
-        {
-            var map = new Dictionary<double, double>();
-
-            if (items is null)
-                return map;
-
-            foreach (var item in items)
-                map[item.Price] = item.Size;
-
-            return map;
-        }
     }
 
     /// <summary>Every scanned level on both sides — bar LENGTH scales against the configured
@@ -953,6 +839,136 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             this.bigTrades.RemoveRange(0, this.bigTrades.Count - this.BigTradeMaxKept);
 
         this.bigTradeDrawable = new BigTradeDrawable(this.bigTrades.ToArray());
+    }
+
+    /// <summary>
+    /// Accumulates queued classified ticks by which CHART BAR they belong to, then emits exactly
+    /// one delta bar per chart bar that has actually closed — driven by the chart's own bars
+    /// (same `TryReadBar`/`SeekOriginHistory.Begin` reading `DrainStructure` already uses for
+    /// IFVG detection), never by tick arrival. See <see cref="deltaPending"/>'s own doc comment
+    /// for why that changed. Session boundary matches <see cref="ReconcileRestingLevels"/>'s own
+    /// (18:00 America/New_York) — one trading-day convention for the whole indicator. Also
+    /// detects a FLIP — session cumulative delta crossing zero — "so i can tell when the delta
+    /// flips" (the operator's own ask, 2026-09-23).
+    /// </summary>
+    private void DrainDeltaTicks()
+    {
+        if (this.deltaBarPeriod <= TimeSpan.Zero)
+        {
+            var period = ChartPeriod(this.HistoricalData);
+
+            if (period is null || period.Value <= TimeSpan.Zero)
+                return; // chart hasn't published its own bar period yet; try again next poll
+
+            this.deltaBarPeriod = period.Value;
+        }
+
+        while (this.deltaTickQueue.TryDequeue(out var tick))
+        {
+            var bucketUtc = Bucket(tick.TimeUtc, this.deltaBarPeriod);
+            (double Buy, double Sell) acc = this.deltaPending.TryGetValue(bucketUtc, out var existing) ? existing : (0d, 0d);
+
+            this.deltaPending[bucketUtc] = tick.IsBuy
+                ? (acc.Buy + tick.Size, acc.Sell)
+                : (acc.Buy, acc.Sell + tick.Size);
+        }
+
+        var chartData = this.HistoricalData;
+
+        if (chartData is null || chartData.Count <= 1)
+            return;
+
+        var closedUpTo = chartData.Count - 1; // Count - 1 is the still-forming bar
+
+        // First run after attach: cap how far back this backfills, same reasoning
+        // `chartBarsSeen`/`MaxInitialChartBacklogBars` already established for IFVG.
+        if (this.deltaChartBarsSeen < 0)
+            this.deltaChartBarsSeen = Math.Max(0, closedUpTo - MaxInitialChartBacklogBars);
+
+        var changed = false;
+
+        for (var i = this.deltaChartBarsSeen; i < closedUpTo; i++)
+        {
+            if (!TryReadBar(chartData, i, out var bar))
+                continue;
+
+            CloseBar(bar.OpenUtc);
+            changed = true;
+        }
+
+        this.deltaChartBarsSeen = closedUpTo;
+
+        // The still-forming bar draws too, as a live, updating bar — waiting for a bar to close
+        // before it appears at all would make the panel look a whole bar behind the candles.
+        if (TryReadBar(chartData, closedUpTo, out var formingBar))
+        {
+            var dayStart = TradingDayStart(formingBar.OpenUtc);
+            if (dayStart != this.deltaDayStartUtc)
+            {
+                // A fresh trading day started on the forming bar itself — roll over now rather
+                // than waiting for it to close, so the live bar reads against the NEW day's
+                // zeroed cumulative instead of the old day's leftover total.
+                this.deltaDayStartUtc = dayStart;
+                this.deltaCumulative = 0d;
+                this.deltaBars.Clear();
+                this.deltaLastCumulativeSign = null;
+                this.deltaFlipUtc = null;
+            }
+
+            (double Buy, double Sell) acc = this.deltaPending.TryGetValue(formingBar.OpenUtc, out var pending) ? pending : (0d, 0d);
+            var liveVolume = acc.Buy + acc.Sell;
+            var liveDelta = acc.Buy - acc.Sell;
+
+            var bars = new List<DeltaBarDraw>(this.deltaBars)
+            {
+                new(formingBar.OpenUtc, liveVolume, liveDelta, this.deltaCumulative + liveDelta),
+            };
+
+            this.deltaDrawable = new DeltaDrawable(bars.ToArray(), this.deltaFlipUtc, this.deltaFlipIsUp);
+        }
+        else if (changed)
+        {
+            this.deltaDrawable = new DeltaDrawable(this.deltaBars.ToArray(), this.deltaFlipUtc, this.deltaFlipIsUp);
+        }
+
+        void CloseBar(DateTime openUtc)
+        {
+            var dayStart = TradingDayStart(openUtc);
+            if (dayStart != this.deltaDayStartUtc)
+            {
+                this.deltaDayStartUtc = dayStart;
+                this.deltaCumulative = 0d;
+                this.deltaBars.Clear();
+                this.deltaLastCumulativeSign = null;
+                this.deltaFlipUtc = null;
+            }
+
+            (double Buy, double Sell) acc = this.deltaPending.Remove(openUtc, out var pending) ? pending : (0d, 0d);
+            var volume = acc.Buy + acc.Sell;
+            var delta = acc.Buy - acc.Sell;
+            var newCumulative = this.deltaCumulative + delta;
+            var newSign = Math.Sign(newCumulative);
+
+            // A flip is a SIGN CHANGE against the last known non-zero sign — an exactly-zero bar
+            // in between two same-signed bars is not mistaken for two flips (or for none).
+            if (this.deltaLastCumulativeSign is { } lastSign && newSign != 0 && newSign != lastSign)
+            {
+                this.deltaFlipUtc = openUtc;
+                this.deltaFlipIsUp = newSign > 0;
+            }
+
+            if (newSign != 0)
+                this.deltaLastCumulativeSign = newSign;
+
+            this.deltaCumulative = newCumulative;
+            this.deltaBars.Add(new DeltaBarDraw(openUtc, volume, delta, this.deltaCumulative));
+
+            if (this.deltaBars.Count > MaxDeltaBarsKept)
+                this.deltaBars.RemoveRange(0, this.deltaBars.Count - MaxDeltaBarsKept);
+        }
+
+        static DateTime Bucket(DateTime timeUtc, TimeSpan period)
+            => new(timeUtc.Ticks - (timeUtc.Ticks % period.Ticks), DateTimeKind.Utc);
     }
 
     /// <summary>Reads one closed bar out of a platform history series at the given Begin-indexed
@@ -1204,33 +1220,20 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             this.overlayFault = $"The big-trade overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
         }
 
-        if (this.OrderBlock15mEnabled || this.OrderBlock1hEnabled)
+        if (this.DeltaPanelEnabled)
         {
             try
             {
-                this.orderBlockOverlay.Draw(
-                    graphics, window, this.orderBlockDrawable,
-                    new StructureBoxOverlay.Options(this.OrderBlockBullishColor, this.OrderBlockBearishColor),
+                this.deltaPanelOverlay.Draw(
+                    graphics, window, this.deltaDrawable,
+                    new DeltaPanelOverlay.Options(
+                        this.DeltaPanelHeightPx, this.DeltaVolumeColor, this.DeltaUpColor, this.DeltaDownColor,
+                        this.CurrentChart?.BarsWidth ?? 1d, this.DeltaFlipMarkerEnabled),
                     registry);
             }
             catch (Exception ex)
             {
-                this.overlayFault = $"The order-block overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
-            }
-        }
-
-        if (this.InverseFvgEnabled)
-        {
-            try
-            {
-                this.inverseFvgOverlay.Draw(
-                    graphics, window, this.inverseFvgDrawable,
-                    new StructureBoxOverlay.Options(this.InverseFvgBullishColor, this.InverseFvgBearishColor),
-                    registry);
-            }
-            catch (Exception ex)
-            {
-                this.overlayFault = $"The inverse-FVG overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
+                this.overlayFault = $"The delta panel overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
             }
         }
     }
@@ -1248,6 +1251,7 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.bigTradeOverlay.Dispose();
         this.orderBlockOverlay.Dispose();
         this.inverseFvgOverlay.Dispose();
+        this.deltaPanelOverlay.Dispose();
         this.ob15mHistory?.Dispose();
         this.ob1hHistory?.Dispose();
         this.faultFont.Dispose();

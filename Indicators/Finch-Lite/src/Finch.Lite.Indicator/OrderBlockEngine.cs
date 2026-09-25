@@ -3,10 +3,6 @@ using System.Collections.Generic;
 
 namespace FinchLite;
 
-/// <summary>One closed bar, timeframe-agnostic — the only shape both <see cref="OrderBlockEngine"/>
-/// and <see cref="FairValueGapEngine"/> need from a platform <c>HistoricalData</c> series.</summary>
-internal readonly record struct Bar(DateTime OpenUtc, double Open, double High, double Low, double Close);
-
 /// <summary>
 /// "i would like to see the 15minute order blocks and 1hr order blocks that are labeled" (the
 /// operator's own ask, 2026-09-23) — one instance per timeframe (15m, 1h), fed that timeframe's

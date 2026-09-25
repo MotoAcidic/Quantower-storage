@@ -1556,6 +1556,151 @@ section) and confirm sub-threshold plain "ASK N"/"BID N" labels no longer linger
 size drops below the filter should disappear on its own, without needing a refresh, unless price
 has genuinely moved past it (in which case it should read "UA - ..." instead).
 
+**FEATURE 4 REBUILT 2026-09-23 — the delta panel is back, for a specific reason this time.**
+"i really need the delta that was in that finch-scalping at the bottom of my chart so i can tell
+when the delta flips" — after being fully torn out earlier this same week ("its not helpful at
+all"), the panel returns because the actual need turned out narrower than "show delta": spotting
+a FLIP (session cumulative delta crossing zero), the same event Finch-Scalping/ORB-IX already
+mark with a full-pane vertical line (`DeltaFlipVerticalMarker`) — "when the big moves in delta
+shift it sends a line straight up" was that feature's own original ask, reused here rather than
+inventing a different signal.
+- **The band itself** is the same single-row histogram+cumulative-line design this indicator
+  settled on once before (`DeltaPanelOverlay.cs`, recreated — near-opaque 235/255-alpha
+  background with a top border, both kept from the earlier "candles show through" fix).
+- **New: the flip marker.** `DeltaDrawable` gained `FlipUtc`/`FlipIsUp`. `DrainDeltaTicks`'s
+  `CloseBucket` tracks `deltaLastCumulativeSign` (`int?`, null until the first non-zero
+  cumulative, then persistently +1/-1) and records a flip only on an actual SIGN CHANGE — an
+  exactly-zero bar in between two same-signed bars is neither a flip nor a reset of the tracked
+  sign. `DeltaPanelOverlay.Draw` draws the newest flip as a full-PANE-HEIGHT dashed vertical line
+  (not just band-height — matches "sends a line straight up" through the price action, not just
+  the delta strip), labelled "FLIP UP"/"FLIP DOWN", gated on new `DeltaFlipMarkerEnabled`
+  (default true).
+- **Non-fatal startup this time**: the original delta panel gated the chart's own bar-period
+  resolution inside `TryInitialise`, meaning a slow-to-publish period could hold up Features 1-3
+  too. Rebuilt to resolve `deltaBarPeriod` LAZILY inside `DrainDeltaTicks` itself (checked once
+  per poll, cheap when already known) — same "additive, never fatal" discipline order blocks
+  established this same week. `DrainDeltaTicks` also gets its own try/catch in `OnPollTimer`,
+  separate from the DOM-pull block, matching every other addition to that timer since the
+  Timer-callback-exception lesson.
+- New `InputParameter`s: `DeltaPanelEnabled`/`DeltaPanelHeightPx`/`DeltaUpColor`/
+  `DeltaDownColor`/`DeltaFlipMarkerEnabled` — indices 70-74, a fresh range (not reusing the
+  retired 40-44 from the first delta panel's own indices).
+
+**Also caught and fixed while wiring this in**: a real duplication bug from the 2026-09-23
+draw-order fix above (order blocks/IFVG were meant to MOVE to draw first, but the old call site
+at the end of `OnPaintChart` was never actually removed) — both overlays were drawing TWICE every
+frame, harmlessly visually (same drawable, same position) but wastefully, and consuming the
+shared label registry twice over for no reason. Removed the stale duplicate block.
+
+**Files touched**: `DeltaPanelOverlay.cs` (recreated, now with the flip marker),
+`FinchLiteIndicator.cs` (all fields/parameters/wiring above, plus the duplicate-draw fix).
+
+**Verified 2026-09-23**: `dotnet build ... -c Release -p:QuantowerSdkPath="...v1.147.4\bin\..."`
+— 0 errors, 0 warnings. Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\
+FinchLiteIndicator.dll`, `sha256sum` confirms the deployed DLL matches. Not yet confirmed on a
+live chart — restart Quantower (not remove/re-add) and confirm: the delta band appears at the
+bottom again; a full-height dashed line appears the moment session cumulative delta crosses zero,
+labelled FLIP UP/FLIP DOWN; and Features 1-3 still work exactly as before (the whole point of the
+lazy, non-fatal period resolution this time).
+
+**ROOT CAUSE FOUND AND FIXED 2026-09-23 (same day) — the delta panel showed one static bar
+instead of one per candle.** "i need it to continue with the delta for each candle not just
+static on 1 candle like this ... this was working perfect in the finch-scalping". Root cause:
+the rebuilt panel closed a delta bar only when a NEW classified tick arrived with a different
+bucket time than whatever bucket was currently open — so any candle that happened to receive
+ZERO classified prints got no bar at all, not even a zero one. On this connector that is common,
+not rare: `TryClassify`'s own doc comment already documents this exact feed's aggressor flag as
+sparse, which is why the geometry fallback exists in the first place — a quiet MGC candle with no
+cleanly classified prints simply vanished from the panel instead of showing zero, leaving long
+gaps that read as "frozen on one bar."
+
+**Fix — delta bars are now driven by the CHART's own bar closes, not by tick arrival**, reusing
+the exact same `TryReadBar`/`SeekOriginHistory.Begin` reading `DrainStructure` already uses for
+IFVG detection. Classified ticks accumulate into a new `deltaPending`
+(`Dictionary<DateTime, (double Buy, double Sell)>`, keyed by which bar they belong to) purely as
+bookkeeping; `DrainDeltaTicks` now walks the chart's own newly-closed bars (`deltaChartBarsSeen`
+cursor, same backlog-capping pattern as `chartBarsSeen` for IFVG) and closes exactly one delta
+bar per real candle, looking up (or defaulting to zero for) whatever accumulated for that bar's
+own `OpenUtc` — a quiet candle now gets a proper zero-delta bar instead of being skipped, keeping
+the panel in lock-step with the candles the way the old Finch-Scalping/ORB-IX version always was.
+The old tick-bucket fields (`deltaBucketOpen`/`deltaBucketOpenUtc`/`deltaBucketBuy`/
+`deltaBucketSell`) are gone; flip detection (`deltaLastCumulativeSign`/`deltaFlipUtc`, added
+earlier this same day) is unchanged in logic, just triggered from `CloseBar` now instead of
+`CloseBucket`.
+
+**Also addressed**: "stop with this lint noise it doesnt make sense" — the markdown-lint
+diagnostics (MD022/MD031/MD032) that show up in this tool's own output after editing this file
+are pre-existing formatting nitpicks (headings/lists/fenced blocks without surrounding blank
+lines) scattered throughout this document from long before this session, unrelated to any code
+correctness. Not flagging them in responses going forward.
+
+**Verified 2026-09-23**: `dotnet build ... -c Release -p:QuantowerSdkPath="...v1.147.4\bin\..."`
+— 0 errors (one intermediate error caught and fixed: C# drops named-tuple element names in a
+ternary against a bare `(0d, 0d)` literal unless the target variable is explicitly typed with
+those names — `(double Buy, double Sell) acc = ... ? existing : (0d, 0d);` rather than `var`).
+Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`,
+`sha256sum` confirms the deployed DLL matches. Not yet confirmed on a live chart — restart
+Quantower and confirm the delta band now shows a bar for every visible candle, including quiet
+ones, with no gaps.
+
+**FOLLOW-UP 2026-09-23 (same day) — delta panel split back into three rows.** "now i need to see
+the session delta and delta and volume like in the finch-scalping" — the SAME three-row design
+this indicator built once before this same week (VOLUME / DELTA / SESSION DELTA, each its own
+row and scale), abandoned partway through in favour of a single-band ORB-IX-ported design, is
+back — named directly, so no design ambiguity this time. `DeltaBarDraw` gained back its `Volume`
+field (`buy + sell` per bar, computed in both `CloseBar` and the still-forming-bar path inside
+`DrainDeltaTicks` — unaffected by the chart-bar-driven rewrite earlier today, since that changed
+WHEN a bar closes, not what data it carries). New `DeltaVolumeColor` `InputParameter` (index 75,
+default cornflower blue — volume has no direction, so one neutral colour). `DeltaPanelHeightPx`
+default raised 110 → 150 (min 40 → 60) — three rows split three ways needs more total height to
+stay legible, same reasoning as the first time this split existed. The flip marker added earlier
+today (full-pane vertical line at a session cumulative delta sign change) is UNCHANGED and drawn
+independently of the row layout — it already spanned the whole pane, not just the band, so the
+row split underneath it doesn't affect it.
+
+**Verified 2026-09-23**: `dotnet build ... -c Release -p:QuantowerSdkPath="...v1.147.4\bin\..."`
+— 0 errors. Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\
+FinchLiteIndicator.dll`, `sha256sum` confirms the deployed DLL matches. Not yet confirmed on a
+live chart — restart Quantower and confirm three labelled rows (VOL/DELTA/SESSION DELTA) each
+show their own bar for every candle, and the flip marker still spans the full pane height.
+
+**FOLLOW-UP 2026-09-23 (same day) — session delta row switched from a line to bars.** "session
+delta should also be in bars not a white line" — the SESSION DELTA row now draws one bar per
+candle from a zero baseline (clamped within the row if zero falls outside that session's own
+min/max range), coloured up/down by the CURRENT sign of cumulative delta at that bar — same
+visual language as the DELTA row above it, just plotted against the running-total's own
+[min, max] scale instead of a symmetric one. The now-unused `cumPen` (Gainsboro line pen) was
+removed entirely.
+
+**Verified 2026-09-23**: `dotnet build ... -c Release -p:QuantowerSdkPath="...v1.147.4\bin\..."`
+— 0 errors. Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\
+FinchLiteIndicator.dll`, `sha256sum` confirms the deployed DLL matches.
+
+**FOLLOW-UP 2026-09-25 — `RestingOrderEngine` extracted, in support of a new Strategy (see
+Strategy Catalog below).** "i wanna make this into a strategy now that i can run in quantower
+were it plays off the orders from the dom and the ifvg and absorption levels and unfinished
+auctions" — the DOM/absorption/unfinished-auction reconciliation logic
+(`FinchLiteIndicator.ReconcileRestingLevels`, this indicator's most mature, most-iterated
+feature) was pulled out into a standalone `internal sealed class RestingOrderEngine`
+(`Indicators/Finch-Lite/src/Finch.Lite.Indicator/RestingOrderEngine.cs`), so a new order-placing
+Strategy can trade off the EXACT SAME detection the indicator draws instead of a second,
+independently-maintained copy that could drift. `midPrice`/`distanceThresholdPrice`/`dayStart`
+are now parameters to `Reconcile(...)` rather than read off `this.symbol`/instance fields — this
+is what keeps the engine free of any platform `Symbol`/`Indicator` dependency and usable from a
+`Strategy` too. Also split the shared `Bar` record out of `OrderBlockEngine.cs` into its own
+`Bar.cs`, so the new Strategy can compile in `FairValueGapEngine.cs` without also pulling in the
+(irrelevant to it) order-block engine. **Pure refactor — zero display/behavior change intended**
+to what this indicator already showed; `FinchLiteIndicator.cs` itself now just owns a
+`private readonly RestingOrderEngine restingOrderEngine = new();` and a thin call site mapping
+`RestingOrderEngine.RestingLevel` → the paint drawable.
+
+**Verified 2026-09-25**: `dotnet build ... -c Release -p:QuantowerSdkPath="...v1.147.4\bin\..."`
+— 0 errors, 0 warnings. Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\
+FinchLiteIndicator.dll`, `sha256sum` confirms the deployed DLL matches. Not yet confirmed on a
+live chart — restart Quantower and confirm large orders/absorption tiers/unfinished auctions
+still look and behave exactly as before this refactor (highest-risk step of this change, since
+it touches the most-iterated code in the project).
+
 ### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
 **Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show
 delta, DOM/resting orders, absorption, auto-drawn fib, and FRVP+AVP (higher/lower timeframe
@@ -2108,6 +2253,89 @@ uses the `srChannelBreakStrategy`-style `StrategyTag`/`Comment` filter. **Not ye
 live session** — see the readme's bring-up order (dry-run review, cross-check against the
 ORB-IX indicator on the same symbol, then sim/eval-only with `Quantity=1`) before trusting it
 with anything.
+
+---
+
+### 13. Finch DOM Scalp Strategy (`finchDomScalpStrategy`) — added 2026-09-25
+
+**Files:** `Strategies/finchDomScalpStrategy/finchDomScalpStrategy/finchDomScalpStrategy.csproj`,
+`finchDomScalpStrategy.cs`
+
+#### What it is
+"i wanna make this into a strategy now that i can run in quantower were it plays off the orders
+from the dom and the ifvg and absorption levels and unfinished auctions" — automates Finch-Lite's
+own manual read (large resting DOM orders, tiered absorption, unfinished auctions, inverse fair
+value gaps) into a real order-placing Strategy. Compiles `RestingOrderEngine.cs`,
+`FairValueGapEngine.cs`, and `Bar.cs` IN BY SOURCE from `Indicators/Finch-Lite/src/
+Finch.Lite.Indicator/` (same `<Compile Include>` collision-avoidance reasoning as
+`directionAbsorptionScalpStrategy`'s own csproj comment, restated in this one) — this strategy
+trades off the EXACT SAME detection logic the Finch-Lite indicator draws, not a second,
+independently-maintained copy. **Trade-off, stated in the csproj**: this is a frozen snapshot as
+of this strategy's own last build; a later fix to Finch-Lite's own copy of these three files does
+not reach this strategy until it is rebuilt.
+
+**Entry** (`TryEnter`): a DOM/unfinished-auction level is the ANCHOR (`Current >= MinLevelSize`);
+strong absorption (`Absorbed >= AbsorptionStrongContracts`) and an aligned inverse-FVG zone (same
+side, price within `IfvgProximityTicks` of the zone) are CONFIRMATION filters — all three
+required, fewer/higher-conviction trades over independent triggers. Direction conflict (level
+side vs. IFVG side disagree) → skip the trade entirely, never pick a side. Unfinished-auction
+levels are NOT given separate retest-only logic — they pass through the same anchor check as any
+other qualifying level (`IsUnfinished` is just a flag on the same record); **flagged as a
+judgment call, not confirmed**, since "plays off... unfinished auctions" could have meant a
+retest-specific trigger instead.
+
+**Exits**: stop = the anchor level's own price ± `StopBufferTicks`; target = nearest OTHER
+opposing DOM/UA level or opposing IFVG zone edge, ahead of price past `MinTargetDistanceTicks`,
+nearest wins (`TryComputeTarget` — same `IsAhead`/min-distance/nearest-wins shape as
+`directionAbsorptionScalpStrategy.TryComputeTarget`); falls back to a fixed
+`FallbackTargetTicks` R:R target if nothing qualifies ahead.
+
+**No tick classification needed**: unlike the indicator, absorption here comes purely from BOOK
+SIZE CHANGES between DOM polls inside `RestingOrderEngine` itself — this strategy has no
+`OnLast` subscription at all. It does keep a no-op `Symbol.NewLevel2` handler, for the same
+platform reason discovered in the indicator: without SOME `NewLevel2` subscriber, the platform
+stops maintaining live depth and the DOM pull returns an empty book.
+
+Risk management block (`MaxDailyLoss`/`MaxDrawdown`/`MaxTradesPerSession`/
+`MinBarsBetweenEntries`/`RthOnly`+hours) and the `StrategyTag`/`Comment` position-isolation
+pattern (`MyPositions()`/`MyOrders()` filters, every `Core_*` handler tag-checks first) are
+copied from `directionAbsorptionScalpStrategy`'s own already-working shape — same names/defaults
+where the concept is shared.
+
+#### Safety — deliberately NO gate, unlike every other auto-trading strategy in this repo
+The operator was asked directly and chose **"Skip the gate, ready to trade immediately."**
+There is **no `DryRun`, no `ConfirmSimOrEvalAccount` parameter at all** in this strategy — it
+places real orders the moment it is attached and enabled on a real account, with no dry-run
+stage and no manual confirmation step in the code. This is a confirmed, deliberate choice, not
+an oversight — **do not silently add a gate back in** without being asked. `OnRun` still logs
+account identity loudly on start (kept from the reference strategy, costs nothing). The operator
+is responsible for attaching this to a sim/eval account themselves; nothing in the code checks
+that for them.
+
+#### Verified 2026-09-25
+
+- Indicator-side refactor (`RestingOrderEngine` extraction, see Finch-Lite's own catalog entry
+  above) built and deployed first, alone, as the higher-risk step — 0 errors, 0 warnings.
+- `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c Release` — 0 errors (10
+  nullable-annotation-context warnings only, pre-existing style, not a correctness issue).
+  Deploys directly to its `OutputPath` (`C:\Quantower\Settings\Scripts\Strategies\
+  finchDomScalpStrategy\`) — confirmed that folder holds only this strategy's own
+  DLL/PDB/deps.json, no stray shared assembly (proof the `<Compile Include>` source-sharing
+  didn't silently revert to a project reference).
+- Found and fixed a real integer-overflow bug during review (not caught by the compiler, a logic
+  bug): `lastEntryBarIndex` was initialized to `int.MinValue`, so the very first
+  `MinBarsBetweenEntries` cooldown check (`barCounter - lastEntryBarIndex`) would overflow `int`
+  and wrap to a large NEGATIVE number under C#'s default unchecked arithmetic — incorrectly
+  satisfying `< MinBarsBetweenEntries` and permanently blocking the first-ever entry. Fixed by
+  initializing to `-1_000_000` instead (far enough negative to never look "within cooldown" for
+  any realistic `barCounter`, without being close enough to `int.MinValue` to risk the same
+  overflow again). Rebuilt clean after the fix — 0 errors.
+- **NOT YET verified live** — attaching to a real (sim/eval) Quantower session, confirming the
+  account-identity log line, watching for a first signal, and confirming one full round trip
+  (entry with SL/TP attached, exit via stop/target/risk-limit, correct `Comment` tagging in the
+  Positions panel) all require the operator's own live session and have not been done. Given the
+  no-dry-run design above, the FIRST confirmed signal on whatever account this is attached to
+  places a real order — attach to sim/eval, not live, before enabling.
 
 ---
 
