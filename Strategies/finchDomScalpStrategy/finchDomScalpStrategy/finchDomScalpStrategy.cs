@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -37,13 +38,44 @@ namespace finchDomScalpStrategy;
 /// strategy was built from, in case "plays off... unfinished auctions" meant something more
 /// specific (e.g. a retest-only setup) — worth revisiting if that turns out to be wrong.
 ///
-/// Deliberately does NOT need tick classification at all: absorption is computed purely from
-/// BOOK SIZE CHANGES between DOM polls (already inside `RestingOrderEngine`), and IFVG detection
-/// reads closed BARS, not individual trades — so unlike Finch-Lite's own indicator, this strategy
-/// has no `OnLast`/`TryClassify` machinery. It still holds a no-op `NewLevel2` subscription for
-/// the same reason the indicator does: `Symbol.NewLevel2 +=` is what tells the platform to keep
-/// maintaining live depth for this symbol at all — the DOM pull depends on that subscription
-/// existing somewhere, discovered the hard way earlier this same week.
+/// Absorption is computed purely from BOOK SIZE CHANGES between DOM polls (already inside
+/// `RestingOrderEngine`), and IFVG detection reads closed BARS, not individual trades. It still
+/// holds a no-op `NewLevel2` subscription for the same reason the indicator does:
+/// `Symbol.NewLevel2 +=` is what tells the platform to keep maintaining live depth for this
+/// symbol at all — the DOM pull depends on that subscription existing somewhere, discovered the
+/// hard way earlier this same week.
+///
+/// POC TRADING, added 2026-09-25 ("can we add trading with the poc in the strategy as well") —
+/// SIX more clarifying questions answered before writing this, since it added a genuinely new
+/// entry pathway with real-money implications:
+/// - **Target role**: current-move and 15m POC (`PocEngine`, same source-shared engine and same
+///   "since the last confirmed swing" design as the indicator's own feature — see its own doc
+///   comment) both now join the candidate pool in `TryComputeTarget`, for EITHER entry pathway.
+/// - **Entry role**: a brand-new, STANDALONE trigger, independent of the DOM/absorption/IFVG
+///   pathway above — `CheckPocRejection`. It does NOT touch `TryEnter`'s own logic at all.
+/// - **Direction**: a REJECTION away from the POC (POC acts as support/resistance), not a
+///   reversion toward it.
+/// - **Detection**: bar-close confirmed — a closed bar's high/low must touch or pierce the POC,
+///   but its CLOSE must end up beyond `PocRejectionBufferTicks` on the origin side, same
+///   close-based confirmation style Finch-Lite's own `OrderBlockEngine`/`FairValueGapEngine` use.
+/// - **Eligible POCs**: either the current-move or the 15m POC independently qualifies.
+/// - **Gating**: fully SHARED with the DOM/absorption pathway — same cooldown, same daily-loss/
+///   drawdown/trade-count limits, same `StrategyTag`, same "flat before entering" check, same one
+///   position at a time. `CheckPocRejection` is just a second candidate signal checked once per
+///   poll, after `TryEnter` — whichever pathway's guard clauses let it through first wins.
+///
+/// This DOES require a live tick subscription (`OnLast`), unlike the DOM/absorption/IFVG pathway
+/// alone — POC volume-by-price needs individual trade prints, the same as the indicator's own
+/// `PocEngine.FeedTrade` usage. Ticks are queued on the market-data thread and drained on the
+/// poll timer, same §10-style discipline as everywhere else in this codebase.
+///
+/// SAFETY NOTE ON BACKLOG BARS: on first attach, `RunPoll` seeds `PocEngine`/`FairValueGapEngine`
+/// from up to 500 bars of already-closed chart history in one burst (same backlog-priming the
+/// IFVG engine already does). `CheckPocRejection` is deliberately SKIPPED entirely during that
+/// first backlog burst — checking it against historical bars that closed before this attach would
+/// mean potentially firing a REAL order off stale price action the instant the strategy starts,
+/// which given this strategy's own no-dry-run design would be considerably worse than a redraw
+/// bug. It only starts evaluating once a bar closes live, after that first catch-up.
 /// </summary>
 public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 {
@@ -125,12 +157,42 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("RTH end hour (EST)", 36, 0, 23, 1, 0)]
     public int RthEndHour { get; set; }
 
+    // ---- POC — target candidates for both entry pathways, plus its own standalone rejection
+    // trigger (see the class doc comment's "POC TRADING" section) ----------------------------
+
+    [InputParameter("POC: enable current-move", 40)]
+    public bool PocCurrentMoveEnabled { get; set; }
+
+    [InputParameter("POC: enable 15m higher-timeframe", 41)]
+    public bool Poc15mEnabled { get; set; }
+
+    /// <summary>Same fractal swing-pivot rule as Finch-Lite's own indicator, shared by both the
+    /// current-move and 15m engines.</summary>
+    [InputParameter("POC: swing pivot lookback (bars)", 42, 1, 20, 1, 0)]
+    public int PocSwingPivotLookback { get; set; }
+
+    /// <summary>How far back the dedicated 15-minute series loads on attach — only needs enough
+    /// bars to locate the current swing structure, same reasoning as the indicator's own
+    /// PocLookbackDays.</summary>
+    [InputParameter("POC: 15m history lookback (days)", 43, 1, 90, 1, 0)]
+    public int PocLookbackDays { get; set; }
+
+    /// <summary>How far beyond the POC a bar's CLOSE must end up, on the origin side, before a
+    /// touch/pierce counts as a confirmed rejection rather than an inconclusive wick.</summary>
+    [InputParameter("POC: rejection close buffer (ticks)", 44, 0, 1000, 1, 0)]
+    public int PocRejectionBufferTicks { get; set; }
+
     // ---- lifecycle state --------------------------------------------------------------------
 
     private Timer? pollTimer;
     private HistoricalData? hdm;
     private RestingOrderEngine? restingOrderEngine;
     private FairValueGapEngine? fvgEngine;
+    private PocEngine? pocCurrentMoveEngine;
+    private PocEngine? poc15mEngine;
+    private HistoricalData? poc15mHistory;
+    private int poc15mBarsSeen;
+    private readonly ConcurrentQueue<(double Price, double Size)> pocTickQueue = new();
     private string? orderTypeId;
     private int chartBarsSeen;
     private int barCounter;
@@ -172,6 +234,12 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.StopBufferTicks = 2;
         this.MinTargetDistanceTicks = 10;
         this.FallbackTargetTicks = 40;
+
+        this.PocCurrentMoveEnabled = true;
+        this.Poc15mEnabled = true;
+        this.PocSwingPivotLookback = 3;
+        this.PocLookbackDays = 5;
+        this.PocRejectionBufferTicks = 3;
 
         this.MaxDailyLoss = 0;
         this.MaxDrawdown = 2000;
@@ -242,6 +310,29 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.restingOrderEngine = new RestingOrderEngine();
         this.fvgEngine = new FairValueGapEngine();
 
+        // Lazily constructed here (not as field initializers) so each engine picks up whatever
+        // PocSwingPivotLookback the operator actually configured, not whatever the property
+        // equalled at object-construction time, before Quantower applies saved InputParameter
+        // values — same reasoning Finch-Lite's own indicator documents for its own lazy
+        // OrderBlockEngine/PocEngine construction.
+        if (this.PocCurrentMoveEnabled)
+            this.pocCurrentMoveEngine = new PocEngine(this.PocSwingPivotLookback);
+
+        if (this.Poc15mEnabled)
+        {
+            try
+            {
+                var lookback = Core.TimeUtils.DateTimeUtcNow.AddDays(-Math.Max(1, this.PocLookbackDays));
+                this.poc15mHistory = this.CurrentSymbol.GetHistory(Period.MIN15, this.CurrentSymbol.HistoryType, lookback);
+                this.poc15mEngine = new PocEngine(this.PocSwingPivotLookback);
+                this.poc15mBarsSeen = 0;
+            }
+            catch (Exception ex)
+            {
+                this.Log($"15m POC unavailable: {ex.GetType().Name}: {ex.Message}", StrategyLoggingLevel.Error);
+            }
+        }
+
         this.hdm = this.CurrentSymbol.GetHistory(this.Period, this.CurrentSymbol.HistoryType, this.StartPoint);
 
         // Do-nothing handler, subscribed purely for the side effect: without SOME NewLevel2
@@ -249,6 +340,11 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         // below silently returns an empty book — discovered the hard way in Finch-Lite's own
         // indicator earlier this week (see Quantower-storage/CLAUDE.md).
         this.CurrentSymbol.NewLevel2 += this.OnLevel2;
+
+        // ONLY needed for POC's own volume-by-price accumulation — the DOM/absorption/IFVG
+        // pathway alone never needed a tick subscription (see the class doc comment).
+        if (this.PocCurrentMoveEnabled || this.Poc15mEnabled)
+            this.CurrentSymbol.NewLast += this.OnLast;
 
         Core.PositionAdded += this.Core_PositionAdded;
         Core.PositionRemoved += this.Core_PositionRemoved;
@@ -272,14 +368,36 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         Core.TradeAdded -= this.Core_TradeAdded;
 
         if (this.CurrentSymbol != null)
+        {
             this.CurrentSymbol.NewLevel2 -= this.OnLevel2;
+            this.CurrentSymbol.NewLast -= this.OnLast;
+        }
 
         this.hdm?.Dispose();
         this.hdm = null;
+        this.poc15mHistory?.Dispose();
+        this.poc15mHistory = null;
+        this.pocCurrentMoveEngine = null;
+        this.poc15mEngine = null;
+        this.pocTickQueue.Clear();
     }
 
     private void OnLevel2(Symbol symbol, Level2Quote level2, DOMQuote dom)
     {
+    }
+
+    /// <summary>
+    /// §10-style discipline, same as Finch-Lite's own indicator: no work on the market-data
+    /// thread beyond a comparison and an enqueue. POC counts every trade's own volume toward its
+    /// own price regardless of which side was the aggressor, so unlike a delta/absorption feed
+    /// this needs no classification step at all — just price and size.
+    /// </summary>
+    private void OnLast(Symbol symbol, Last last)
+    {
+        if (last is null || last.Size <= 0)
+            return;
+
+        this.pocTickQueue.Enqueue((last.Price, last.Size));
     }
 
     // ---- the poll -----------------------------------------------------------------------------
@@ -359,29 +477,80 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         var levels = engine.Reconcile(nowUtc, dayStart, bids, asks, this.MinLevelSize, midPrice, distanceThreshold);
 
-        // ---- 2. feed any newly-closed chart bars into the IFVG engine ----
+        // ---- 2. feed any newly-closed chart bars into the IFVG + current-move POC engines ----
+        Bar? latestClosedBar = null;
+
         if (hdm.Count > 1)
         {
             var closedUpTo = hdm.Count - 1; // Count - 1 is the still-forming bar
             this.barCounter = closedUpTo;
 
-            if (this.chartBarsSeen < 0)
+            // See the class doc comment's "SAFETY NOTE ON BACKLOG BARS": the very first drain
+            // after attach can burst-feed up to 500 already-closed bars in one poll, and
+            // CheckPocRejection must never evaluate against that stale backlog.
+            var isFirstDrain = this.chartBarsSeen < 0;
+
+            if (isFirstDrain)
                 this.chartBarsSeen = Math.Max(0, closedUpTo - 500);
 
             for (var i = this.chartBarsSeen; i < closedUpTo; i++)
             {
                 if (TryReadBar(hdm, i, out var bar))
+                {
                     fvg.Feed(bar);
+
+                    if (this.PocCurrentMoveEnabled)
+                        this.pocCurrentMoveEngine?.FeedBar(bar);
+                }
             }
 
             this.chartBarsSeen = closedUpTo;
+
+            if (!isFirstDrain && closedUpTo > 0 && TryReadBar(hdm, closedUpTo - 1, out var lastBar))
+                latestClosedBar = lastBar;
         }
 
-        // ---- 3. evaluate entry ----
+        // ---- 3. drain the dedicated 15m POC series and every queued trade print ----
+        this.DrainPoc();
+
+        // ---- 4. evaluate entries — the DOM/absorption/IFVG pathway first, then the standalone
+        // POC rejection pathway; whichever's own guard clauses let it through first wins (shared
+        // gating, see the class doc comment) ----
         if (double.IsNaN(midPrice) || tickSize <= 0)
             return;
 
         this.TryEnter(levels, fvg.Active, midPrice, tickSize);
+
+        if (latestClosedBar is { } rejectionBar)
+            this.CheckPocRejection(rejectionBar, tickSize, levels, fvg.Active);
+    }
+
+    /// <summary>Feeds the dedicated 15-minute series into the higher-timeframe POC engine (own
+    /// cursor, own history object — independent of the chart's own series above) and every
+    /// queued trade print into whichever POC engine(s) are enabled.</summary>
+    private void DrainPoc()
+    {
+        if (this.Poc15mEnabled && this.poc15mHistory is { } h15 && this.poc15mEngine is { } htf && h15.Count > 1)
+        {
+            var closedUpTo = h15.Count - 1;
+
+            for (var i = this.poc15mBarsSeen; i < closedUpTo; i++)
+            {
+                if (TryReadBar(h15, i, out var bar))
+                    htf.FeedBar(bar);
+            }
+
+            this.poc15mBarsSeen = closedUpTo;
+        }
+
+        while (this.pocTickQueue.TryDequeue(out var tick))
+        {
+            if (this.PocCurrentMoveEnabled)
+                this.pocCurrentMoveEngine?.FeedTrade(tick.Price, tick.Size);
+
+            if (this.Poc15mEnabled)
+                this.poc15mEngine?.FeedTrade(tick.Price, tick.Size);
+        }
     }
 
     private void ReportPollFault(string reason)
@@ -451,7 +620,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
                 : level.Price + (this.StopBufferTicks * tickSize);
 
             var hasTarget = this.TryComputeTarget(
-                levels, ifvgZones, level, price, tickSize, out var computedTarget, out var targetSource);
+                levels, ifvgZones, level.IsBid, price, tickSize, out var computedTarget, out var targetSource);
 
             var targetPrice = hasTarget
                 ? computedTarget
@@ -462,24 +631,29 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             if (!hasTarget)
                 targetSource = "fallback R:R";
 
-            this.PlaceEntry(side, stopPrice, targetPrice, level, targetSource);
+            var anchorDescription =
+                $"{(level.IsBid ? "BID" : "ASK")} {level.Price:0.####} absorbed={level.Absorbed:N0} "
+                + $"unfinished={level.IsUnfinished}";
+
+            this.PlaceEntry(side, stopPrice, targetPrice, anchorDescription, targetSource);
             return; // one qualifying setup per poll — never stack multiple entries from one pass
         }
     }
 
-    /// <summary>Nearest OPPOSING resting level or IFVG zone ahead of price in the trade's own
-    /// direction, past the minimum-distance floor — same `IsAhead`/min-distance/nearest-wins
+    /// <summary>Nearest OPPOSING resting level, IFVG zone, or POC ahead of price in the trade's
+    /// own direction, past the minimum-distance floor — same `IsAhead`/min-distance/nearest-wins
     /// shape as `directionAbsorptionScalpStrategy.TryComputeTarget`, built from Finch-Lite's own
-    /// two engines instead of that strategy's HH/LL/VWAP/prior-day levels.</summary>
+    /// engines instead of that strategy's HH/LL/VWAP/prior-day levels. Takes the trade's own
+    /// direction directly (not a `RestingLevel` anchor) so both the DOM/absorption entry pathway
+    /// AND the standalone POC-rejection pathway can share this same target logic.</summary>
     private bool TryComputeTarget(
         IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
         IReadOnlyList<FairValueGapEngine.InverseFvgZone> ifvgZones,
-        RestingOrderEngine.RestingLevel anchor, double price, double tickSize,
+        bool isLong, double price, double tickSize,
         out double targetPrice, out string source)
     {
         targetPrice = 0d;
         source = string.Empty;
-        var isLong = anchor.IsBid;
         var minDistance = this.MinTargetDistanceTicks * tickSize;
 
         bool IsAhead(double candidate) => isLong ? candidate > price : candidate < price;
@@ -488,18 +662,26 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         foreach (var level in levels)
         {
-            if (level.IsBid == isLong) continue; // same side as the anchor — not an opposing level
+            if (level.IsBid == isLong) continue; // same side as the trade — not an opposing level
             if (!IsAhead(level.Price)) continue;
             candidates.Add((level.Price, "opposing DOM/UA level"));
         }
 
         foreach (var zone in ifvgZones)
         {
-            if (zone.IsBullish == isLong) continue; // same role as the anchor's own direction
+            if (zone.IsBullish == isLong) continue; // same role as the trade's own direction
             var edge = isLong ? zone.Bottom : zone.Top;
             if (!IsAhead(edge)) continue;
             candidates.Add((edge, "opposing IFVG zone"));
         }
+
+        // POC has no side/role of its own — a price ahead of the trade in its own direction
+        // qualifies regardless of which POC it came from.
+        if (this.PocCurrentMoveEnabled && this.pocCurrentMoveEngine?.Poc is { } cmPoc && IsAhead(cmPoc))
+            candidates.Add((cmPoc, "current-move POC"));
+
+        if (this.Poc15mEnabled && this.poc15mEngine?.Poc is { } htfPoc && IsAhead(htfPoc))
+            candidates.Add((htfPoc, "15m POC"));
 
         var qualified = candidates.Where(c => Math.Abs(c.Price - price) >= minDistance).ToList();
         if (qualified.Count == 0)
@@ -511,6 +693,114 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         return true;
     }
 
+    // ---- standalone POC rejection pathway — see the class doc comment's "POC TRADING" section -
+
+    /// <summary>
+    /// Checked once per poll against only the MOST RECENTLY closed chart bar — never the backlog
+    /// (see the class doc comment's "SAFETY NOTE ON BACKLOG BARS"). Fully independent of
+    /// <see cref="TryEnter"/>'s own DOM/absorption/IFVG logic; shares only the same risk/position
+    /// gates and the same <see cref="TryComputeTarget"/> exit logic.
+    /// </summary>
+    private void CheckPocRejection(
+        Bar bar, double tickSize,
+        IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
+        IReadOnlyList<FairValueGapEngine.InverseFvgZone> ifvgZones)
+    {
+        if (!this.PocCurrentMoveEnabled && !this.Poc15mEnabled) return;
+        if (this.waitOpenPosition || this.waitClosePositions) return;
+        if (this.dailyLimitHit || this.drawdownLimitHit || this.tradesLimitHit) return;
+        if (this.MyPositions().Any()) return;
+        if (this.RthOnly == 1 && !this.IsInRth()) return;
+        if (this.barCounter - this.lastEntryBarIndex < this.MinBarsBetweenEntries) return;
+
+        var buffer = this.PocRejectionBufferTicks * tickSize;
+
+        if (this.PocCurrentMoveEnabled && this.pocCurrentMoveEngine?.Poc is { } cmPoc
+            && TryPocRejection(bar, cmPoc, buffer, out var cmSide))
+        {
+            this.PlacePocEntry(cmSide, bar, cmPoc, tickSize, "current-move", levels, ifvgZones);
+            return;
+        }
+
+        if (this.Poc15mEnabled && this.poc15mEngine?.Poc is { } htfPoc
+            && TryPocRejection(bar, htfPoc, buffer, out var htfSide))
+        {
+            this.PlacePocEntry(htfSide, bar, htfPoc, tickSize, "15m", levels, ifvgZones);
+        }
+    }
+
+    /// <summary>
+    /// A REJECTION away from the POC (the operator's own explicit choice over a reversion toward
+    /// it — see the class doc comment): the bar reached or pierced the POC intrabar, but its own
+    /// CLOSE ended up beyond <paramref name="buffer"/> on the ORIGIN side, meaning the level held
+    /// as support/resistance rather than being accepted through. Both checks use the SAME bar —
+    /// they cannot both fire (a close cannot be simultaneously below AND above the POC by a
+    /// positive buffer).
+    /// </summary>
+    private static bool TryPocRejection(Bar bar, double poc, double buffer, out Side side)
+    {
+        side = default;
+
+        // Bearish rejection: price reached up to/through the POC, but closed meaningfully below
+        // it — POC held as resistance, expect continuation down.
+        if (bar.High >= poc && bar.Close <= poc - buffer)
+        {
+            side = Side.Sell;
+            return true;
+        }
+
+        // Bullish rejection: price reached down to/through the POC, but closed meaningfully
+        // above it — POC held as support, expect continuation up.
+        if (bar.Low <= poc && bar.Close >= poc + buffer)
+        {
+            side = Side.Buy;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void PlacePocEntry(
+        Side side, Bar rejectionBar, double poc, double tickSize, string pocLabel,
+        IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
+        IReadOnlyList<FairValueGapEngine.InverseFvgZone> ifvgZones)
+    {
+        // Stop sits beyond the rejection bar's OWN extreme — the wick that got rejected — using
+        // the same StopBufferTicks concept the DOM/absorption pathway's own stop uses.
+        var stopPrice = side == Side.Sell
+            ? rejectionBar.High + (this.StopBufferTicks * tickSize)
+            : rejectionBar.Low - (this.StopBufferTicks * tickSize);
+
+        var isLong = side == Side.Buy;
+
+        // The rejection bar's own CLOSE, not the POC price itself, stands in for "current price"
+        // here — same role `midPrice` plays for the DOM/absorption pathway's own target call.
+        // The bar has already closed beyond the POC by the rejection buffer by definition, so
+        // anchoring target/fallback distance to the POC price instead would measure from a point
+        // price has already moved away from.
+        var referencePrice = rejectionBar.Close;
+
+        // Reuses the SAME levels/ifvgZones this poll already computed — RestingOrderEngine.
+        // Reconcile is stateful (mutates its own tracking dictionaries as a side effect of being
+        // called), so it must never be called a second time in the same poll just to get a
+        // "fresh" snapshot; doing so would corrupt the DOM/absorption pathway's own live state.
+        var hasTarget = this.TryComputeTarget(
+            levels, ifvgZones, isLong, referencePrice, tickSize, out var computedTarget, out var targetSource);
+
+        var targetPrice = hasTarget
+            ? computedTarget
+            : isLong
+                ? referencePrice + (this.FallbackTargetTicks * tickSize)
+                : referencePrice - (this.FallbackTargetTicks * tickSize);
+
+        if (!hasTarget)
+            targetSource = "fallback R:R";
+
+        var anchorDescription = $"{pocLabel} POC {poc:0.####} rejection";
+
+        this.PlaceEntry(side, stopPrice, targetPrice, anchorDescription, targetSource);
+    }
+
     private bool IsInRth()
     {
         var est = TimeZoneInfo.ConvertTimeFromUtc(Core.TimeUtils.DateTimeUtcNow, SessionZone);
@@ -518,13 +808,12 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     }
 
     private void PlaceEntry(
-        Side side, double stopPrice, double targetPrice, RestingOrderEngine.RestingLevel level, string targetSource)
+        Side side, double stopPrice, double targetPrice, string anchorDescription, string targetSource)
     {
         this.waitOpenPosition = true;
 
         this.Log(
-            $"[Signal] {side} anchor={(level.IsBid ? "BID" : "ASK")} {level.Price:0.####} "
-            + $"absorbed={level.Absorbed:N0} unfinished={level.IsUnfinished} "
+            $"[Signal] {side} anchor={anchorDescription} "
             + $"stop={stopPrice:0.####} target={targetPrice:0.####} ({targetSource})",
             StrategyLoggingLevel.Trading);
 

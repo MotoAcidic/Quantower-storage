@@ -397,6 +397,65 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     private readonly StructureBoxOverlay inverseFvgOverlay = new();
     private volatile StructureBoxDrawable inverseFvgDrawable = StructureBoxDrawable.Empty;
 
+    // ---- point of control (feature 7, 2026-09-25) ----------------------------------------------
+    //
+    // "the poc of the current move and a higher time frame poc of like the 15min" — two
+    // PocEngine instances (see its own doc comment for the "current move"/lag/tick-volume design,
+    // all explicit choices made via AskUserQuestion): one fed the CHART's own closed bars for
+    // "the current move", a second fed a dedicated 15-minute series (independent of the 15m order
+    // blocks above — disabling one must not silently starve the other of history) for the
+    // higher-timeframe read. Both share the SAME live tick stream already driving the delta panel
+    // and big-trade markers; POC just doesn't care which side was the aggressor.
+    [InputParameter("POC: enable current-move", 80)]
+    public bool PocCurrentMoveEnabled { get; set; } = true;
+
+    [InputParameter("POC: enable 15m higher-timeframe", 81)]
+    public bool Poc15mEnabled { get; set; } = true;
+
+    /// <summary>Bars required on EACH side of a candidate before it counts as a confirmed swing
+    /// high/low, on WHICHEVER timeframe each PocEngine instance is fed — same fractal rule as
+    /// order blocks, shared by both the current-move and 15m engines rather than exposing two
+    /// near-identical sliders for one concept.</summary>
+    [InputParameter("POC: swing pivot lookback (bars)", 82, 1, 20, 1, 0)]
+    public int PocSwingPivotLookback { get; set; } = 3;
+
+    [InputParameter("POC: current-move colour", 83)]
+    public Color PocCurrentMoveColor { get; set; } = Color.FromArgb(0xFF, 0xD7, 0x00);
+
+    [InputParameter("POC: 15m colour", 84)]
+    public Color Poc15mColor { get; set; } = Color.FromArgb(0x40, 0xC4, 0xFF);
+
+    /// <summary>How far back the dedicated 15-minute series loads on attach — only needs enough
+    /// bars to locate the current swing structure, not a long trading history, since the profile
+    /// itself only ever accumulates LIVE ticks going forward (see PocEngine's own "known lag"
+    /// doc comment) — no historical volume to backfill regardless of how far back this reaches.</summary>
+    [InputParameter("POC: 15m history lookback (days)", 85, 1, 90, 1, 0)]
+    public int PocLookbackDays { get; set; } = 5;
+
+    /// <summary>
+    /// Constructed lazily in <see cref="TryStartPoc"/>, not here — same reason
+    /// <see cref="ob15mEngine"/>/<see cref="ob1hEngine"/> are lazy: an eager field initializer
+    /// would bake in whatever <see cref="PocSwingPivotLookback"/> happens to equal at object
+    /// construction time, BEFORE Quantower has applied any saved InputParameter override, and
+    /// (being readonly-in-spirit here, never reassigned once built) would then silently ignore an
+    /// operator's own configured pivot lookback for the rest of the attach.
+    /// </summary>
+    private PocEngine? pocCurrentMoveEngine;
+
+    private PocEngine? poc15mEngine;
+    private HistoricalData? poc15mHistory;
+    private int poc15mBarsSeen;
+
+    /// <summary>Own cursor into the SAME chart HistoricalData the IFVG section above reads —
+    /// deliberately not shared with <see cref="chartBarsSeen"/>, since that one stops advancing
+    /// entirely whenever Inverse FVG is disabled (DrainStructure returns early), which must not
+    /// also silently stall POC's own view of the chart's bars.</summary>
+    private int pocChartBarsSeen = -1;
+
+    private readonly ConcurrentQueue<(double Price, double Size)> pocTickQueue = new();
+    private readonly PocOverlay pocOverlay = new();
+    private volatile PocDrawable pocDrawable = PocDrawable.Empty;
+
     public FinchLiteIndicator()
     {
         this.Name = "Finch-Lite";
@@ -492,6 +551,7 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             symbol.NewLevel2 += this.OnLevel2;
 
             this.TryStartOrderBlocks(symbol);
+            this.TryStartPoc(symbol);
 
             var interval = Math.Max(this.PollIntervalMs, 50);
             this.pollTimer = new Timer(this.OnPollTimer, null, 0, interval);
@@ -545,6 +605,35 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     }
 
     /// <summary>
+    /// Best-effort, same reasoning as <see cref="TryStartOrderBlocks"/> — a connector unable to
+    /// supply the dedicated 15m series should not take DOM/tape reading down with it. The
+    /// current-move engine needs no history fetch of its own (it reads the CHART's own already-
+    /// loaded series in <see cref="DrainPoc"/>, same as the IFVG engine does), so it is
+    /// constructed here purely to pick up the operator's actual configured pivot lookback rather
+    /// than whatever <see cref="PocSwingPivotLookback"/> equalled at object-construction time.
+    /// </summary>
+    private void TryStartPoc(Qt.Symbol symbol)
+    {
+        if (this.PocCurrentMoveEnabled && this.pocCurrentMoveEngine is null)
+            this.pocCurrentMoveEngine = new PocEngine(this.PocSwingPivotLookback);
+
+        if (this.Poc15mEnabled && this.poc15mHistory is null)
+        {
+            try
+            {
+                var lookback = DateTime.UtcNow.AddDays(-Math.Max(1, this.PocLookbackDays));
+                this.poc15mHistory = symbol.GetHistory(Period.MIN15, symbol.HistoryType, lookback);
+                this.poc15mEngine = new PocEngine(this.PocSwingPivotLookback);
+                this.poc15mBarsSeen = 0;
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = $"15m POC unavailable: {ex.GetType().Name}: {ex.Message}";
+            }
+        }
+    }
+
+    /// <summary>
     /// §10-style discipline: no work on the market-data thread beyond a comparison and an
     /// enqueue. The queue is drained on the poll timer, which already runs periodically for the
     /// DOM pull, rather than building a second timer just for this.
@@ -553,6 +642,14 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     {
         if (last is null)
             return;
+
+        // POC counts every trade's own volume toward its own price regardless of which side was
+        // the aggressor, so this queues unconditionally rather than after the classification
+        // gate below — gated only on whether either POC feature is actually on, so the queue
+        // never grows once both are switched off (same "nothing running that isn't currently
+        // shown" discipline as everything else in this indicator).
+        if (last.Size > 0 && (this.PocCurrentMoveEnabled || this.Poc15mEnabled))
+            this.pocTickQueue.Enqueue((last.Price, last.Size));
 
         // Prints that carry no evidence either way (unusable quote, or strictly inside the
         // spread) feed NEITHER queue below — a line implying "buyers did this" or "sellers did
@@ -642,6 +739,15 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.chartBarsSeen = -1;
         this.inverseFvgDrawable = StructureBoxDrawable.Empty;
 
+        this.pocCurrentMoveEngine = null;
+        this.poc15mEngine = null;
+        this.poc15mHistory?.Dispose();
+        this.poc15mHistory = null;
+        this.poc15mBarsSeen = 0;
+        this.pocChartBarsSeen = -1;
+        this.pocTickQueue.Clear();
+        this.pocDrawable = PocDrawable.Empty;
+
         this.deltaTickQueue.Clear();
         this.deltaPending.Clear();
         this.deltaChartBarsSeen = -1;
@@ -694,6 +800,15 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         catch (Exception ex)
         {
             this.overlayFault = $"Order blocks/IFVG failed: {ex.GetType().Name}: {ex.Message}";
+        }
+
+        try
+        {
+            this.DrainPoc();
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = $"POC failed: {ex.GetType().Name}: {ex.Message}";
         }
 
         try
@@ -1097,6 +1212,82 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         }
     }
 
+    /// <summary>
+    /// Feeds the chart's own closed bars into the current-move engine, the dedicated 15-minute
+    /// series into the higher-timeframe engine, and every queued trade print into whichever
+    /// engine(s) are enabled, then rebuilds the paint drawable. Own history-reading cursor
+    /// (<see cref="pocChartBarsSeen"/>), independent of the IFVG cursor above — see that field's
+    /// own doc comment for why.
+    /// </summary>
+    private void DrainPoc()
+    {
+        var changed = false;
+
+        if (this.PocCurrentMoveEnabled && this.pocCurrentMoveEngine is { } cm)
+        {
+            var chartData = this.HistoricalData;
+
+            if (chartData is { Count: > 1 })
+            {
+                var closedUpTo = chartData.Count - 1;
+
+                if (this.pocChartBarsSeen < 0)
+                    this.pocChartBarsSeen = Math.Max(0, closedUpTo - MaxInitialChartBacklogBars);
+
+                for (var i = this.pocChartBarsSeen; i < closedUpTo; i++)
+                {
+                    if (TryReadBar(chartData, i, out var bar))
+                    {
+                        cm.FeedBar(bar);
+                        changed = true;
+                    }
+                }
+
+                this.pocChartBarsSeen = closedUpTo;
+            }
+        }
+
+        if (this.Poc15mEnabled && this.poc15mHistory is { } h15 && this.poc15mEngine is { } htf && h15.Count > 1)
+        {
+            var closedUpTo = h15.Count - 1;
+
+            for (var i = this.poc15mBarsSeen; i < closedUpTo; i++)
+            {
+                if (TryReadBar(h15, i, out var bar))
+                {
+                    htf.FeedBar(bar);
+                    changed = true;
+                }
+            }
+
+            this.poc15mBarsSeen = closedUpTo;
+        }
+
+        while (this.pocTickQueue.TryDequeue(out var tick))
+        {
+            changed = true;
+
+            if (this.PocCurrentMoveEnabled)
+                this.pocCurrentMoveEngine?.FeedTrade(tick.Price, tick.Size);
+
+            if (this.Poc15mEnabled)
+                this.poc15mEngine?.FeedTrade(tick.Price, tick.Size);
+        }
+
+        if (!changed)
+            return;
+
+        var points = new List<PocDraw>(2);
+
+        if (this.PocCurrentMoveEnabled && this.pocCurrentMoveEngine?.Poc is { } cmPoc)
+            points.Add(new PocDraw(cmPoc, this.pocCurrentMoveEngine.MoveStartUtc, IsHigherTimeframe: false));
+
+        if (this.Poc15mEnabled && this.poc15mEngine?.Poc is { } htfPoc)
+            points.Add(new PocDraw(htfPoc, this.poc15mEngine.MoveStartUtc, IsHigherTimeframe: true));
+
+        this.pocDrawable = new PocDrawable(points.ToArray());
+    }
+
     private void ReportPollFault(string reason)
     {
         if (string.Equals(this.lastPollFault, reason, StringComparison.Ordinal))
@@ -1220,6 +1411,21 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             this.overlayFault = $"The big-trade overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
         }
 
+        if (this.PocCurrentMoveEnabled || this.Poc15mEnabled)
+        {
+            try
+            {
+                this.pocOverlay.Draw(
+                    graphics, window, this.pocDrawable,
+                    new PocOverlay.Options(this.PocCurrentMoveColor, this.Poc15mColor),
+                    registry);
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = $"The POC overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
+            }
+        }
+
         if (this.DeltaPanelEnabled)
         {
             try
@@ -1252,8 +1458,10 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.orderBlockOverlay.Dispose();
         this.inverseFvgOverlay.Dispose();
         this.deltaPanelOverlay.Dispose();
+        this.pocOverlay.Dispose();
         this.ob15mHistory?.Dispose();
         this.ob1hHistory?.Dispose();
+        this.poc15mHistory?.Dispose();
         this.faultFont.Dispose();
         this.faultBrush.Dispose();
         this.faultBack.Dispose();

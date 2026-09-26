@@ -43,18 +43,23 @@
       draws, rather than a second, independently-maintained copy that could drift from what the
       chart actually shows.
 
-      TRADE-OFF, STATED: this strategy's copy of these three files is a frozen snapshot as of
-      its own last build. A later fix or tuning change to Finch-Lite's own copy does not reach
-      this strategy until it is rebuilt.
+      TRADE-OFF, STATED: this strategy's copy of these files is a frozen snapshot as of its own
+      last build. A later fix or tuning change to Finch-Lite's own copy does not reach this
+      strategy until it is rebuilt.
 
       Deliberately NOT included: OrderBlockEngine.cs (order blocks were not part of this
       strategy's own ask), StructureBoxOverlay.cs/RestingOrderOverlay.cs/DomLadderOverlay.cs/
-      BigTradeOverlay.cs/DeltaPanelOverlay.cs (paint-only, a Strategy never draws), and
-      FinchLiteIndicator.cs itself (the platform Indicator/Timer/paint scaffolding — this
+      BigTradeOverlay.cs/DeltaPanelOverlay.cs/PocOverlay.cs (paint-only, a Strategy never draws),
+      and FinchLiteIndicator.cs itself (the platform Indicator/Timer/paint scaffolding — this
       strategy is its own Quantower Strategy with its own lifecycle, not a second indicator).
+
+      PocEngine.cs added 2026-09-25 ("can we add trading with the poc in the strategy as well") —
+      same source-sharing reasoning, so this strategy's current-move/15m POC values are computed
+      by the EXACT SAME engine the indicator's own POC lines are drawn from.
     -->
     <Compile Include="..\..\..\Indicators\Finch-Lite\src\Finch.Lite.Indicator\Bar.cs" />
     <Compile Include="..\..\..\Indicators\Finch-Lite\src\Finch.Lite.Indicator\RestingOrderEngine.cs" />
     <Compile Include="..\..\..\Indicators\Finch-Lite\src\Finch.Lite.Indicator\FairValueGapEngine.cs" />
+    <Compile Include="..\..\..\Indicators\Finch-Lite\src\Finch.Lite.Indicator\PocEngine.cs" />
   </ItemGroup>
 </Project>

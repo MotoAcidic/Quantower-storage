@@ -1701,6 +1701,50 @@ live chart — restart Quantower and confirm large orders/absorption tiers/unfin
 still look and behave exactly as before this refactor (highest-risk step of this change, since
 it touches the most-iterated code in the project).
 
+**FEATURE 7 (2026-09-25) — point of control (POC) of the current move, plus a 15-minute
+higher-timeframe POC.** "what would be very nice to have in this indicator is the poc of the
+current move and a higher time frame poc of like the 15min." Four design questions resolved via
+`AskUserQuestion` before building (guessing wrong on "current move" risked a wasted rebuild, same
+reasoning as Features 5+6):
+- **"Current move"** = the leg since the most recently CONFIRMED swing pivot (high or low), using
+  the exact same fractal pivot-confirmation rule `OrderBlockEngine` already uses — every new
+  swing resets the accumulator, so the POC always describes "since the market last turned," not a
+  fixed lookback.
+- **15m POC** = the same swing-leg concept, but detected on a DEDICATED 15-minute series
+  (independent of the existing 15m order blocks — disabling one must not starve the other of
+  history), giving a broader, more significant level than the chart-timeframe one.
+- **Volume source** = tick-by-tick, reusing the exact same live trade stream already driving the
+  delta panel and big-trade markers — POC just doesn't care which side was the aggressor, unlike
+  delta.
+- **Display** = a single dashed reference line per POC, labeled with its price — deliberately NOT
+  a full profile histogram (that was offered as an option and declined).
+
+**New files**: `PocEngine.cs` (one instance per timeframe; owns its own swing-pivot detection and
+a `Dictionary<double, double>` volume-by-price accumulator that clears on every new confirmed
+swing) and `PocOverlay.cs` (dashed line + label, same coordinate-conversion/label-collision
+helpers every other overlay in this file already uses). **Stated design limitation, not an
+oversight**: a swing pivot is only CONFIRMED `PocSwingPivotLookback` bars after it actually
+happened, and Finch-Lite has no historical tick backfill (see Feature 4's own delta-panel doc
+comment above) — so the profile starts accumulating live from the CONFIRMATION moment forward,
+not retroactively from the pivot bar's own timestamp.
+
+New `InputParameter`s (indices 80-85): `PocCurrentMoveEnabled`/`Poc15mEnabled` (both default on),
+`PocSwingPivotLookback` (default 3, shared by both engines), `PocCurrentMoveColor`/`Poc15mColor`
+(gold / light-blue defaults), `PocLookbackDays` (default 5 — only needs enough 15m history to
+locate the current swing, since the profile itself never backfills volume regardless of how far
+back this reaches). The current-move engine reads the CHART's own bars via its OWN cursor
+(`pocChartBarsSeen`), deliberately NOT sharing `chartBarsSeen` with the IFVG engine — that cursor
+stops advancing entirely whenever Inverse FVG is switched off, which must not also silently stall
+POC.
+
+**Verified 2026-09-25**: `dotnet build ... -c Release -p:QuantowerSdkPath="...v1.147.4\bin\..."`
+— 0 errors, 27 warnings (all pre-existing nullable-annotation-context style warnings, none new
+from this feature). Deployed to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\
+FinchLiteIndicator.dll`, `sha256sum` confirms the deployed DLL matches. Not yet confirmed on a
+live chart — restart Quantower and confirm two dashed reference lines appear once a swing has
+confirmed on each timeframe, each labeled with its own price, each extending from its own move's
+start rather than the whole pane.
+
 ### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
 **Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show
 delta, DOM/resting orders, absorption, auto-drawn fib, and FRVP+AVP (higher/lower timeframe
@@ -2290,11 +2334,12 @@ nearest wins (`TryComputeTarget` — same `IsAhead`/min-distance/nearest-wins sh
 `directionAbsorptionScalpStrategy.TryComputeTarget`); falls back to a fixed
 `FallbackTargetTicks` R:R target if nothing qualifies ahead.
 
-**No tick classification needed**: unlike the indicator, absorption here comes purely from BOOK
-SIZE CHANGES between DOM polls inside `RestingOrderEngine` itself — this strategy has no
-`OnLast` subscription at all. It does keep a no-op `Symbol.NewLevel2` handler, for the same
-platform reason discovered in the indicator: without SOME `NewLevel2` subscriber, the platform
-stops maintaining live depth and the DOM pull returns an empty book.
+**No tick classification needed for absorption**: absorption comes purely from BOOK SIZE CHANGES
+between DOM polls inside `RestingOrderEngine` itself. It does keep a no-op `Symbol.NewLevel2`
+handler, for the same platform reason discovered in the indicator: without SOME `NewLevel2`
+subscriber, the platform stops maintaining live depth and the DOM pull returns an empty book.
+(An `OnLast` subscription WAS added later the same day — see "POC trading" below — but only to
+feed POC's own volume-by-price accumulator, not absorption.)
 
 Risk management block (`MaxDailyLoss`/`MaxDrawdown`/`MaxTradesPerSession`/
 `MinBarsBetweenEntries`/`RthOnly`+hours) and the `StrategyTag`/`Comment` position-isolation
@@ -2336,6 +2381,57 @@ that for them.
   Positions panel) all require the operator's own live session and have not been done. Given the
   no-dry-run design above, the FIRST confirmed signal on whatever account this is attached to
   places a real order — attach to sim/eval, not live, before enabling.
+
+#### POC trading, added 2026-09-25 ("can we add trading with the poc in the strategy as well")
+
+Compiles in `PocEngine.cs` by source too (same collision-avoidance reasoning), giving this
+strategy its own current-move and 15m POC values computed by the EXACT SAME engine the
+indicator's own POC lines are drawn from. Six more clarifying questions answered before writing
+any of this, since it added a genuinely new entry pathway with real-money implications:
+
+- **Target role (both entry pathways)**: current-move and 15m POC now join the candidate pool in
+  `TryComputeTarget` alongside opposing DOM/UA levels and IFVG zone edges — same
+  ahead-of-price/min-distance/nearest-wins selection, just two more candidates. `TryComputeTarget`
+  was refactored to take the trade's own `bool isLong` directly instead of a `RestingLevel`
+  anchor, specifically so both entry pathways below can share it.
+- **Entry role**: a brand-new, STANDALONE trigger (`CheckPocRejection`) — does NOT touch
+  `TryEnter`'s own DOM/absorption/IFVG logic at all.
+- **Direction**: a REJECTION away from the POC (POC acts as support/resistance), not a reversion
+  toward it.
+- **Detection**: bar-close confirmed (`TryPocRejection`) — a closed bar's high/low must touch or
+  pierce the POC, but its CLOSE must end up beyond `PocRejectionBufferTicks` on the origin side,
+  same close-based confirmation style as `OrderBlockEngine`/`FairValueGapEngine`.
+- **Eligible POCs**: either the current-move or the 15m POC independently qualifies —
+  current-move checked first, 15m second, first match wins.
+- **Gating**: fully SHARED with the DOM/absorption pathway — same cooldown
+  (`MinBarsBetweenEntries`), same daily-loss/drawdown/trade-count limits, same `StrategyTag`, same
+  one-position-at-a-time check. `CheckPocRejection` runs once per poll, after `TryEnter` — whoever
+  qualifies first wins the poll.
+
+**New machinery this required**: an `OnLast` subscription (this strategy previously had none —
+absorption/IFVG needed only DOM polls and closed bars) queuing raw `(Price, Size)` prints, drained
+into both `PocEngine`s on the poll timer, same §10 "no work on the market-data thread beyond an
+enqueue" discipline as the indicator. A dedicated 15-minute `HistoricalData` (`PocLookbackDays`,
+default 5) feeds the higher-timeframe engine, independent of `hdm` (the strategy's own chart
+period). Stop for a POC-rejection trade sits beyond the rejection bar's OWN extreme (the wick that
+got rejected) ± `StopBufferTicks`; target/fallback distance is measured from the rejection bar's
+own CLOSE, not the POC price itself, since the bar has by definition already closed away from the
+POC by the rejection buffer.
+
+**A real bug caught and fixed during writing, before the first build**: an early draft of
+`PlacePocEntry` called `RestingOrderEngine.Reconcile(...)` a SECOND time (with `null` bids/asks)
+just to get "the levels" for its own `TryComputeTarget` call. `Reconcile` is STATEFUL — it mutates
+the engine's own tracking dictionaries as a side effect every time it runs, including treating a
+`null` book as "every tracked level just went missing this poll." Calling it again inside the same
+poll would have corrupted the shared `restingOrderEngine`'s live state out from under the
+DOM/absorption pathway. Fixed by threading the SAME `levels`/`ifvgZones` this poll's `RunPoll`
+already computed through to `CheckPocRejection`/`PlacePocEntry` instead of recomputing anything.
+
+**Verified 2026-09-25**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c
+Release` — 0 errors, 13 warnings (all pre-existing nullable-annotation-context style, none new
+from this change). Deployed folder still holds only this strategy's own DLL/PDB/deps.json.
+**NOT YET verified live** — same live-session caveat as above applies to this new pathway too,
+and now doubly so: it is a SEPARATE, never-yet-run trigger from the original DOM/absorption one.
 
 ---
 
