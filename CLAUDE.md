@@ -2733,8 +2733,48 @@ straight on from that testing session.
 
 **Verified 2026-09-28**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c
 Release` — 0 errors. Deployed folder still holds only this strategy's own DLL/PDB/deps.json.
-**NOT YET verified live** — none of these four changes have seen a live signal yet; watch closely,
-same as everything else in this strategy's history.
+
+#### TWO MORE FIXES, 2026-09-28 (same day) — benign breakeven race, and a real R:R asymmetry from swing stops
+
+Both found on the first live signals after the four changes above — the swing-based stop change
+specifically surfaced a real, if quiet, design mismatch.
+
+**Breakeven "Time out" on a trade that already closed**: "i got this error on break even stop
+failed after it got out of the trade." `CheckBreakeven` snapshots the position/stop BEFORE the
+network round-trip to `Core.Instance.ModifyOrder` — if the target fills (or the position otherwise
+closes) in that gap, the order being modified may already be gone, surfacing as a generic "Time
+out" rather than a clean "not found." The trade itself closed correctly through its own existing
+bracket regardless. Fixed by checking `MyPositions()` again on a modify failure: if the position is
+already flat, log it as an informational "skipped" note, not an Error — only log loudly when a
+position still genuinely exists, since THAT would mean something real went wrong.
+
+**Breakeven capping winners far below losers**: "it also seems like the rr for trades are way
+negative because it will loose like $30 with no issue but once it gets into a trade a little bit
+it moves the breakeven and only makes like 2-10$." Checked the actual numbers on a live trade:
+`stop=30601.75 target=30565`, filled 30572.25 — a **118-tick stop**, since swing-based stops (from
+the same-day change above) can now be far wider than the old level/bar-extreme calculation ever
+was. `BreakevenTriggerTicks` was still a fixed 20 — meaning breakeven fired after recovering only
+~17% of that trade's own risk, capping the winner at a 3-tick buffer while a loser would still run
+the full 118 ticks. A fixed tick trigger made sense when stops were consistently narrow; it stopped
+making sense once stops became this variable trade to trade.
+
+**Fix**: `BreakevenTriggerTicks` replaced with `BreakevenTriggerRiskPercent` (default 50) — the
+trigger now scales to a PERCENTAGE of the trade's own actual risk, not a fixed tick count. The risk
+distance itself (`pendingRiskDistance`, in price units) is captured fresh in
+`PlaceProtectiveOrders` from the REAL fill price and the final, re-validated stop — the same
+values the ninth protective-order fix already made accurate — so a wide-stop trade needs
+proportionally more profit before breakeven kicks in, and a narrow-stop trade needs proportionally
+less. `BreakevenBufferTicks` (covers round-turn fees) stays a fixed tick amount, unchanged — fees
+don't scale with stop distance the way risk does.
+
+**Verified 2026-09-28 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live.**
+
+**Context from the operator, worth keeping in mind for future work on this file**: "this strategy
+is the start of the orderflow trading strategy i want in the end" — the DOM/absorption/IFVG/POC
+features built so far are steps toward a larger order-flow strategy, not the final design. Treat
+future feature requests here as incremental progress toward that destination rather than isolated
+asks.
 
 ---
 

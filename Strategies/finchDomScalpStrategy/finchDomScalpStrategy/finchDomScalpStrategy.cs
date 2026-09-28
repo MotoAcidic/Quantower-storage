@@ -272,11 +272,26 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("Fallback target if nothing qualifies ahead (ticks)", 22, 1, 100000, 1, 0)]
     public int FallbackTargetTicks { get; set; }
 
-    /// <summary>Open profit (in ticks) required before the stop moves to breakeven+buffer — a
-    /// ONE-TIME move, not a continuous trail (see the class doc comment's "BREAKEVEN" section).
-    /// 0 disables the feature entirely.</summary>
-    [InputParameter("Breakeven: trigger profit (ticks, 0=off)", 23, 0, 100000, 1, 0)]
-    public int BreakevenTriggerTicks { get; set; }
+    /// <summary>
+    /// Open profit required before the stop moves to breakeven+buffer, as a PERCENTAGE of the
+    /// trade's own risk (its stop's own distance from the actual fill) — a ONE-TIME move, not a
+    /// continuous trail (see the class doc comment's "BREAKEVEN" section). 0 disables the feature
+    /// entirely.
+    ///
+    /// CHANGED 2026-09-28 from a fixed tick count ("i got this error on break even stop failed
+    /// after it got out of the trade... the rr for trades are way negative because it will loose
+    /// like $30 with no issue but once it gets into a trade a little bit it moves the breakeven
+    /// and only makes like 2-10$"): once stops became swing-based (often far wider than the old
+    /// level/bar-extreme calculation — one live trade had a 118-tick stop), a FIXED tick trigger
+    /// became trivially easy to clear long before a trade had earned back anything close to its
+    /// own risk, capping every winner at a tiny scratch while losers still ran the full, now much
+    /// wider stop. 50 (the default) means "once halfway back to even relative to risk," a standard
+    /// trade-management convention; the actual risk distance is captured fresh per trade in
+    /// `PlaceProtectiveOrders`, from the REAL fill price, not whatever was estimated at signal
+    /// time.
+    /// </summary>
+    [InputParameter("Breakeven: trigger (% of trade's own risk, 0=off)", 23, 0, 500, 1, 0)]
+    public int BreakevenTriggerRiskPercent { get; set; }
 
     /// <summary>How far beyond entry (in the trade's own favor) the stop moves to once triggered
     /// — covers round-turn fees/commission rather than landing exactly at entry.</summary>
@@ -455,6 +470,13 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// not the same unreliable immediate lookup.</summary>
     private bool protectiveOrdersPlaced;
 
+    /// <summary>The current trade's own risk (in PRICE units, not ticks) — the final,
+    /// fill-price-re-validated stop's own distance from the actual fill. Captured once in
+    /// <see cref="PlaceProtectiveOrders"/>, used by <see cref="CheckBreakeven"/> to scale its
+    /// trigger to THIS trade's own risk rather than a fixed tick count (see
+    /// <see cref="BreakevenTriggerRiskPercent"/>'s own doc comment for why).</summary>
+    private double pendingRiskDistance;
+
     private bool breakevenMoved;
 
     private double dailyPnl;
@@ -491,7 +513,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.MinTargetDistanceTicks = 10;
         this.FallbackTargetTicks = 40;
 
-        this.BreakevenTriggerTicks = 20;
+        this.BreakevenTriggerRiskPercent = 50;
         this.BreakevenBufferTicks = 3;
         this.MinStopDistanceTicks = 20;
 
@@ -546,6 +568,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         this.pendingStopPrice = 0;
         this.pendingTargetPrice = 0;
+        this.pendingRiskDistance = 0;
         this.protectiveOrdersPlaced = false;
         this.breakevenMoved = false;
         this.resolvedSymbolId = null;
@@ -1427,6 +1450,11 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             ? this.EnforceMinTargetDistance(this.pendingTargetPrice, position.OpenPrice, isLong, tickSize)
             : this.pendingTargetPrice;
 
+        // Captured here, not at signal time — this is the trade's own REAL risk, used by
+        // CheckBreakeven to scale its trigger instead of a fixed tick count (see
+        // BreakevenTriggerRiskPercent's own doc comment).
+        this.pendingRiskDistance = Math.Abs(stopPrice - position.OpenPrice);
+
         var stopResult = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
         {
             Account = this.CurrentAccount,
@@ -1488,20 +1516,25 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// </summary>
     private void CheckBreakeven()
     {
-        if (this.breakevenMoved || this.BreakevenTriggerTicks <= 0) return;
+        if (this.breakevenMoved || this.BreakevenTriggerRiskPercent <= 0) return;
         if (!this.protectiveOrdersPlaced) return;
 
         var positions = this.MyPositions();
         if (positions.Length == 0) return;
 
         var position = positions[0]; // one position at a time, by design
-        if (position.GrossPnLTicks < this.BreakevenTriggerTicks) return;
+
+        var tickSize = this.CurrentSymbol.TickSize;
+        if (tickSize <= 0 || this.pendingRiskDistance <= 0) return;
+
+        // Scaled to THIS trade's own risk, not a fixed tick count — see
+        // BreakevenTriggerRiskPercent's own doc comment for why a fixed count stopped making
+        // sense once stops became swing-based (and therefore much more variable trade to trade).
+        var requiredProfitTicks = (this.pendingRiskDistance / tickSize) * (this.BreakevenTriggerRiskPercent / 100.0);
+        if (position.GrossPnLTicks < requiredProfitTicks) return;
 
         var stopOrder = this.FindProtectiveStopOrder();
         if (stopOrder is null) return; // not found yet (or already filled/cancelled) — try again next poll
-
-        var tickSize = this.CurrentSymbol.TickSize;
-        if (tickSize <= 0) return;
 
         var breakevenPrice = position.Side == Side.Buy
             ? position.OpenPrice + (this.BreakevenBufferTicks * tickSize)
@@ -1512,7 +1545,20 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         if (result.Status == TradingOperationResultStatus.Failure)
         {
-            this.Log($"[Risk] breakeven stop move failed: {result.Message}", StrategyLoggingLevel.Error);
+            // FOUND 2026-09-28 ("i got this error on break even stop failed after it got out of
+            // the trade") — a benign race, not a real failure: the position/stop snapshot above is
+            // taken BEFORE the network round-trip to modify the order, and if the target fills (or
+            // the position otherwise closes) in the gap between that snapshot and this call
+            // actually reaching the broker, the order being modified may already be gone —
+            // reported here as a generic "Time out" rather than a clean "order not found". The
+            // trade itself still closed correctly through its own existing bracket; only logged
+            // loudly when a position still genuinely exists, since THAT would mean something
+            // actually went wrong rather than just losing a race with the trade finishing first.
+            if (this.MyPositions().Length == 0)
+                this.Log($"[Risk] breakeven stop move skipped: position closed first ({result.Message}).", StrategyLoggingLevel.Trading);
+            else
+                this.Log($"[Risk] breakeven stop move failed: {result.Message}", StrategyLoggingLevel.Error);
+
             return;
         }
 
