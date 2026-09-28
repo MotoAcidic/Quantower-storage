@@ -2797,6 +2797,88 @@ features built so far are steps toward a larger order-flow strategy, not the fin
 future feature requests here as incremental progress toward that destination rather than isolated
 asks.
 
+#### STOP BUFFER WIDENED, 2026-09-28 — from indicator feedback
+
+After adding the 5m POC to the indicator too (see Finch-Lite's own Catalog entry), the operator
+liked the result but flagged the strategy's own stop placement: "have it a few ticks below the
+swing low incase it comes and bounces off that point again." `StopBufferTicks` (used by
+`ComputeSwingStop` to sit beyond the swing reference) defaulted to 2 — barely any room for an
+ordinary wick retest of the exact swing point. Raised the default to 8; renamed the InputParameter
+label from "Stop buffer beyond level" to "Stop buffer beyond swing/level" to reflect its dual role
+since the swing-stop change. **Note**: changing a code default does NOT retroactively update an
+already-running instance's saved settings — told the operator to bump it directly in the settings
+panel for immediate effect, this default only matters for a future fresh attach.
+
+#### TENTH, ELEVENTH, TWELFTH ISSUES, 2026-09-28 (same day) — a naked position and a cooldown gap
+
+All three found from ONE live sequence the operator flagged: "its like also working against it
+self going into stacked orders it looks like," then, after digging into the log together: "this
+time it worked out but... after it hit tp it opened another order instantly with no stop loss."
+The operator stopped the strategy while this was investigated.
+
+**What the log actually showed**: a short closed via target at 15:36:25.77. About 200ms later, a
+BRAND NEW short entry fired and filled at 30,510.75. Its protective stop request (Buy Stop @
+30,503.00) was **refused outright by Rithmic** — only the target got placed. That position ran
+with a target and ZERO stop-loss until it closed.
+
+**Tenth — wrong-side swing stop**: 30,503.00 sits BELOW the short's own entry (30,510.75), which
+is backwards for a stop meant to protect a short (it needs to sit ABOVE entry). Root cause:
+`SwingTracker.LastSwingHigh` only updates when a NEW swing high actually confirms — after a strong
+one-directional rally with no pullback long enough to confirm a fresh pivot, the tracked "swing
+high" was stale, already sitting below where price had since rallied to. Using it produced a stop
+on the wrong side of the market entirely, which the broker correctly refused.
+
+**Fix**: `ComputeSwingStop` now takes the trade's own current/entry price and validates the
+computed stop is actually on the CORRECT side of it before returning it — a stale/wrong-side swing
+is rejected outright (returns null), falling back to the caller's own level/rejection-bar
+calculation instead, which is correct-side by construction.
+
+**Eleventh — no safety net when a stop is refused for ANY reason**: even with the tenth fix,
+nothing guarantees some OTHER refusal reason (an exchange price-band check, for instance) could
+never happen again. `PlaceProtectiveOrders` now treats "the stop leg failed" as reason to close
+the position IMMEDIATELY (`position.Close()`) rather than continue on to place the target and
+leave the position running unprotected — this strategy has no dry-run gate and no human watching
+every signal, so a position with zero stop is never an acceptable state to leave running, for any
+reason.
+
+**Twelfth — the cooldown never measured time since a CLOSE, only since an entry**:
+`MinBarsBetweenEntries` only ever compared against `lastEntryBarIndex`, set when an entry was
+PLACED — never updated when a position CLOSED. A trade that rides for a while before hitting
+target can easily have already cleared that cooldown by the time it closes, leaving nothing to
+stop a fresh signal from firing the instant the position goes flat — exactly what the ~200ms gap
+in the log showed. **Fix**: `Core_PositionRemoved` now also resets `lastEntryBarIndex` to the
+current bar the moment a position closes, so a new entry needs `MinBarsBetweenEntries` bars from
+whichever happened more recently — the last entry OR the last close.
+
+**Verified 2026-09-28 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live** — given the eleventh
+fix specifically exists to catch failures this codebase hasn't fully anticipated, the NEXT live
+signal chain (entry → close → next signal) is the real test of whether the cooldown gap and the
+wrong-side-stop validation both hold up together.
+
+#### THIRTEENTH ISSUE, 2026-09-28 (same day) — breakeven buffer too thin to survive real slippage
+
+Operator, after the twelfth fix's very next live trade: "it just did an order that was so tight
+that i actually lost money because of fees when it moved the stop loss and the trade had such a
+small area it wasnt really worth it." Pulled the exact fill sequence from the log: entry (short)
+filled at 30,521.5; `CheckBreakeven` correctly triggered at 17.0 ticks profit (exactly 50% of the
+trade's own 34-tick risk, confirming `BreakevenTriggerRiskPercent` itself worked as designed) and
+moved the stop's trigger to 30,520.00. When price came back and the stop fired, being a
+STOP-MARKET order, it does NOT guarantee a fill at its own trigger price — the actual fill landed
+at **30,521.75**, seven ticks of adverse slippage that alone put the exit WORSE than the original
+entry, before fees were even counted.
+
+**This was not a bug in the breakeven logic itself** — `CheckBreakeven` computed and triggered
+correctly. The problem was `BreakevenBufferTicks` (3) having no real margin against ordinary
+stop-order slippage on a fast move, on top of the round-turn fees it was already meant to cover.
+**Fix**: widened the default to 15. A bigger buffer gives up more of the original risk before a
+trade counts as "locked in," but a thin one that gets erased by a single fast fill isn't actually
+protecting anything — this is a judgment call the operator can retune further from their own
+observation of typical slippage on this instrument/connection.
+
+**Verified 2026-09-28 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live.**
+
 ---
 
 ## Common Architecture Patterns

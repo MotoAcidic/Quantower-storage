@@ -214,6 +214,29 @@ namespace finchDomScalpStrategy;
 ///   over a softer confirmation) any long when that rolling sum is net negative, and any short
 ///   when it's net positive — applied via `PassesDeltaFilter` to every entry pathway, not just
 ///   the POC one that prompted it.
+///
+/// THREE MORE FIXES, still 2026-09-28, from ONE live sequence the operator caught in real time:
+/// a target hit, then ~200ms later a BRAND NEW entry fired whose stop got refused outright by
+/// Rithmic, leaving that position with a target and ZERO stop-loss until it closed on its own.
+/// - **Wrong-side swing stop**: the refused stop sat on the WRONG side of the trade's own entry —
+///   `SwingTracker.LastSwingHigh`/`LastSwingLow` only update on a NEWLY confirmed pivot, so after a
+///   strong one-directional run with no pullback long enough to confirm a fresh one, the tracked
+///   swing can be stale and already behind where price has since moved. `ComputeSwingStop` now
+///   takes the trade's own current/entry price and rejects (returns null, falling back to the
+///   caller's own correct-by-construction calculation) any computed stop that isn't actually on
+///   the right side of it.
+/// - **No safety net on a refused stop**: even with that fix, some OTHER refusal reason could
+///   still happen. `PlaceProtectiveOrders` now closes the position IMMEDIATELY if the stop leg
+///   fails for any reason at all, rather than continuing on to place the target and leave the
+///   position running unprotected — with no dry-run gate and no human watching every signal, a
+///   position with zero stop is never acceptable, full stop.
+/// - **Cooldown never reset on a CLOSE, only on an entry**: `MinBarsBetweenEntries` only ever
+///   measured bars since `lastEntryBarIndex` was set at ENTRY time — a trade that rides a while
+///   before hitting target can clear that cooldown long before it actually closes, leaving nothing
+///   to stop a fresh signal firing the instant the position goes flat (confirmed: ~200ms gap in
+///   the log). `Core_PositionRemoved` now also resets `lastEntryBarIndex` to the current bar on
+///   every close, so a new entry needs the full cooldown from whichever happened more recently —
+///   the last entry OR the last close.
 /// </summary>
 public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 {
@@ -263,7 +286,13 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
     // ---- exits ------------------------------------------------------------------------------
 
-    [InputParameter("Stop buffer beyond level (ticks)", 20, 0, 1000, 1, 0)]
+    /// <summary>How far beyond the stop reference — the recent swing low/high since 2026-09-28
+    /// (see <see cref="ComputeSwingStop"/>), or the DOM level/rejection-bar extreme as a fallback
+    /// before any swing has confirmed — the stop actually sits. FOUND 2026-09-28 ("have it a few
+    /// ticks below the swing low incase it comes and bounces off that point again"): the original
+    /// default (2 ticks) left almost no room for an ordinary wick retest of the exact swing point
+    /// to avoid clipping the stop before price actually reverses.</summary>
+    [InputParameter("Stop buffer beyond swing/level (ticks)", 20, 0, 1000, 1, 0)]
     public int StopBufferTicks { get; set; }
 
     [InputParameter("Minimum target distance (ticks)", 21, 1, 100000, 1, 0)]
@@ -271,6 +300,16 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
     [InputParameter("Fallback target if nothing qualifies ahead (ticks)", 22, 1, 100000, 1, 0)]
     public int FallbackTargetTicks { get; set; }
+
+    /// <summary>FOUND 2026-09-28 ("what is this risk to reward here this is crazy") — a live trade
+    /// risked 84 points to make 15.25 (~1:5.5 AGAINST the trade) after a stale swing-low reference
+    /// survived `ComputeSwingStop`'s own "correct side" check by being technically valid but
+    /// absurdly far away. Checked as the LAST gate before any entry, in both pathways, via
+    /// `PassesRiskRewardFilter`: the reward must be worth at least this percentage of the risk
+    /// being taken, regardless of what produced either number. 100 = require at least 1:1. 0
+    /// disables the check entirely.</summary>
+    [InputParameter("Minimum reward:risk (%, 0=off)", 25, 0, 100000, 1, 0)]
+    public int MinRewardRiskPercent { get; set; }
 
     /// <summary>
     /// Open profit required before the stop moves to breakeven+buffer, as a PERCENTAGE of the
@@ -293,8 +332,22 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("Breakeven: trigger (% of trade's own risk, 0=off)", 23, 0, 500, 1, 0)]
     public int BreakevenTriggerRiskPercent { get; set; }
 
-    /// <summary>How far beyond entry (in the trade's own favor) the stop moves to once triggered
-    /// — covers round-turn fees/commission rather than landing exactly at entry.</summary>
+    /// <summary>
+    /// How far beyond entry (in the trade's own favor) the stop moves to once triggered — meant to
+    /// cover round-turn fees/commission rather than landing exactly at entry.
+    ///
+    /// WIDENED 2026-09-28 from an original 3 ("it just did an order that was so tight that i
+    /// actually lost money because of fees when it moved the stop loss"): a live trade's own
+    /// numbers showed why 3 wasn't enough — the breakeven stop triggered at 30,520.00, but being a
+    /// STOP-MARKET order, it doesn't guarantee a fill AT that trigger; the actual fill landed at
+    /// 30,521.75, SEVEN ticks of adverse slippage that alone wiped out the entire buffer and left
+    /// the trade WORSE than its own entry price (30,521.5) before fees were even counted. This
+    /// isn't a bug in the breakeven math — `CheckBreakeven` triggered and moved the stop exactly as
+    /// designed — it's that a 3-tick buffer has no real margin against ordinary stop-order slippage
+    /// on a fast move, on top of the fees it was already meant to cover. A bigger buffer gives up
+    /// more of the original risk before it counts as "locked in," but a thin one that gets erased
+    /// by slippage the first time price moves quickly isn't actually protecting anything.
+    /// </summary>
     [InputParameter("Breakeven: buffer beyond entry (ticks)", 24, 0, 1000, 1, 0)]
     public int BreakevenBufferTicks { get; set; }
 
@@ -509,12 +562,13 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.UnfinishedDistanceTicks = 8;
         this.IfvgProximityTicks = 5;
 
-        this.StopBufferTicks = 2;
+        this.StopBufferTicks = 8;
         this.MinTargetDistanceTicks = 10;
         this.FallbackTargetTicks = 40;
+        this.MinRewardRiskPercent = 100;
 
         this.BreakevenTriggerRiskPercent = 50;
-        this.BreakevenBufferTicks = 3;
+        this.BreakevenBufferTicks = 15;
         this.MinStopDistanceTicks = 20;
 
         this.PocCurrentMoveEnabled = true;
@@ -1077,7 +1131,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             // "stop losses should be places at recent swing low for longs and recent swing high
             // for shorts" (2026-09-27) — falls back to the old level-relative calculation only if
             // no swing has confirmed yet this run (early-session edge case).
-            var stopPrice = this.ComputeSwingStop(level.IsBid, tickSize)
+            var stopPrice = this.ComputeSwingStop(level.IsBid, price, tickSize)
                 ?? (level.IsBid
                     ? level.Price - (this.StopBufferTicks * tickSize)
                     : level.Price + (this.StopBufferTicks * tickSize));
@@ -1094,6 +1148,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
             if (!hasTarget)
                 targetSource = "fallback R:R";
+
+            if (!this.PassesRiskRewardFilter(price, stopPrice, targetPrice)) continue;
 
             var anchorDescription =
                 $"{(level.IsBid ? "BID" : "ASK")} {level.Price:0.####} absorbed={level.Absorbed:N0} "
@@ -1238,16 +1294,33 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         return true;
     }
 
-    /// <summary>See <see cref="SwingTracker"/>'s own class doc comment for why stop placement
-    /// uses a dedicated, always-running tracker rather than any POC engine's internal swing
-    /// state. Null (no swing confirmed yet this run) lets the caller fall back to its own
-    /// previous stop calculation.</summary>
-    private double? ComputeSwingStop(bool isLong, double tickSize)
+    /// <summary>
+    /// See <see cref="SwingTracker"/>'s own class doc comment for why stop placement uses a
+    /// dedicated, always-running tracker rather than any POC engine's internal swing state. Null
+    /// (no swing confirmed yet this run, OR the confirmed swing is on the WRONG side of price —
+    /// see below) lets the caller fall back to its own previous stop calculation.
+    ///
+    /// FOUND 2026-09-28 ("it opened another order instantly with no stop loss"): a swing high/low
+    /// only updates when a NEW pivot actually confirms. After a strong one-directional run with no
+    /// pullback long enough to confirm a fresh pivot, the tracked swing can be STALE — already on
+    /// the wrong side of current price entirely (a live example: a short's own "swing high"
+    /// reference sat BELOW its entry after price had already rallied straight through it with no
+    /// pullback). A stop on the wrong side of price is nonsensical, and Rithmic refused it outright
+    /// — leaving that position with NO protective stop until `PlaceProtectiveOrders`'s own new
+    /// close-on-failure safety net (see its doc comment) caught it. Now validated here directly:
+    /// <paramref name="referencePrice"/> is the trade's own current/entry price, and a computed
+    /// stop that isn't actually on the correct side of it is rejected rather than sent to the
+    /// broker at all.
+    /// </summary>
+    private double? ComputeSwingStop(bool isLong, double referencePrice, double tickSize)
     {
         var swing = isLong ? this.swingTracker?.LastSwingLow : this.swingTracker?.LastSwingHigh;
         if (swing is not { } s) return null;
 
-        return isLong ? s - (this.StopBufferTicks * tickSize) : s + (this.StopBufferTicks * tickSize);
+        var stop = isLong ? s - (this.StopBufferTicks * tickSize) : s + (this.StopBufferTicks * tickSize);
+        var isCorrectSide = isLong ? stop < referencePrice : stop > referencePrice;
+
+        return isCorrectSide ? stop : null;
     }
 
     /// <summary>
@@ -1320,6 +1393,30 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         return isLong ? referencePrice - minDistance : referencePrice + minDistance;
     }
 
+    /// <summary>
+    /// FOUND 2026-09-28 (operator, reading a live signal: "what is this risk to reward here this
+    /// is crazy") — a live trade risked 84 points to make 15.25 (roughly 1:5.5 AGAINST the trade).
+    /// `ComputeSwingStop`'s own "correct side" validation (added the same day for a related bug)
+    /// didn't catch this one: after a strong one-directional rally with no pullback long enough to
+    /// confirm a fresh swing low, the tracked swing was stale — technically still on the correct
+    /// side of price, just absurdly far from it. Rather than guess at an arbitrary maximum stop
+    /// distance (which would also reject a wide-but-PROPORTIONATE stop, like an earlier 118-tick
+    /// one that had a comfortable ~2.9:1 reward on top of it and was never a problem), this checks
+    /// the actual ECONOMICS of the trade directly: the reward must be worth at least
+    /// <see cref="MinRewardRiskPercent"/> of the risk being taken, regardless of what produced
+    /// either number. Applied as the LAST check before any entry, in both pathways.
+    /// </summary>
+    private bool PassesRiskRewardFilter(double referencePrice, double stopPrice, double targetPrice)
+    {
+        if (this.MinRewardRiskPercent <= 0) return true;
+
+        var risk = Math.Abs(referencePrice - stopPrice);
+        if (risk <= 0) return true; // shouldn't happen; nothing meaningful to compare against
+
+        var reward = Math.Abs(targetPrice - referencePrice);
+        return reward / risk >= this.MinRewardRiskPercent / 100.0;
+    }
+
     private void PlacePocEntry(
         Side side, Bar rejectionBar, double poc, double tickSize, string pocLabel,
         IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
@@ -1330,7 +1427,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         // "stop losses should be places at recent swing low for longs and recent swing high for
         // shorts" (2026-09-27) — falls back to the rejection bar's own extreme only if no swing
         // has confirmed yet this run.
-        var stopPrice = this.ComputeSwingStop(isLong, tickSize)
+        var stopPrice = this.ComputeSwingStop(isLong, rejectionBar.Close, tickSize)
             ?? (side == Side.Sell
                 ? rejectionBar.High + (this.StopBufferTicks * tickSize)
                 : rejectionBar.Low - (this.StopBufferTicks * tickSize));
@@ -1358,6 +1455,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         if (!hasTarget)
             targetSource = "fallback R:R";
+
+        if (!this.PassesRiskRewardFilter(referencePrice, stopPrice, targetPrice)) return;
 
         var anchorDescription = $"{pocLabel} POC {poc:0.####} rejection";
 
@@ -1467,7 +1566,26 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         });
 
         if (stopResult.Status == TradingOperationResultStatus.Failure)
-            this.Log($"[Order] protective stop failed: {stopResult.Message}", StrategyLoggingLevel.Error);
+        {
+            // FOUND 2026-09-28 ("it opened another order instantly with no stop loss") — a live
+            // position rode with a target but ZERO protective stop after the stop leg got refused
+            // outright (the wrong-side-swing bug `ComputeSwingStop` now guards against, but this
+            // net stays regardless — a refusal could come from elsewhere too, e.g. an exchange
+            // price-band check). This strategy has no dry-run gate and no human watching every
+            // signal; a position with no stop at all is not an acceptable state to leave running
+            // under any circumstance. If the stop cannot be established, the position is closed
+            // immediately instead — no target either, since there is nothing left to protect.
+            this.Log(
+                $"[Order] protective stop failed: {stopResult.Message}. Closing position "
+                + "immediately — a trade must never run with no stop at all.",
+                StrategyLoggingLevel.Error);
+
+            var closeResult = position.Close();
+            if (closeResult.Status != TradingOperationResultStatus.Success)
+                this.Log($"[Order] failed to close unprotected position: {closeResult.Message}", StrategyLoggingLevel.Error);
+
+            return;
+        }
 
         var targetResult = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
         {
@@ -1722,6 +1840,17 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             this.waitClosePositions = false;
             this.protectiveOrdersPlaced = false;
             this.breakevenMoved = false;
+
+            // FOUND 2026-09-28 ("it opened another order instantly with no stop loss" / "going
+            // into stacked orders"): MinBarsBetweenEntries only ever measured bars since the last
+            // ENTRY was placed, never bars since the last position CLOSED. A trade that rode for a
+            // while before hitting its target could easily have already cleared that cooldown by
+            // the time it closed, leaving nothing to stop a brand-new signal from firing the
+            // instant the position went flat — confirmed live: a target fill and the next entry
+            // were ~200ms apart. Resetting the SAME cooldown clock here too means a fresh signal
+            // now needs MinBarsBetweenEntries bars from whichever happened more recently — the
+            // last entry OR the last close.
+            this.lastEntryBarIndex = this.barCounter;
 
             var equity = this.totalRealizedPnl;
             if (equity > this.peakEquity) this.peakEquity = equity;
