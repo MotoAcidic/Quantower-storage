@@ -76,6 +76,117 @@ namespace finchDomScalpStrategy;
 /// mean potentially firing a REAL order off stale price action the instant the strategy starts,
 /// which given this strategy's own no-dry-run design would be considerably worse than a redraw
 /// bug. It only starts evaluating once a bar closes live, after that first catch-up.
+///
+/// SEPARATE STOP/TARGET ORDERS, added 2026-09-27 — the first live fill on a real Rithmic account
+/// exposed a real bug: the entry order used to embed its stop/target as a single
+/// `SlTpHolder.CreateSL/CreateTP(price, PriceMeasurement.Absolute)` bracket, and Quantower's own
+/// Serilog output showed that bracket's PRICE getting silently reinterpreted as a TICK-COUNT
+/// OFFSET from entry (multiplied by tick size, then applied as a distance from entry) rather than
+/// used as the literal absolute price requested — confirmed by the math (both legs landed almost
+/// exactly at entry ± (requestedPrice × tickSize), not at the requested price itself). The
+/// take-profit leg came out ~7700 points away and was instantly refused by the exchange; the
+/// stop-loss leg came out ~7700 points the other way and sat there uselessly, LEAVING THE POSITION
+/// COMPLETELY UNPROTECTED. `PriceMeasurement.Absolute` was confirmed correct via SDK reflection
+/// (the only other value is `Offset`), so this is a bug in how this connection turns an embedded
+/// bracket into child orders, not a mistake in the price math feeding it.
+///
+/// Fix: the entry order now carries NO embedded bracket at all. Once `Core_PositionAdded` confirms
+/// the position is open, `PlaceProtectiveOrders` places the stop and target as TWO SEPARATE,
+/// EXPLICIT orders — a Stop order using `TriggerPrice` and a Limit order using `Price`, each
+/// resolved via their own `OrderTypeBehavior.Stop`/`.Limit` order type, sidestepping whatever in
+/// the embedded-bracket path was reinterpreting the value. Both legs carry the SAME `StrategyTag`
+/// comment as the entry — this is what lets the EXISTING `Core_PositionRemoved` cleanup correctly
+/// cancel whichever leg didn't fill once the position closes (no broker-side OCO is used; this
+/// strategy provides that itself by cancelling `MyOrders()` the moment the position count reaches
+/// zero). The platform's own auto-generated bracket children from the OLD approach came back with
+/// an EMPTY `Comment`, which is exactly why the leftover mispriced stop from that first live trade
+/// was never picked up by this same cleanup logic and had to be cancelled by hand.
+///
+/// A SECOND, independent bug found in that same incident: Quantower's own log showed five
+/// "Exception has been thrown by the target of an invocation" errors, exactly correlated with
+/// that one order's state-change broadcasts and nowhere else all day — one of this strategy's own
+/// `Core_*` event handlers was throwing, almost certainly from dereferencing a null event argument
+/// with no null-check (every handler now null-checks its argument first). Quantower's own log
+/// doesn't retain the inner exception detail, so the exact original line is unconfirmed, but left
+/// unfixed this risked `waitOpenPosition` getting stuck permanently true if the throw happened
+/// before that flag was cleared — silently blocking every future entry.
+///
+/// BREAKEVEN, added 2026-09-27 ("work on the logic for opening a take profit and stop loss and if
+/// its running good in profit to move the stop to inprofit to cover fees") — a ONE-TIME move, not
+/// a continuously ratcheting trail (the operator's own explicit choice via AskUserQuestion): once
+/// open profit reaches `BreakevenTriggerTicks`, `CheckBreakeven` (run every poll alongside
+/// `CheckRiskLimits`) modifies the protective stop order's own `TriggerPrice` in place — via
+/// `Core.Instance.ModifyOrder`, not a cancel/replace — to sit `BreakevenBufferTicks` beyond entry,
+/// then never touches it again for the rest of that trade.
+///
+/// A THIRD, much bigger bug found testing the fix above: the very next live signal still placed
+/// NO protective orders at all. Root cause (see `IsMine`'s own doc comment for the full account):
+/// this strategy's `CurrentSymbol` (a continuous selection, e.g. "MNQ") is a DIFFERENT OBJECT from
+/// the specific underlying contract ("MNQZ6") every actual Position/Order/Trade comes back tagged
+/// with, and NONE of Symbol/Position/Order/Account overload `==` (confirmed via SDK reflection) —
+/// so `obj.Symbol == this.CurrentSymbol` was ALWAYS false, silently breaking `MyPositions()`/
+/// `MyOrders()` (always empty), every `Core_*` handler's filter, risk limits, breakeven, AND PnL
+/// accumulation, all at once — not just the protective-order call. Fixed by never comparing Symbol
+/// object identity: the first position/order this strategy sees (matched on Account.Id +
+/// ConnectionId + the StrategyTag Comment alone) resolves and caches the actual contract's own
+/// Symbol.Id, and every later match compares that STRING instead.
+///
+/// A FOURTH issue, flagged directly by the operator from that same signal ("the stop it called was
+/// so small and short it didnt make sense"): the POC-rejection pathway's stop sits just beyond the
+/// REJECTION BAR's own wick, which can be an arbitrarily tiny distance from the actual fill price —
+/// a single bar's range says nothing about the instrument's real volatility. `MinStopDistanceTicks`
+/// (default 20) now floors BOTH entry pathways' computed stop to at least that many ticks from the
+/// current/reference price, widening it out when the naive calculation comes in tighter.
+///
+/// A FIFTH issue, also operator-flagged ("it seems as soon as i turn it on it enters a trade from
+/// the poc line which just sits there and bounces"): `TryPocRejection` alone never required an
+/// actual APPROACH to the POC — a market simply chopping right on top of a flat POC satisfies the
+/// touch-and-close-beyond-buffer pattern on nearly every bar. `HasGenuineApproach` now requires at
+/// least one of `PocApproachLookbackBars` bars BEFORE the rejection bar to have genuinely been
+/// `PocApproachDistanceTicks` away from the POC on the origin side, confirming price actually
+/// travelled from a distance rather than already sitting on the level; no prior bars available is
+/// treated as "cannot confirm" and skipped, not allowed through.
+///
+/// A SIXTH issue, same day: even the very next backlog-safe signal STILL placed no protective
+/// orders. Root cause: `isFirstDrain` (the guard meant to skip stale backlog bars) only ever gated
+/// the FIRST poll — the SECOND poll, typically ~250ms later and nowhere near enough time for a new
+/// bar to close, read `closedUpTo - 1` again and treated whatever bar was already sitting there at
+/// attach time as "the latest closed bar" regardless, firing off pre-existing price action almost
+/// instantly on every restart. Fixed with `pocRejectionCheckedUpTo`, an actual bar-index cursor:
+/// the first bar this run ever sees is marked as already-accounted-for and never itself eligible;
+/// only a STRICTLY LATER index — one that closes live, after this run started watching — is ever
+/// passed to `CheckPocRejection`.
+///
+/// A SEVENTH issue, found immediately after fixing the sixth: a signal fired correctly (minutes
+/// after attach, off a genuinely new bar) and STILL placed no protective orders, with zero trace
+/// in either log of `PlaceProtectiveOrders` even being attempted. Order/Trade/OrderHistory have
+/// shown the correct `Comment: FinchDomScalp` in EVERY single logged fill without exception — but
+/// there is no equivalent confirmation `Position.Comment` is ever actually populated on this
+/// connection, and `Core_PositionAdded`'s own gate depended on exactly that field. Fixed with
+/// `IsMyPosition`, which primarily matches by the ALREADY-resolved `Symbol.Id` (bootstrapped by an
+/// Order/Trade event well before any position event needs it) plus Account.Id — no Comment
+/// involved — falling back to Position's own Comment only if that resolution hasn't happened yet.
+/// A diagnostic log line now fires whenever `Core_PositionAdded` still doesn't match, so any
+/// further surprise is visible immediately instead of requiring another blind round-trip.
+///
+/// AN EIGHTH issue, found on the VERY NEXT live signal against the seventh fix above: the exact
+/// same duplicate-order storm reproduced — the "already placed" guard checked
+/// `protectiveStopOrder is not null`, but that field only ever got set by an immediate
+/// post-placement `GetOrderById` lookup that was failing essentially every time (see
+/// `protectiveOrdersPlaced`'s own doc comment for the full account) — so the guard never actually
+/// engaged, on either attempt. Replaced with a plain boolean set at the INSTANT placement is
+/// attempted, no lookup involved; anything needed later (breakeven) is now found on demand via
+/// `FindProtectiveStopOrder`, through the same Comment-based `MyOrders()` filter already proven
+/// reliable, rather than a cached reference from the lookup that never worked.
+///
+/// A NINTH issue, same incident, operator-flagged from the chart itself: a target realized only
+/// 9 ticks from the actual fill despite `MinTargetDistanceTicks` being 10. That floor is enforced
+/// when the candidate is CHOSEN (`TryComputeTarget`), against a signal-time reference price —
+/// not the price the market order fills at moments later. `PlaceProtectiveOrders` now
+/// re-validates both `pendingStopPrice`/`pendingTargetPrice` against `position.OpenPrice` (the
+/// REAL fill) right before submitting either order, via `EnforceMinStopDistance` and a new mirror
+/// `EnforceMinTargetDistance` — both widen outward if the realized distance from the actual fill
+/// would otherwise land under the configured minimum.
 /// </summary>
 public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 {
@@ -134,6 +245,27 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("Fallback target if nothing qualifies ahead (ticks)", 22, 1, 100000, 1, 0)]
     public int FallbackTargetTicks { get; set; }
 
+    /// <summary>Open profit (in ticks) required before the stop moves to breakeven+buffer — a
+    /// ONE-TIME move, not a continuous trail (see the class doc comment's "BREAKEVEN" section).
+    /// 0 disables the feature entirely.</summary>
+    [InputParameter("Breakeven: trigger profit (ticks, 0=off)", 23, 0, 100000, 1, 0)]
+    public int BreakevenTriggerTicks { get; set; }
+
+    /// <summary>How far beyond entry (in the trade's own favor) the stop moves to once triggered
+    /// — covers round-turn fees/commission rather than landing exactly at entry.</summary>
+    [InputParameter("Breakeven: buffer beyond entry (ticks)", 24, 0, 1000, 1, 0)]
+    public int BreakevenBufferTicks { get; set; }
+
+    /// <summary>FOUND 2026-09-27 ("the stop it called was so small and short it didnt make
+    /// sense") — the POC-rejection pathway's own stop sits just beyond the REJECTION BAR's own
+    /// wick, which can be an arbitrarily tiny distance from where the entry actually fills (a
+    /// single bar's range says nothing about the instrument's real volatility). A stop computed
+    /// closer than this many ticks from the current/reference price is widened out to exactly
+    /// this distance instead — applies to BOTH entry pathways' stop, not just the POC one, for the
+    /// same reason.</summary>
+    [InputParameter("Minimum stop distance (ticks)", 25, 1, 100000, 1, 0)]
+    public int MinStopDistanceTicks { get; set; }
+
     // ---- risk management — same shape as directionAbsorptionScalpStrategy's own -------------
 
     [InputParameter("Max daily loss ($, 0=off)", 30, 0, 100000, 50, 0)]
@@ -182,6 +314,21 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("POC: rejection close buffer (ticks)", 44, 0, 1000, 1, 0)]
     public int PocRejectionBufferTicks { get; set; }
 
+    /// <summary>How many bars BEFORE the rejection bar to scan for a genuine approach — see
+    /// <see cref="PocApproachDistanceTicks"/>'s own doc comment for why this exists.</summary>
+    [InputParameter("POC rejection: approach lookback (bars)", 45, 1, 100, 1, 0)]
+    public int PocApproachLookbackBars { get; set; }
+
+    /// <summary>FOUND 2026-09-27 ("it seems as soon as i turn it on it enters a trade from the poc
+    /// line which just sits there and bounces") — without this, a market chopping right on top of
+    /// a flat POC satisfies the rejection pattern on nearly every bar, since some wick always
+    /// touches a nearby POC and ordinary noise closes past a small buffer constantly. At least one
+    /// of the <see cref="PocApproachLookbackBars"/> bars before the rejection bar must have been
+    /// this many ticks away from the POC on the origin side, confirming price actually travelled
+    /// from a distance rather than already sitting on the level.</summary>
+    [InputParameter("POC rejection: minimum approach distance (ticks)", 46, 1, 100000, 1, 0)]
+    public int PocApproachDistanceTicks { get; set; }
+
     // ---- lifecycle state --------------------------------------------------------------------
 
     private Timer? pollTimer;
@@ -194,12 +341,45 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     private int poc15mBarsSeen;
     private readonly ConcurrentQueue<(double Price, double Size)> pocTickQueue = new();
     private string? orderTypeId;
+    private string? stopOrderTypeId;
+    private string? limitOrderTypeId;
     private int chartBarsSeen;
+
+    /// <summary>-1 sentinel: not yet initialized this run. See the "FOUND 2026-09-27" comment at
+    /// its own use site in <c>RunPoll</c> for why this exists instead of a one-shot boolean.</summary>
+    private int pocRejectionCheckedUpTo = -1;
+
     private int barCounter;
     private int lastEntryBarIndex;
 
     private bool waitOpenPosition;
     private bool waitClosePositions;
+
+    // ---- protective stop/target — placed as separate orders once the position confirms open,
+    // never as an embedded SlTpHolder bracket on the entry (see the class doc comment's
+    // "SEPARATE STOP/TARGET ORDERS" section) ---------------------------------------------------
+
+    private double pendingStopPrice;
+    private double pendingTargetPrice;
+
+    /// <summary>FOUND 2026-09-27 (a runaway duplicate-order storm — roughly ten protective
+    /// stop/target pairs placed and cancelled within ~100ms on a live account, several rejected
+    /// outright by Rithmic's own risk system): the PREVIOUS guard against re-placing protective
+    /// orders checked `protectiveStopOrder is not null`, where that field was set from
+    /// `Core.Instance.GetOrderById(...)` called IMMEDIATELY after `PlaceOrder` returned. That
+    /// lookup was failing essentially every time (logged as "could not be looked up for later
+    /// breakeven modification") — almost certainly a race between the synchronous `PlaceOrder`
+    /// return and the platform's own internal indexing of the new order — so the field stayed
+    /// null and the "already placed" guard was a complete no-op every single time
+    /// `Core_PositionAdded` fired again. This flag is set the instant placement is ATTEMPTED
+    /// (not dependent on any lookup succeeding), so the guard in `Core_PositionAdded` is now real
+    /// regardless of whether that lookup ever works. Finding the actual stop order later (for
+    /// breakeven) now happens on demand via `FindProtectiveStopOrder`, filtered through
+    /// `MyOrders()` — which relies on Order.Comment, confirmed reliable in every logged fill,
+    /// not the same unreliable immediate lookup.</summary>
+    private bool protectiveOrdersPlaced;
+
+    private bool breakevenMoved;
 
     private double dailyPnl;
     private double totalRealizedPnl;
@@ -235,11 +415,17 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.MinTargetDistanceTicks = 10;
         this.FallbackTargetTicks = 40;
 
+        this.BreakevenTriggerTicks = 20;
+        this.BreakevenBufferTicks = 3;
+        this.MinStopDistanceTicks = 20;
+
         this.PocCurrentMoveEnabled = true;
         this.Poc15mEnabled = true;
         this.PocSwingPivotLookback = 3;
         this.PocLookbackDays = 5;
         this.PocRejectionBufferTicks = 3;
+        this.PocApproachLookbackBars = 5;
+        this.PocApproachDistanceTicks = 10;
 
         this.MaxDailyLoss = 0;
         this.MaxDrawdown = 2000;
@@ -275,6 +461,13 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         // cooldown" of it, without being close enough to int.MinValue to risk the same overflow.
         this.lastEntryBarIndex = -1_000_000;
         this.chartBarsSeen = -1;
+        this.pocRejectionCheckedUpTo = -1;
+
+        this.pendingStopPrice = 0;
+        this.pendingTargetPrice = 0;
+        this.protectiveOrdersPlaced = false;
+        this.breakevenMoved = false;
+        this.resolvedSymbolId = null;
 
         if (this.CurrentSymbol != null && this.CurrentSymbol.State == BusinessObjectState.Fake)
             this.CurrentSymbol = Core.Instance.GetSymbol(this.CurrentSymbol.CreateInfo());
@@ -304,6 +497,27 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         if (string.IsNullOrEmpty(this.orderTypeId))
         {
             this.Log("Connection does not support market orders.", StrategyLoggingLevel.Error);
+            return;
+        }
+
+        // Resolved once here, same as the market order type above — used to place the protective
+        // stop/target as separate orders (see the class doc comment's "SEPARATE STOP/TARGET
+        // ORDERS" section) rather than an embedded SlTpHolder bracket on the entry.
+        this.stopOrderTypeId = Core.OrderTypes
+            .FirstOrDefault(x => x.ConnectionId == this.CurrentSymbol.ConnectionId && x.Behavior == OrderTypeBehavior.Stop)
+            ?.Id;
+        if (string.IsNullOrEmpty(this.stopOrderTypeId))
+        {
+            this.Log("Connection does not support stop orders.", StrategyLoggingLevel.Error);
+            return;
+        }
+
+        this.limitOrderTypeId = Core.OrderTypes
+            .FirstOrDefault(x => x.ConnectionId == this.CurrentSymbol.ConnectionId && x.Behavior == OrderTypeBehavior.Limit)
+            ?.Id;
+        if (string.IsNullOrEmpty(this.limitOrderTypeId))
+        {
+            this.Log("Connection does not support limit orders.", StrategyLoggingLevel.Error);
             return;
         }
 
@@ -339,16 +553,33 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         // subscriber, the platform stops maintaining live depth for this symbol and the DOM pull
         // below silently returns an empty book — discovered the hard way in Finch-Lite's own
         // indicator earlier this week (see Quantower-storage/CLAUDE.md).
+        //
+        // EVERY subscription below unsubscribes first, defensively — FOUND 2026-09-27 ("it like
+        // freaked out and kept trying to enter on stop loss lines"): if OnRun ever runs again
+        // without OnStop having fully unwound the previous run first (a restart racing its own
+        // shutdown, for instance), `+=` alone would leave the SAME handler subscribed twice,
+        // so a single real event fires it twice — this is exactly what produced five duplicate
+        // protective stop/target pairs at identical prices in one live incident, and reset
+        // waitOpenPosition/breakevenMoved on every extra firing too. `-=` before `+=` is a no-op
+        // when nothing was subscribed yet and a real fix when something was.
+        this.CurrentSymbol.NewLevel2 -= this.OnLevel2;
         this.CurrentSymbol.NewLevel2 += this.OnLevel2;
 
         // ONLY needed for POC's own volume-by-price accumulation — the DOM/absorption/IFVG
         // pathway alone never needed a tick subscription (see the class doc comment).
         if (this.PocCurrentMoveEnabled || this.Poc15mEnabled)
+        {
+            this.CurrentSymbol.NewLast -= this.OnLast;
             this.CurrentSymbol.NewLast += this.OnLast;
+        }
 
+        Core.PositionAdded -= this.Core_PositionAdded;
         Core.PositionAdded += this.Core_PositionAdded;
+        Core.PositionRemoved -= this.Core_PositionRemoved;
         Core.PositionRemoved += this.Core_PositionRemoved;
+        Core.OrdersHistoryAdded -= this.Core_OrdersHistoryAdded;
         Core.OrdersHistoryAdded += this.Core_OrdersHistoryAdded;
+        Core.TradeAdded -= this.Core_TradeAdded;
         Core.TradeAdded += this.Core_TradeAdded;
 
         var interval = Math.Max(this.PollIntervalMs, 50);
@@ -436,6 +667,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         this.CheckSessionReset();
         this.CheckRiskLimits();
+        this.CheckBreakeven();
 
         // ---- 1. pull the DOM, reconcile tracked levels ----
         var market = symbol.DepthOfMarket;
@@ -479,15 +711,13 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         // ---- 2. feed any newly-closed chart bars into the IFVG + current-move POC engines ----
         Bar? latestClosedBar = null;
+        var priorBars = Array.Empty<Bar>();
 
         if (hdm.Count > 1)
         {
             var closedUpTo = hdm.Count - 1; // Count - 1 is the still-forming bar
             this.barCounter = closedUpTo;
 
-            // See the class doc comment's "SAFETY NOTE ON BACKLOG BARS": the very first drain
-            // after attach can burst-feed up to 500 already-closed bars in one poll, and
-            // CheckPocRejection must never evaluate against that stale backlog.
             var isFirstDrain = this.chartBarsSeen < 0;
 
             if (isFirstDrain)
@@ -506,8 +736,43 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
             this.chartBarsSeen = closedUpTo;
 
-            if (!isFirstDrain && closedUpTo > 0 && TryReadBar(hdm, closedUpTo - 1, out var lastBar))
+            // FOUND 2026-09-27 ("it seems as soon as i turn it on it enters a trade" — repeatedly,
+            // on every restart, seconds after attach): `isFirstDrain` above only ever gates the
+            // VERY FIRST poll. On the SECOND poll — typically ~250ms later, nowhere near enough
+            // time for a new bar to close — `isFirstDrain` is already false, so the OLD guard
+            // `!isFirstDrain && ...` happily read `closedUpTo - 1` and treated whatever bar was
+            // ALREADY sitting there at attach time as "the latest closed bar," running
+            // CheckPocRejection against pre-existing, already-happened price action instead of
+            // waiting for a genuinely NEW bar close. `pocRejectionCheckedUpTo` fixes this properly:
+            // it tracks the actual BAR INDEX already accounted for, and the first bar this run
+            // ever sees is deliberately marked as already-seen (never itself eligible) — only a
+            // STRICTLY LATER bar index, meaning one that closes live after this run started
+            // watching, is ever passed to CheckPocRejection.
+            var rejectionBarIndex = closedUpTo - 1;
+
+            if (this.pocRejectionCheckedUpTo < 0)
+            {
+                this.pocRejectionCheckedUpTo = rejectionBarIndex;
+            }
+            else if (rejectionBarIndex > this.pocRejectionCheckedUpTo
+                && TryReadBar(hdm, rejectionBarIndex, out var lastBar))
+            {
                 latestClosedBar = lastBar;
+
+                // Bars strictly BEFORE the rejection bar, used by HasGenuineApproach to confirm
+                // price actually travelled from a distance rather than already sitting on the POC
+                // (see PocApproachDistanceTicks's own doc comment).
+                var priorList = new List<Bar>(Math.Max(0, this.PocApproachLookbackBars));
+                for (var back = 1; back <= this.PocApproachLookbackBars; back++)
+                {
+                    var idx = rejectionBarIndex - back;
+                    if (idx < 0) break;
+                    if (TryReadBar(hdm, idx, out var priorBar)) priorList.Add(priorBar);
+                }
+
+                priorBars = priorList.ToArray();
+                this.pocRejectionCheckedUpTo = rejectionBarIndex;
+            }
         }
 
         // ---- 3. drain the dedicated 15m POC series and every queued trade print ----
@@ -522,7 +787,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.TryEnter(levels, fvg.Active, midPrice, tickSize);
 
         if (latestClosedBar is { } rejectionBar)
-            this.CheckPocRejection(rejectionBar, tickSize, levels, fvg.Active);
+            this.CheckPocRejection(rejectionBar, priorBars, tickSize, levels, fvg.Active);
     }
 
     /// <summary>Feeds the dedicated 15-minute series into the higher-timeframe POC engine (own
@@ -618,6 +883,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             var stopPrice = level.IsBid
                 ? level.Price - (this.StopBufferTicks * tickSize)
                 : level.Price + (this.StopBufferTicks * tickSize);
+            stopPrice = this.EnforceMinStopDistance(stopPrice, price, level.IsBid, tickSize);
 
             var hasTarget = this.TryComputeTarget(
                 levels, ifvgZones, level.IsBid, price, tickSize, out var computedTarget, out var targetSource);
@@ -702,7 +968,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// gates and the same <see cref="TryComputeTarget"/> exit logic.
     /// </summary>
     private void CheckPocRejection(
-        Bar bar, double tickSize,
+        Bar bar, Bar[] priorBars, double tickSize,
         IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
         IReadOnlyList<FairValueGapEngine.InverseFvgZone> ifvgZones)
     {
@@ -714,19 +980,46 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         if (this.barCounter - this.lastEntryBarIndex < this.MinBarsBetweenEntries) return;
 
         var buffer = this.PocRejectionBufferTicks * tickSize;
+        var approachDistance = this.PocApproachDistanceTicks * tickSize;
 
         if (this.PocCurrentMoveEnabled && this.pocCurrentMoveEngine?.Poc is { } cmPoc
-            && TryPocRejection(bar, cmPoc, buffer, out var cmSide))
+            && TryPocRejection(bar, cmPoc, buffer, out var cmSide)
+            && HasGenuineApproach(priorBars, cmPoc, approachDistance, cmSide))
         {
             this.PlacePocEntry(cmSide, bar, cmPoc, tickSize, "current-move", levels, ifvgZones);
             return;
         }
 
         if (this.Poc15mEnabled && this.poc15mEngine?.Poc is { } htfPoc
-            && TryPocRejection(bar, htfPoc, buffer, out var htfSide))
+            && TryPocRejection(bar, htfPoc, buffer, out var htfSide)
+            && HasGenuineApproach(priorBars, htfPoc, approachDistance, htfSide))
         {
             this.PlacePocEntry(htfSide, bar, htfPoc, tickSize, "15m", levels, ifvgZones);
         }
+    }
+
+    /// <summary>
+    /// FOUND 2026-09-27 ("it seems as soon as i turn it on it enters a trade from the poc line
+    /// which just sits there and bounces") — a real rejection means price approached the POC from
+    /// a distance and got turned away; nothing in <see cref="TryPocRejection"/> alone enforces
+    /// that. Without this check, a market simply chopping right on top of a flat POC satisfies the
+    /// rejection pattern on nearly every bar (some bar's wick will always touch a nearby POC, and
+    /// ordinary noise closes beyond a small buffer constantly). Requires at least one of the bars
+    /// BEFORE the rejection bar to have genuinely been <see cref="PocApproachDistanceTicks"/> away
+    /// from the POC on the origin side — confirming an actual move toward the level, not chop
+    /// already sitting on it. No prior bars available (e.g. right after the backlog-priming
+    /// window) is treated as "cannot confirm an approach" and skipped, not allowed through.
+    /// </summary>
+    private static bool HasGenuineApproach(Bar[] priorBars, double poc, double approachDistance, Side side)
+    {
+        if (priorBars.Length == 0)
+            return false;
+
+        // Buy (bullish rejection, price dipped down into the POC and rejected up): price must
+        // genuinely have been ABOVE the POC recently. Sell (bearish rejection): genuinely BELOW.
+        return side == Side.Buy
+            ? priorBars.Any(b => b.Low >= poc + approachDistance)
+            : priorBars.Any(b => b.High <= poc - approachDistance);
     }
 
     /// <summary>
@@ -735,7 +1028,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// CLOSE ended up beyond <paramref name="buffer"/> on the ORIGIN side, meaning the level held
     /// as support/resistance rather than being accepted through. Both checks use the SAME bar —
     /// they cannot both fire (a close cannot be simultaneously below AND above the POC by a
-    /// positive buffer).
+    /// positive buffer). This alone does NOT require a genuine approach — see
+    /// <see cref="HasGenuineApproach"/>, checked separately by the caller.
     /// </summary>
     private static bool TryPocRejection(Bar bar, double poc, double buffer, out Side side)
     {
@@ -760,6 +1054,20 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         return false;
     }
 
+    /// <summary>Widens a computed stop out to <see cref="MinStopDistanceTicks"/> from the current/
+    /// reference price if it would otherwise sit closer than that — see that parameter's own doc
+    /// comment for why this exists.</summary>
+    private double EnforceMinStopDistance(double stopPrice, double referencePrice, bool isLong, double tickSize)
+    {
+        var minDistance = this.MinStopDistanceTicks * tickSize;
+        var actualDistance = Math.Abs(referencePrice - stopPrice);
+
+        if (actualDistance >= minDistance)
+            return stopPrice;
+
+        return isLong ? referencePrice - minDistance : referencePrice + minDistance;
+    }
+
     private void PlacePocEntry(
         Side side, Bar rejectionBar, double poc, double tickSize, string pocLabel,
         IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
@@ -778,6 +1086,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         // The bar has already closed beyond the POC by the rejection buffer by definition, so
         // anchoring target/fallback distance to the POC price instead would measure from a point
         // price has already moved away from.
+        stopPrice = this.EnforceMinStopDistance(stopPrice, rejectionBar.Close, isLong, tickSize);
         var referencePrice = rejectionBar.Close;
 
         // Reuses the SAME levels/ifvgZones this poll already computed — RestingOrderEngine.
@@ -807,10 +1116,15 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         return est.Hour >= this.RthStartHour && est.Hour < this.RthEndHour;
     }
 
+    /// <summary>Places ONLY the entry order — no embedded bracket. The stop/target are placed as
+    /// separate orders once <see cref="Core_PositionAdded"/> confirms the position is actually
+    /// open (see the class doc comment's "SEPARATE STOP/TARGET ORDERS" section for why).</summary>
     private void PlaceEntry(
         Side side, double stopPrice, double targetPrice, string anchorDescription, string targetSource)
     {
         this.waitOpenPosition = true;
+        this.pendingStopPrice = stopPrice;
+        this.pendingTargetPrice = targetPrice;
 
         this.Log(
             $"[Signal] {side} anchor={anchorDescription} "
@@ -825,8 +1139,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             Quantity = this.Quantity,
             Side = side,
             Comment = StrategyTag,
-            StopLoss = SlTpHolder.CreateSL(stopPrice, PriceMeasurement.Absolute),
-            TakeProfit = SlTpHolder.CreateTP(targetPrice, PriceMeasurement.Absolute),
         });
 
         if (result.Status == TradingOperationResultStatus.Failure)
@@ -846,46 +1158,316 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         }
     }
 
-    // ---- position isolation — same StrategyTag/Comment pattern as this repo's own reference ---
+    /// <summary>
+    /// Places the stop and target as TWO SEPARATE, EXPLICIT orders (Stop via
+    /// <c>TriggerPrice</c>, Limit via <c>Price</c>) once the entry position is confirmed open —
+    /// see the class doc comment's "SEPARATE STOP/TARGET ORDERS" section for the live-fill bug
+    /// this replaces. Both legs carry the SAME <see cref="StrategyTag"/> comment as the entry,
+    /// which is what lets <see cref="Core_PositionRemoved"/>'s existing cleanup find and cancel
+    /// whichever leg didn't fill.
+    /// </summary>
+    private void PlaceProtectiveOrders(Position position)
+    {
+        if (string.IsNullOrEmpty(this.stopOrderTypeId) || string.IsNullOrEmpty(this.limitOrderTypeId))
+        {
+            this.Log(
+                "[Order] cannot place protective stop/target: stop/limit order type unavailable.",
+                StrategyLoggingLevel.Error);
+            return;
+        }
+
+        var closingSide = position.Side == Side.Buy ? Side.Sell : Side.Buy;
+
+        // FOUND 2026-09-27 ("even the spot the order was placed looks super weird... price was
+        // never even there at that price") — a live signal computed target=30735 against a
+        // signal-time reference price, but the market order actually filled at 30732.75 a moment
+        // later; the realized distance (9 ticks) ended up under MinTargetDistanceTicks (10)
+        // despite the candidate having qualified when it was chosen. `pendingStopPrice`/
+        // `pendingTargetPrice` were computed against whatever price stood at SIGNAL time —
+        // `position.OpenPrice` here is the REAL fill, known only now that the position exists.
+        // Re-validating both against it (same floor functions TryEnter/PlacePocEntry already use
+        // pre-fill) closes that gap rather than trusting a price that's since moved on.
+        var isLong = position.Side == Side.Buy;
+        var tickSize = this.CurrentSymbol.TickSize;
+        var stopPrice = tickSize > 0
+            ? this.EnforceMinStopDistance(this.pendingStopPrice, position.OpenPrice, isLong, tickSize)
+            : this.pendingStopPrice;
+        var targetPrice = tickSize > 0
+            ? this.EnforceMinTargetDistance(this.pendingTargetPrice, position.OpenPrice, isLong, tickSize)
+            : this.pendingTargetPrice;
+
+        var stopResult = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
+        {
+            Account = this.CurrentAccount,
+            Symbol = this.CurrentSymbol,
+            OrderTypeId = this.stopOrderTypeId,
+            Quantity = position.Quantity,
+            Side = closingSide,
+            Comment = StrategyTag,
+            TriggerPrice = stopPrice,
+        });
+
+        if (stopResult.Status == TradingOperationResultStatus.Failure)
+            this.Log($"[Order] protective stop failed: {stopResult.Message}", StrategyLoggingLevel.Error);
+
+        var targetResult = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
+        {
+            Account = this.CurrentAccount,
+            Symbol = this.CurrentSymbol,
+            OrderTypeId = this.limitOrderTypeId,
+            Quantity = position.Quantity,
+            Side = closingSide,
+            Comment = StrategyTag,
+            Price = targetPrice,
+        });
+
+        if (targetResult.Status == TradingOperationResultStatus.Failure)
+            this.Log($"[Order] protective target failed: {targetResult.Message}", StrategyLoggingLevel.Error);
+
+        this.Log(
+            $"[Order] protective stop={stopPrice:0.####} target={targetPrice:0.####} "
+            + $"(fill={position.OpenPrice:0.####}) placed as separate orders.",
+            StrategyLoggingLevel.Trading);
+    }
+
+    /// <summary>Widens a computed target out to <see cref="MinTargetDistanceTicks"/> from the
+    /// reference price if it would otherwise sit closer than that — mirrors
+    /// <see cref="EnforceMinStopDistance"/> for the opposite side of the trade.</summary>
+    private double EnforceMinTargetDistance(double targetPrice, double referencePrice, bool isLong, double tickSize)
+    {
+        var minDistance = this.MinTargetDistanceTicks * tickSize;
+        var actualDistance = Math.Abs(targetPrice - referencePrice);
+
+        if (actualDistance >= minDistance)
+            return targetPrice;
+
+        return isLong ? referencePrice + minDistance : referencePrice - minDistance;
+    }
+
+    /// <summary>Looked up on demand (via `MyOrders()`, Comment-based and confirmed reliable) rather
+    /// than cached from the moment of placement — see `protectiveOrdersPlaced`'s own doc comment
+    /// for why the immediate-lookup approach this replaces did not work.</summary>
+    private Order? FindProtectiveStopOrder() =>
+        this.MyOrders().FirstOrDefault(o => string.Equals(o.OrderTypeId, this.stopOrderTypeId, StringComparison.Ordinal));
+
+    /// <summary>
+    /// ONE-TIME move to breakeven+buffer — see the class doc comment's "BREAKEVEN" section. Modifies
+    /// the existing protective stop order's own TriggerPrice in place rather than cancelling and
+    /// replacing it.
+    /// </summary>
+    private void CheckBreakeven()
+    {
+        if (this.breakevenMoved || this.BreakevenTriggerTicks <= 0) return;
+        if (!this.protectiveOrdersPlaced) return;
+
+        var positions = this.MyPositions();
+        if (positions.Length == 0) return;
+
+        var position = positions[0]; // one position at a time, by design
+        if (position.GrossPnLTicks < this.BreakevenTriggerTicks) return;
+
+        var stopOrder = this.FindProtectiveStopOrder();
+        if (stopOrder is null) return; // not found yet (or already filled/cancelled) — try again next poll
+
+        var tickSize = this.CurrentSymbol.TickSize;
+        if (tickSize <= 0) return;
+
+        var breakevenPrice = position.Side == Side.Buy
+            ? position.OpenPrice + (this.BreakevenBufferTicks * tickSize)
+            : position.OpenPrice - (this.BreakevenBufferTicks * tickSize);
+
+        var request = new ModifyOrderRequestParameters(stopOrder) { TriggerPrice = breakevenPrice };
+        var result = Core.Instance.ModifyOrder(request);
+
+        if (result.Status == TradingOperationResultStatus.Failure)
+        {
+            this.Log($"[Risk] breakeven stop move failed: {result.Message}", StrategyLoggingLevel.Error);
+            return;
+        }
+
+        this.breakevenMoved = true;
+        this.Log(
+            $"[Risk] moved stop to breakeven+buffer ({breakevenPrice:0.####}) after "
+            + $"{position.GrossPnLTicks:F1} ticks profit.",
+            StrategyLoggingLevel.Trading);
+    }
+
+    // ---- position isolation ---------------------------------------------------------------
+
+    /// <summary>
+    /// FOUND 2026-09-27, investigating why a confirmed live fill never got its protective stop/
+    /// target placed: this strategy's own `CurrentSymbol` (e.g. a continuous "MNQ" selection) is
+    /// a DIFFERENT OBJECT from the specific underlying contract ("MNQZ6") that every actual
+    /// Position/Order/Trade comes back tagged with — Quantower's own order-placing log showed
+    /// "Symbol: MNQ" in the request but "MNQZ6" in every resulting Position/Order/Trade record.
+    /// Confirmed via SDK reflection that `Symbol`/`Position`/`Order`/`Account` do NOT overload the
+    /// `==` operator, so `obj.Symbol == this.CurrentSymbol` was comparing two DIFFERENT, if
+    /// related, objects and was ALWAYS false — silently breaking `MyPositions()`/`MyOrders()`
+    /// (always empty), every `Core_*` handler's own filter (never matched), risk limits and
+    /// breakeven (gated on `MyPositions()`), and PnL accumulation (gated on `Core_TradeAdded`'s
+    /// own filter) all at once. This exact pattern was copied from
+    /// `directionAbsorptionScalpStrategy`'s own reference shape, which is presumably equally
+    /// affected wherever it trades a continuous/generic symbol selection — NOT fixed here, since
+    /// this pass only touches this file, but worth knowing.
+    ///
+    /// Fix: never compare Symbol OBJECT identity. The very first position/order this strategy
+    /// observes (matched on Account.Id + ConnectionId + the StrategyTag Comment alone — the
+    /// specific contract isn't known yet) resolves and caches the ACTUAL underlying contract's
+    /// own Symbol.Id in <see cref="resolvedSymbolId"/>; every later match additionally requires
+    /// that same resolved Symbol.Id, comparing STRINGS. Resolved ONCE per run and never reset on
+    /// a flat position — the underlying contract for a continuous selection does not change
+    /// mid-session outside a contract roll; a roll mid-run would need a restart, an accepted
+    /// limitation rather than something silently handled.
+    /// </summary>
+    private string? resolvedSymbolId;
+
+    private bool IsMine(Symbol? symbol, Account? account, string? comment)
+    {
+        if (comment != StrategyTag) return false;
+        if (account is null || this.CurrentAccount is null) return false;
+        if (!string.Equals(account.Id, this.CurrentAccount.Id, StringComparison.Ordinal)) return false;
+        if (symbol is null || this.CurrentSymbol is null) return false;
+        if (!string.Equals(symbol.ConnectionId, this.CurrentSymbol.ConnectionId, StringComparison.Ordinal)) return false;
+
+        if (this.resolvedSymbolId is null)
+        {
+            this.resolvedSymbolId = symbol.Id;
+            return true;
+        }
+
+        return string.Equals(symbol.Id, this.resolvedSymbolId, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// FOUND 2026-09-27 (third live fill in a row with no protective orders — even after fixing
+    /// the Symbol-identity bug `IsMine` documents above): every `Order`/`OrderHistory`/`Trade` in
+    /// the platform log has carried the correct `Comment: FinchDomScalp` in EVERY single logged
+    /// fill without exception, but `Core_PositionAdded` still never reached
+    /// <see cref="PlaceProtectiveOrders"/>. There is no confirmation `Position.Comment` is ever
+    /// actually populated on this connection — unlike Order/Trade, it simply has never been
+    /// observed working. Position identification now PRIMARILY relies on the resolved
+    /// `Symbol.Id` (bootstrapped by `IsMine` from an Order/Trade event, which reliably fires
+    /// several times over — see the platform log's own repeated "Order update"/"Order history"
+    /// broadcasts — before any position event needs it) plus Account.Id, comparing STRINGS, no
+    /// Comment involved. Only if `resolvedSymbolId` isn't set yet (a bootstrap race this strategy
+    /// has not actually observed, but can't rule out) does this fall back to checking the
+    /// Position's own Comment, in case it DOES work on some other connection.
+    ///
+    /// ACCEPTED RISK: once `resolvedSymbolId` is set, ANY position on that exact contract+account
+    /// is treated as this strategy's own, regardless of Comment — including one the operator
+    /// opened manually. Narrower than ideal, but strictly better than the alternative this
+    /// replaces, which — per three consecutive live tests — appears to never match at all.
+    /// </summary>
+    private bool IsMyPosition(Symbol? symbol, Account? account, string? comment)
+    {
+        if (account is null || this.CurrentAccount is null) return false;
+        if (!string.Equals(account.Id, this.CurrentAccount.Id, StringComparison.Ordinal)) return false;
+        if (symbol is null) return false;
+
+        if (this.resolvedSymbolId is not null)
+            return string.Equals(symbol.Id, this.resolvedSymbolId, StringComparison.Ordinal);
+
+        if (comment != StrategyTag) return false;
+        if (this.CurrentSymbol is null || !string.Equals(symbol.ConnectionId, this.CurrentSymbol.ConnectionId, StringComparison.Ordinal))
+            return false;
+
+        this.resolvedSymbolId = symbol.Id;
+        return true;
+    }
 
     private Position[] MyPositions() => Core.Instance.Positions
-        .Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount && x.Comment == StrategyTag)
+        .Where(x => this.IsMyPosition(x.Symbol, x.Account, x.Comment))
         .ToArray();
 
     private Order[] MyOrders() => Core.Instance.Orders
-        .Where(x => x.Symbol == this.CurrentSymbol && x.Account == this.CurrentAccount && x.Comment == StrategyTag)
+        .Where(x => this.IsMine(x.Symbol, x.Account, x.Comment))
         .ToArray();
 
+    /// <summary>Every Core_* handler below null-checks its argument first — FOUND 2026-09-27, from
+    /// Quantower's own log showing five uncaught exceptions fired exactly when one of these
+    /// handlers was invoked with (almost certainly) a null argument, on the very first live fill.
+    /// See the class doc comment's second bullet under "SEPARATE STOP/TARGET ORDERS".</summary>
     private void Core_PositionAdded(Position obj)
     {
-        if (obj.Comment != StrategyTag) return;
-        if (obj.Symbol == this.CurrentSymbol && obj.Account == this.CurrentAccount)
-            this.waitOpenPosition = false;
+        if (obj is null) return;
+
+        if (!this.IsMyPosition(obj.Symbol, obj.Account, obj.Comment))
+        {
+            // Diagnostic only, kept deliberately terse — cheap insurance after three rounds of
+            // guessing why this handler wasn't reaching PlaceProtectiveOrders. If this still
+            // doesn't fire correctly next time, this line says exactly which field didn't match.
+            this.Log(
+                $"[Diag] PositionAdded ignored: comment='{obj.Comment}' symbolId='{obj.Symbol?.Id}' "
+                + $"accountId='{obj.Account?.Id}' resolvedSymbolId='{this.resolvedSymbolId}' "
+                + $"expectedAccountId='{this.CurrentAccount?.Id}'",
+                StrategyLoggingLevel.Trading);
+            return;
+        }
+
+        // FOUND 2026-09-27 ("it like freaked out and kept trying to enter on stop loss lines",
+        // then AGAIN after the first fix attempt): this handler fired repeatedly for the SAME
+        // already-open position on a live account — each firing placed ANOTHER full stop+target
+        // pair (roughly ten duplicate pairs placed and cancelled within ~100ms in the worst
+        // observed case, several rejected outright by Rithmic's own trading-protection system)
+        // and reset waitOpenPosition/breakevenMoved every single time. The FIRST attempt at this
+        // guard checked `protectiveStopOrder is not null` — but that field depended on an
+        // immediate post-placement lookup that was failing essentially every time (see
+        // `protectiveOrdersPlaced`'s own doc comment), so the guard was silently a no-op and the
+        // storm repeated even after that fix was deployed. `protectiveOrdersPlaced` is set the
+        // instant placement is ATTEMPTED, independent of any lookup, so this guard is now real.
+        // Checked BEFORE touching any other state, so a duplicate/redundant firing does nothing
+        // at all — not even the flag resets below.
+        if (this.protectiveOrdersPlaced)
+            return;
+
+        this.protectiveOrdersPlaced = true;
+        this.waitOpenPosition = false;
+        this.breakevenMoved = false;
+
+        try
+        {
+            this.PlaceProtectiveOrders(obj);
+        }
+        catch (Exception ex)
+        {
+            this.Log(
+                $"[Order] failed to place protective stop/target: {ex.GetType().Name}: {ex.Message}",
+                StrategyLoggingLevel.Error);
+        }
     }
 
     private void Core_PositionRemoved(Position obj)
     {
-        if (obj.Comment != StrategyTag) return;
+        if (obj is null || !this.IsMyPosition(obj.Symbol, obj.Account, obj.Comment)) return;
 
         if (!this.MyPositions().Any())
         {
             this.waitClosePositions = false;
+            this.protectiveOrdersPlaced = false;
+            this.breakevenMoved = false;
 
             var equity = this.totalRealizedPnl;
             if (equity > this.peakEquity) this.peakEquity = equity;
 
-            foreach (var order in this.MyOrders())
+            try
             {
-                var r = order.Cancel();
-                if (r.Status != TradingOperationResultStatus.Success)
-                    this.Log($"[Order] failed to cancel leftover order: {r.Message}", StrategyLoggingLevel.Error);
+                foreach (var order in this.MyOrders())
+                {
+                    var r = order.Cancel();
+                    if (r.Status != TradingOperationResultStatus.Success)
+                        this.Log($"[Order] failed to cancel leftover order: {r.Message}", StrategyLoggingLevel.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                this.Log($"[Order] failed while cancelling leftover orders: {ex.GetType().Name}: {ex.Message}", StrategyLoggingLevel.Error);
             }
         }
     }
 
     private void Core_OrdersHistoryAdded(OrderHistory obj)
     {
-        if (obj.Symbol != this.CurrentSymbol || obj.Account != this.CurrentAccount || obj.Comment != StrategyTag) return;
+        if (obj is null || !this.IsMine(obj.Symbol, obj.Account, obj.Comment)) return;
 
         if (obj.Status == OrderStatus.Refused)
         {
@@ -896,7 +1478,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
     private void Core_TradeAdded(Trade obj)
     {
-        if (obj.Symbol != this.CurrentSymbol || obj.Account != this.CurrentAccount || obj.Comment != StrategyTag) return;
+        if (obj is null || !this.IsMine(obj.Symbol, obj.Account, obj.Comment)) return;
 
         if (obj.GrossPnl is { } pnl)
         {

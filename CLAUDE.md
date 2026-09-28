@@ -2433,6 +2433,255 @@ from this change). Deployed folder still holds only this strategy's own DLL/PDB/
 **NOT YET verified live** — same live-session caveat as above applies to this new pathway too,
 and now doubly so: it is a SEPARATE, never-yet-run trigger from the original DOM/absorption one.
 
+#### CRITICAL LIVE-FILL INCIDENT, 2026-09-27 — embedded bracket SL/TP confirmed broken, position went live with NO stop
+
+The strategy's first-ever live signal fired on a real Rithmic account (`RTG25761173337`, MNQ) —
+a POC-rejection Buy at 30789.75, logged correctly with `stop=30787.75 target=30801.75`. The
+position opened with **neither a stop nor a target attached** — confirmed by the operator's own
+screenshot (Positions panel, both "Stop lo..." and "Take p..." columns empty) while the position
+sat open and unprotected. The operator manually protected it and stopped the strategy; asked to
+dig through the platform's own logs for root cause.
+
+**Root cause, found in `C:\Quantower\Logs\Serilog\<date>.slog`** (structured JSON, one event per
+line — worth remembering as a diagnostic tool for this whole repo, not just this incident): the
+entry request DID carry the right numbers (`Stop loss: 30,787.75; Take profit: 30,801.75`), but
+the platform's own attempt to turn that embedded `SlTpHolder.CreateSL/CreateTP(price,
+PriceMeasurement.Absolute)` bracket into child orders produced a **Sell Limit at 38,490.00**
+(instantly refused by Rithmic — "price crossed high limit") and a **Sell Stop at 23,093.00**
+(accepted, but ~7700 points from market — useless). The math confirms exactly what happened: the
+requested price got treated as a TICK-COUNT OFFSET from entry rather than an absolute price —
+`30801.75 × 0.25 (MNQ tick size) = 7700.4375`, and `30789.75 + 7700.4375 ≈ 38,490.19`; same for
+the stop leg the other direction. Confirmed via SDK reflection that `PriceMeasurement.Absolute`
+(0) really is the "use this as literally the price" value (the only other value is `Offset` = 1),
+so this is a bug in how this connection converts an embedded bracket into child orders, not a
+mistake in the price math feeding it. **This SlTpHolder pattern was already flagged as "unverified
+against a live session" in `directionAbsorptionScalpStrategy`'s own readme — now confirmed broken
+on a real connection, for BOTH strategies that use it.**
+
+**A second, independent bug found in the same log window**: five identical "Exception has been
+thrown by the target of an invocation" errors, exactly correlated with this one order's
+state-change broadcasts and nowhere else in two full days of logs — one of this strategy's own
+`Core_PositionAdded`/`Core_PositionRemoved`/`Core_OrdersHistoryAdded`/`Core_TradeAdded` handlers
+was throwing, almost certainly from dereferencing a null event argument (none of the four
+null-checked their argument). Quantower's own log doesn't retain the inner exception's type/
+message past the generic reflection-wrapper text, so the exact original line is unconfirmed. Left
+unfixed this risked `waitOpenPosition` getting stuck permanently true if the throw happened before
+that flag cleared, silently blocking every future entry regardless of the bracket bug.
+
+**Also found while investigating**: the mispriced stop order (23,093.00) was left resting on the
+account — Quantower's own auto-generated bracket child orders come back with an EMPTY `Comment`,
+so this strategy's own `Core_PositionRemoved` cleanup (which cancels `MyOrders()`, filtered by
+`Comment == StrategyTag`) could never find or cancel it. Operator cancelled it by hand.
+
+#### FIX, 2026-09-27 — separate explicit stop/target orders, hardened event handlers, one-time breakeven
+
+Per the operator's own follow-up ask ("work on the logic for opening a take profit and stop loss
+and if its running good in profit to move the stop to inprofit to cover fees"):
+
+1. **No more embedded `SlTpHolder` bracket on the entry order at all.** `PlaceEntry` now places
+   ONLY the market entry, storing the intended stop/target as `pendingStopPrice`/
+   `pendingTargetPrice`. Once `Core_PositionAdded` confirms the position is actually open,
+   `PlaceProtectiveOrders` places the stop and target as TWO SEPARATE, EXPLICIT orders — a Stop
+   order using `TriggerPrice`, a Limit order using `Price` — each resolved via its own
+   `OrderTypeBehavior.Stop`/`.Limit` order type (same resolution pattern as the existing Market
+   order type, done once in `OnRun`). Both legs carry the SAME `StrategyTag` comment as the entry,
+   so the EXISTING `Core_PositionRemoved` cleanup correctly finds and cancels whichever leg didn't
+   fill once the position closes — no broker-side OCO grouping is used or needed.
+2. **All four `Core_*` event handlers now null-check their argument first**, and the two with any
+   real follow-on work (`Core_PositionAdded`'s protective-order placement,
+   `Core_PositionRemoved`'s leftover-order cancellation) wrap that work in its own try/catch with
+   logging — so a future failure there is visible in this strategy's own log with an actual
+   exception type/message, rather than only in Quantower's own generic, detail-free platform log.
+3. **One-time breakeven move** (operator's own explicit choice over a continuous trail, via
+   `AskUserQuestion`): new `BreakevenTriggerTicks` (default 20, 0=off) and `BreakevenBufferTicks`
+   (default 3) parameters. `CheckBreakeven`, run every poll alongside `CheckRiskLimits`, checks
+   `Position.GrossPnLTicks` against the trigger and — once, via a `breakevenMoved` latch reset on
+   every new position — modifies the protective stop order's own `TriggerPrice` in place (via
+   `Core.Instance.ModifyOrder(new ModifyOrderRequestParameters(order) { TriggerPrice = ... })`,
+   not a cancel/replace) to sit `BreakevenBufferTicks` beyond entry, covering round-turn fees.
+
+**Verified 2026-09-27**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c
+Release` — 0 errors, 17 warnings (all pre-existing nullable-annotation-context style). Deployed
+folder still holds only this strategy's own DLL/PDB/deps.json.
+
+#### SAME-DAY FOLLOW-UP, 2026-09-27 — the fix above still didn't place protective orders; root cause was much bigger than the bracket bug
+
+The very next live signal (a POC-rejection Buy, filled at 30,780.00) STILL placed no stop or
+target — confirmed both from the operator's own screenshot and, more reliably, from the
+strategy's own per-instance log at `C:\Quantower\Settings\Scripts\ScriptsData\
+finchDomScalpStrategy (<run-guid>)\logs\<date>.slog` (a SEPARATE file from the main platform
+Serilog — worth remembering: platform-level order/fill events are in
+`C:\Quantower\Logs\Serilog\<date>.slog`, this STRATEGY's own `this.Log(...)` output is in
+the ScriptsData one). That log showed the `[Signal]` line and NOTHING after it — no
+`[Order] protective...` success or failure line at all, meaning `PlaceProtectiveOrders` was never
+even called.
+
+**Root cause, found via SDK reflection**: this strategy's `CurrentSymbol` (a continuous selection,
+e.g. "MNQ") is a DIFFERENT OBJECT from the specific underlying contract ("MNQZ6") that every
+actual `Position`/`Order`/`Trade` comes back tagged with — the order-placing log itself showed
+"Symbol: MNQ" in the request but "MNQZ6" in every resulting record. Reflecting on
+`Symbol`/`Position`/`Order`/`Account` confirmed NONE of them overload the `==` operator (only
+`IEquatable<T>.Equals`, which `==` does NOT use for a class without an explicit operator overload)
+— so `obj.Symbol == this.CurrentSymbol` throughout this file was comparing two DIFFERENT,
+non-identical objects and was **ALWAYS false**. This one broken comparison pattern silently took
+out: `MyPositions()`/`MyOrders()` (always returned empty), every `Core_*` event handler's own
+identity filter (never matched, so `Core_PositionAdded` never reached its protective-order call),
+risk limits and breakeven (both gated on `MyPositions()`), and `Core_TradeAdded`'s PnL
+accumulation — nearly everything in the file keyed off "is this position/order mine." **This exact
+pattern was copied from `directionAbsorptionScalpStrategy`'s own reference shape — presumably
+equally broken there whenever it trades a continuous/generic symbol selection, though that file
+was not touched in this pass.**
+
+**Fix**: a new `IsMine(Symbol, Account, string comment)` helper replaces every `==`/`!=` Symbol/
+Account comparison in the file. It never compares Symbol object identity — the FIRST position/
+order this strategy observes (matched on `Account.Id` + `ConnectionId` + the `StrategyTag` Comment
+alone, since the specific contract isn't known yet) resolves and caches the actual underlying
+contract's own `Symbol.Id` in `resolvedSymbolId`; every later match additionally requires that
+same resolved `Symbol.Id`, comparing STRINGS, never objects. Resolved once per run, never reset on
+a flat position (a contract roll mid-run would need a restart — an accepted limitation).
+
+**A separate, fourth issue flagged directly by the operator from that same signal**: "the stop it
+called was so small and short it didnt make sense." The POC-rejection pathway's stop sits just
+beyond the rejection bar's own wick, which can be an arbitrarily tiny distance from the actual
+fill price — a single bar's range says nothing about the instrument's real volatility. New
+`MinStopDistanceTicks` parameter (default 20) now floors BOTH entry pathways' computed stop
+(`EnforceMinStopDistance`) to at least that many ticks from the current/reference price, widening
+it outward when the naive calculation comes in tighter than that.
+
+**Verified 2026-09-27 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still holds only this strategy's own DLL/PDB/deps.json.
+**STILL NOT verified live** — three real, load-bearing bugs have now been found and fixed from
+exactly two live signals; the next one needs the same close scrutiny (both platform AND
+per-instance ScriptsData logs) before trusting this strategy's bracket placement at all.
+
+#### FIFTH ISSUE, same day — POC-rejection trigger fired on ordinary chop at a flat POC
+
+Operator, after enabling the strategy: "it seems as soon as i turn it on it enters a trade from
+the poc line which just sits there and bounces what are the triggers to get into a trade." A real
+rejection is supposed to mean price approached the POC from a distance and got turned away, but
+`TryPocRejection` alone never checked for an approach — a market simply chopping right on top of a
+flat POC satisfies "touch it, close beyond a 3-tick buffer" on nearly every bar, since some wick
+always touches a nearby POC and ordinary noise closes past a small buffer constantly.
+
+**Fix**: a new `HasGenuineApproach` check, ANDed onto `TryPocRejection`'s own result in
+`CheckPocRejection`. Requires at least one of the `PocApproachLookbackBars` (default 5) bars
+BEFORE the rejection bar to have been `PocApproachDistanceTicks` (default 10) away from the POC on
+the origin side (above it for a bullish rejection, below it for a bearish one) — confirming price
+actually travelled from a distance rather than already sitting on the level. No prior bars
+available (e.g. right after the backlog-priming window) is treated as "cannot confirm an approach"
+and skipped, not allowed through. `RunPoll` now gathers this small prior-bars window from `hdm`
+alongside the existing single rejection-bar read, threaded through to `CheckPocRejection`.
+
+**Verified 2026-09-27 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean.
+
+#### SIXTH AND SEVENTH ISSUES, same day — restart-instant firing, then Position.Comment unreliable
+
+Live-testing the fifth fix immediately surfaced two more real bugs, both found the same way as
+every other one in this saga: reading both the platform Serilog and the strategy's own
+per-instance ScriptsData log side by side rather than guessing.
+
+**Sixth**: the operator restarted the strategy to test the approach-distance fix, and it fired a
+trade 267ms after starting — nowhere near enough time for a new bar to close. Root cause:
+`isFirstDrain` (meant to skip the stale backlog burst) only ever gated the FIRST poll. On the
+SECOND poll, `isFirstDrain` was already false, so the old guard happily read `closedUpTo - 1` and
+treated whatever bar was ALREADY sitting there at attach time as "the latest closed bar" — meaning
+every restart re-traded whatever setup happened to already exist the instant two polls had passed.
+Confirmed by three consecutive restarts in the log, each firing within seconds. **Fix**: a real
+bar-index cursor, `pocRejectionCheckedUpTo`, replacing the one-shot boolean. The first bar this run
+ever sees is marked as already-accounted-for and never itself eligible; only a bar index STRICTLY
+LATER than that — meaning one that closes live, after the run started watching — ever reaches
+`CheckPocRejection`.
+
+**Seventh**: with the restart bug fixed, the next signal correctly waited over two minutes before
+firing off a genuinely new bar — but STILL placed no protective orders, with zero trace of
+`PlaceProtectiveOrders` even being attempted in either log. By this point Order/Trade/OrderHistory
+had shown the correct `Comment: FinchDomScalp` in every single logged fill across four separate
+trades with no exception — but `Position.Comment`, which `Core_PositionAdded`'s own gate depended
+on, had never once been confirmed working. **Fix**: `IsMyPosition`, a new matcher that primarily
+compares the ALREADY-RESOLVED `Symbol.Id` (bootstrapped by an Order/Trade event via `IsMine`,
+which reliably fires several times over before any position event needs it — see the platform
+log's own repeated "Order update"/"Order history" broadcasts preceding every fill) plus
+Account.Id — no Comment involved at all. Falls back to Position's own Comment only if
+`resolvedSymbolId` somehow isn't set yet. `MyPositions()`/`Core_PositionRemoved` switched to this
+matcher too; `MyOrders()`/`Core_OrdersHistoryAdded`/`Core_TradeAdded` keep the original
+Comment-based `IsMine`, since Order/Trade/OrderHistory's own Comment field IS confirmed reliable.
+A one-line diagnostic now logs whenever `Core_PositionAdded` still fails to match, printing every
+compared field, so any further surprise is visible on the very next attempt instead of requiring
+another blind investigation.
+
+**ACCEPTED RISK, stated plainly**: once `resolvedSymbolId` is set, `IsMyPosition` treats ANY
+position on that exact contract+account as this strategy's own regardless of Comment — including
+one the operator opened manually. Narrower than ideal, but this is what's actually reliable on
+this connection; the alternative it replaces appears to simply never have matched at all.
+
+**Verified 2026-09-27 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean.
+
+#### EIGHTH ISSUE, same day — the duplicate-order guard itself was checking a value that never got set
+
+The very next live signal, on the ALREADY-deployed seventh fix, reproduced the exact same
+duplicate-order storm — roughly ten protective stop/target pairs placed and cancelled within
+~100ms, several rejected outright by Rithmic's own risk system ("Total buy quantity of contract
+would exceed its limit"), with the account eventually going flat only because the operator
+manually closed the position from the chart. Operator: "this is all sorts of screwed up tell me
+why im doing this with 1 contract but there is stop loss for more than 1 order for a ton of
+seperate orders this needs to be reviewed."
+
+**Root cause**: the seventh fix's guard checked `protectiveStopOrder is not null` — but that field
+was only ever set by calling `Core.Instance.GetOrderById(...)` IMMEDIATELY after `PlaceOrder`
+returned, and that lookup was failing essentially every time (logged plainly:
+"[Order] protective stop placed but could not be looked up for later breakeven modification" —
+almost certainly a race between `PlaceOrder`'s synchronous return and the platform's own internal
+indexing of the new order). Since the field never actually became non-null, the "already placed"
+guard was a complete no-op on every single `Core_PositionAdded` firing — the fix looked correct on
+read-through but never once engaged.
+
+**Fix**: replaced the field-based guard with `protectiveOrdersPlaced`, a plain boolean set the
+INSTANT placement is attempted, with no dependency on any lookup succeeding. Finding the actual
+stop order later (for breakeven) now happens ON DEMAND via a new `FindProtectiveStopOrder()`,
+filtered through `MyOrders()` — which relies on `Order.Comment`, confirmed reliable in every
+logged fill — rather than a cached reference from the unreliable immediate lookup. The immediate
+`GetOrderById` calls and their now-pointless warning log line were removed from
+`PlaceProtectiveOrders` entirely.
+
+**Lesson for reviewing this file further**: a guard that checks cached STATE set by an unreliable
+async-vs-sync API call is not actually a guard — prefer a plain flag set unconditionally at the
+moment of intent, and look up anything else needed later, on demand, through a path already
+proven reliable (here, `MyOrders()`'s Comment-based filter).
+
+**Verified 2026-09-27 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean.
+
+#### NINTH ISSUE, same day — target realized far tighter than its own configured minimum
+
+Operator, reading the SAME incident's chart: "even the spot the order was placed looks super
+weird in that picture i sent because price was never even there at that price." Pulled the exact
+signal from the strategy's own log: `Buy anchor=current-move POC 30731.5 rejection stop=30718.75
+target=30735` — filled at 30,732.75 (confirmed from the platform log's `AvgOpenFillPrice`). The
+target sits only 9 ticks (2.25 points) from the actual fill — under the configured
+`MinTargetDistanceTicks` (10) floor that's supposed to prevent exactly this.
+
+**Root cause**: that minimum-distance floor is enforced when the target candidate is CHOSEN, in
+`TryComputeTarget`, measured against the DOM mid-price (or rejection-bar close) at SIGNAL time —
+not the price the market order actually fills at, a moment later. Between signal and fill, price
+moved enough that the realized distance ended up under the floor even though the candidate
+qualified when it was picked.
+
+**Fix**: `PlaceProtectiveOrders` now re-validates BOTH `pendingStopPrice` and `pendingTargetPrice`
+against `position.OpenPrice` — the REAL fill, known only once the position actually exists — right
+before submitting either order. Reuses `EnforceMinStopDistance` (already built for the stop side)
+and a new mirror-image `EnforceMinTargetDistance` for the target side. Both widen outward, never
+inward, if the realized distance from the actual fill would otherwise come in under the
+configured minimum. The `[Order] protective stop=... target=...` log line now also prints the
+actual fill price alongside the two (possibly adjusted) levels, for exactly this kind of
+after-the-fact review.
+
+**Verified 2026-09-27 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live** — this is the SIXTH
+consecutive round of "fix, redeploy, still broken, dig through both logs, find the real cause" on
+this one feature (protective order placement). The next live signal is the real test.
+
 ---
 
 ## Common Architecture Patterns
