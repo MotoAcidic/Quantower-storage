@@ -2678,9 +2678,63 @@ actual fill price alongside the two (possibly adjusted) levels, for exactly this
 after-the-fact review.
 
 **Verified 2026-09-27 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
--c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live** — this is the SIXTH
-consecutive round of "fix, redeploy, still broken, dig through both logs, find the real cause" on
-this one feature (protective order placement). The next live signal is the real test.
+-c Release` — 0 errors. Deployed folder still clean. This closed out the protective-order-placement
+saga — six consecutive rounds of "fix, redeploy, still broken, dig through both logs" on that one
+feature, from the same-day live testing that started with the very first signal.
+
+#### FOUR TRADING-LOGIC CHANGES, 2026-09-28 — swing stops, 5m POC, min swing size, delta filter
+
+All four came from the operator reviewing live signals in real time and reasoning about the
+underlying logic, not from a bug — same day as the protective-order fixes above, following
+straight on from that testing session.
+
+1. **Swing-based stops** — "stop losses should be places at recent swing low for longs and recent
+   swing high for shorts right." New `SwingTracker.cs` (own file, same fractal pivot-confirmation
+   rule as `OrderBlockEngine`/`PocEngine`, deliberately NOT sharing code with either — this
+   project's own convention favors small independent files here). Runs UNCONDITIONALLY in
+   `OnRun`/`RunPoll`, regardless of whether any POC feature is enabled, since stop placement now
+   depends on it for BOTH entry pathways. `ComputeSwingStop` replaces the old level-price
+   (DOM/absorption) and rejection-bar-extreme (POC) stop calculations, falling back to the old
+   calculation only if no swing has confirmed yet this run. `MinStopDistanceTicks` and the
+   fill-price re-validation from the ninth protective-order fix still apply on top unchanged.
+
+2. **5-minute POC** — "lets add in the 5min poc that would be safer to play off," directly
+   following a discussion about the 15m POC's own risk: "while trading based off the 15min poc
+   could be dangerous because if its in a down trend and we are looking for a pull back it could
+   take a long time for that to play out." `Poc5mEnabled` (default on) mirrors the 15m POC exactly
+   — own dedicated 5-minute `HistoricalData`, own `PocEngine` instance, own bar-drain cursor,
+   eligible as both a `TryComputeTarget` candidate and its own standalone rejection trigger in
+   `CheckPocRejection`, sharing `PocLookbackDays`/`PocSwingPivotLookback` with the 15m one.
+
+3. **Current-move minimum swing size** — from the operator reading an actual signal's numbers:
+   "playing off the 1min poc this makes no sense the rr for this trade is super negative." Checked
+   the math (`Sell anchor=current-move POC 30704.5 ... stop=30706.5 target=30686`, filled
+   30701.25): the R:R itself was fine (~2.9:1) — the real problem is the current-move POC sitting
+   on the CHART's own timeframe, which can be formed by a tiny, barely-there swing yet still
+   produces a target sized the same as any other anchor. New `PocCurrentMoveMinSwingTicks`
+   (default 20, 0=off) requires the most recently completed swing leg (from the same
+   `SwingTracker`) to span at least that many ticks before the current-move POC is allowed to
+   anchor a trade — checked via `HasSufficientSwingSize`, applied ONLY to current-move, not 5m/15m
+   (which already represent more deliberate structure by virtue of their own timeframe).
+
+4. **Delta filter** — "we should also use the delta as a decision factor for when the reversal is
+   going to happen because if we keep trying to take longs when delta is negative and in the red
+   we are just fighting our selves." Confirmed relevant on a REAL trade from the same session: a
+   Sell fired right where the chart showed a large BUY print (a "BUY 51" marker), exactly the
+   "fighting ourselves" scenario described. New `DeltaTracker.cs` (own file) buckets classified
+   trade prints per chart bar (same tick-classification/bucketing approach as Finch-Lite's own
+   delta panel — `TryClassify` copied into the strategy, since it previously needed no
+   classification at all) and exposes a rolling sum over the last `DeltaLookbackBars` (default 8,
+   the operator's own choice of a recent rolling window over session-cumulative or single-bar) via
+   `PassesDeltaFilter`. A HARD block (the operator's own choice over a softer confirmation,
+   matching their own framing): a long is skipped entirely when the rolling window is net
+   negative, a short is skipped entirely when it's net positive — applied to BOTH entry pathways,
+   not just the POC one that prompted it.
+
+**Verified 2026-09-28**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c
+Release` — 0 errors. Deployed folder still holds only this strategy's own DLL/PDB/deps.json.
+**NOT YET verified live** — none of these four changes have seen a live signal yet; watch closely,
+same as everything else in this strategy's history.
 
 ---
 

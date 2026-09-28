@@ -187,6 +187,33 @@ namespace finchDomScalpStrategy;
 /// REAL fill) right before submitting either order, via `EnforceMinStopDistance` and a new mirror
 /// `EnforceMinTargetDistance` — both widen outward if the realized distance from the actual fill
 /// would otherwise land under the configured minimum.
+///
+/// FOUR MORE CHANGES, 2026-09-28, all operator-driven from reviewing live signals:
+/// - **Swing-based stops**: "stop losses should be places at recent swing low for longs and
+///   recent swing high for shorts" — `SwingTracker` (a new, standalone fractal-pivot tracker, run
+///   UNCONDITIONALLY regardless of whether any POC feature is enabled, since stops now depend on
+///   it) replaces the old level-price/rejection-bar-extreme stop calculation in BOTH entry
+///   pathways via `ComputeSwingStop`, falling back to the old calculation only if no swing has
+///   confirmed yet this run. `MinStopDistanceTicks`/fill-price re-validation still apply on top.
+/// - **5-minute POC**: "while trading based off the 15min poc could be dangerous... it could take
+///   a long time for that to play out" — `Poc5mEnabled` adds a middle-ground timeframe between the
+///   fast current-move POC and the slow 15m one, same engine/rejection logic, own dedicated
+///   5-minute series, own on/off switch, eligible as both a target candidate and its own
+///   standalone rejection trigger exactly like the other two.
+/// - **Current-move minimum swing size**: "playing off the 1min poc this makes no sense the rr
+///   for this trade is super negative" — the current-move POC sits on the chart's own timeframe
+///   and can be formed by a tiny, barely-there swing while still producing a target sized like any
+///   other anchor. `PocCurrentMoveMinSwingTicks` (via `HasSufficientSwingSize`, using the same
+///   `SwingTracker`) requires the most recent completed swing leg to span a minimum distance
+///   before the current-move POC is allowed to anchor a trade at all. Deliberately NOT applied to
+///   5m/15m, which already represent more deliberate structure by virtue of their own timeframe.
+/// - **Delta filter**: "if we keep trying to take longs when delta is negative and in the red we
+///   are just fighting our selves" — `DeltaFilterEnabled`/`DeltaLookbackBars` (a new
+///   `DeltaTracker`, same tick-classification approach as Finch-Lite's own delta panel) sums
+///   buy-minus-sell volume over the last N closed bars and HARD-BLOCKS (the operator's own choice
+///   over a softer confirmation) any long when that rolling sum is net negative, and any short
+///   when it's net positive — applied via `PassesDeltaFilter` to every entry pathway, not just
+///   the POC one that prompted it.
 /// </summary>
 public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 {
@@ -298,15 +325,24 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("POC: enable 15m higher-timeframe", 41)]
     public bool Poc15mEnabled { get; set; }
 
-    /// <summary>Same fractal swing-pivot rule as Finch-Lite's own indicator, shared by both the
-    /// current-move and 15m engines.</summary>
+    /// <summary>FOUND 2026-09-27 ("while trading based off the 15min poc could be dangerous
+    /// because if its in a down trend and we are looking for a pull back it could take a long
+    /// time for that to play out") — a middle-ground timeframe between the fast, reactive
+    /// current-move POC and the slow, structurally-heavy 15m one. Same engine, same rejection
+    /// logic, own dedicated 5-minute series and own on/off switch, so it can be used instead of or
+    /// alongside either of the other two.</summary>
+    [InputParameter("POC: enable 5m", 47)]
+    public bool Poc5mEnabled { get; set; }
+
+    /// <summary>Same fractal swing-pivot rule as Finch-Lite's own indicator, shared by all three
+    /// POC engines (current-move, 5m, 15m).</summary>
     [InputParameter("POC: swing pivot lookback (bars)", 42, 1, 20, 1, 0)]
     public int PocSwingPivotLookback { get; set; }
 
-    /// <summary>How far back the dedicated 15-minute series loads on attach — only needs enough
-    /// bars to locate the current swing structure, same reasoning as the indicator's own
+    /// <summary>How far back the dedicated 5m/15m series load on attach — only needs enough bars
+    /// to locate the current swing structure, same reasoning as the indicator's own
     /// PocLookbackDays.</summary>
-    [InputParameter("POC: 15m history lookback (days)", 43, 1, 90, 1, 0)]
+    [InputParameter("POC: 5m/15m history lookback (days)", 43, 1, 90, 1, 0)]
     public int PocLookbackDays { get; set; }
 
     /// <summary>How far beyond the POC a bar's CLOSE must end up, on the origin side, before a
@@ -329,6 +365,33 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("POC rejection: minimum approach distance (ticks)", 46, 1, 100000, 1, 0)]
     public int PocApproachDistanceTicks { get; set; }
 
+    /// <summary>FOUND 2026-09-27 (operator, reading a live signal: "playing off the 1min poc this
+    /// makes no sense the rr for this trade is super negative") — the current-move POC sits on the
+    /// CHART's own timeframe and can be formed by a tiny, barely-there swing, yet still produces a
+    /// target sized the same as any other anchor. Requires the most recently confirmed swing leg
+    /// (high to low, from `SwingTracker`) to span at least this many ticks before the current-move
+    /// POC is allowed to anchor a trade at all — 0 disables the check. Deliberately NOT applied to
+    /// the 5m/15m POCs, which already represent more deliberate structure by virtue of their own
+    /// timeframe.</summary>
+    [InputParameter("POC current-move: minimum swing size to qualify (ticks, 0=off)", 48, 0, 100000, 1, 0)]
+    public int PocCurrentMoveMinSwingTicks { get; set; }
+
+    // ---- delta filter — see the class doc comment's "DELTA FILTER" section ------------------
+
+    /// <summary>FOUND 2026-09-27 (operator: "if we keep trying to take longs when delta is
+    /// negative and in the red we are just fighting our selves") — a HARD block (the operator's
+    /// own choice over a softer confirmation): a long is skipped entirely when the rolling delta
+    /// window is net negative, a short is skipped entirely when it's net positive, regardless of
+    /// which pathway or POC produced the signal.</summary>
+    [InputParameter("Delta filter: enable", 49)]
+    public bool DeltaFilterEnabled { get; set; }
+
+    /// <summary>How many recently-closed chart bars the rolling delta sum covers — the operator's
+    /// own choice over session-cumulative or single-bar delta, since it reacts to recent flow
+    /// without being as noisy as one bar alone.</summary>
+    [InputParameter("Delta filter: rolling window (bars)", 50, 1, 200, 1, 0)]
+    public int DeltaLookbackBars { get; set; }
+
     // ---- lifecycle state --------------------------------------------------------------------
 
     private Timer? pollTimer;
@@ -339,7 +402,20 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     private PocEngine? poc15mEngine;
     private HistoricalData? poc15mHistory;
     private int poc15mBarsSeen;
+    private PocEngine? poc5mEngine;
+    private HistoricalData? poc5mHistory;
+    private int poc5mBarsSeen;
+
+    /// <summary>Runs UNCONDITIONALLY, independent of whether either POC feature is enabled — see
+    /// its own class doc comment for why stop placement can't depend on a feature toggle.</summary>
+    private SwingTracker? swingTracker;
     private readonly ConcurrentQueue<(double Price, double Size)> pocTickQueue = new();
+
+    /// <summary>Runs only when <see cref="DeltaFilterEnabled"/> is on — unlike the swing tracker,
+    /// this has no other use in the strategy, so there is no reason to pay for tick classification
+    /// when the filter itself is switched off.</summary>
+    private DeltaTracker? deltaTracker;
+    private readonly ConcurrentQueue<(DateTime TimeUtc, double Size, bool IsBuy)> deltaTickQueue = new();
     private string? orderTypeId;
     private string? stopOrderTypeId;
     private string? limitOrderTypeId;
@@ -421,11 +497,16 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         this.PocCurrentMoveEnabled = true;
         this.Poc15mEnabled = true;
+        this.Poc5mEnabled = true;
         this.PocSwingPivotLookback = 3;
         this.PocLookbackDays = 5;
         this.PocRejectionBufferTicks = 3;
         this.PocApproachLookbackBars = 5;
         this.PocApproachDistanceTicks = 10;
+        this.PocCurrentMoveMinSwingTicks = 20;
+
+        this.DeltaFilterEnabled = true;
+        this.DeltaLookbackBars = 8;
 
         this.MaxDailyLoss = 0;
         this.MaxDrawdown = 2000;
@@ -468,6 +549,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.protectiveOrdersPlaced = false;
         this.breakevenMoved = false;
         this.resolvedSymbolId = null;
+        this.poc5mBarsSeen = 0;
 
         if (this.CurrentSymbol != null && this.CurrentSymbol.State == BusinessObjectState.Fake)
             this.CurrentSymbol = Core.Instance.GetSymbol(this.CurrentSymbol.CreateInfo());
@@ -547,6 +629,30 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             }
         }
 
+        // "lets add in the 5min poc that would be safer to play off" (2026-09-27) — a middle
+        // ground between the fast current-move POC and the slow 15m one, same engine, own series.
+        if (this.Poc5mEnabled)
+        {
+            try
+            {
+                var lookback = Core.TimeUtils.DateTimeUtcNow.AddDays(-Math.Max(1, this.PocLookbackDays));
+                this.poc5mHistory = this.CurrentSymbol.GetHistory(Period.MIN5, this.CurrentSymbol.HistoryType, lookback);
+                this.poc5mEngine = new PocEngine(this.PocSwingPivotLookback);
+                this.poc5mBarsSeen = 0;
+            }
+            catch (Exception ex)
+            {
+                this.Log($"5m POC unavailable: {ex.GetType().Name}: {ex.Message}", StrategyLoggingLevel.Error);
+            }
+        }
+
+        // Runs unconditionally — stop placement needs a swing reference regardless of whether any
+        // POC feature is enabled (see SwingTracker's own class doc comment).
+        this.swingTracker = new SwingTracker(this.PocSwingPivotLookback);
+
+        if (this.DeltaFilterEnabled)
+            this.deltaTracker = new DeltaTracker(this.Period.Duration);
+
         this.hdm = this.CurrentSymbol.GetHistory(this.Period, this.CurrentSymbol.HistoryType, this.StartPoint);
 
         // Do-nothing handler, subscribed purely for the side effect: without SOME NewLevel2
@@ -565,9 +671,10 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.CurrentSymbol.NewLevel2 -= this.OnLevel2;
         this.CurrentSymbol.NewLevel2 += this.OnLevel2;
 
-        // ONLY needed for POC's own volume-by-price accumulation — the DOM/absorption/IFVG
-        // pathway alone never needed a tick subscription (see the class doc comment).
-        if (this.PocCurrentMoveEnabled || this.Poc15mEnabled)
+        // Needed for POC's own volume-by-price accumulation AND (since 2026-09-27) the delta
+        // filter's tick classification — the DOM/absorption/IFVG pathway alone never needed a
+        // tick subscription (see the class doc comment).
+        if (this.PocCurrentMoveEnabled || this.Poc15mEnabled || this.Poc5mEnabled || this.DeltaFilterEnabled)
         {
             this.CurrentSymbol.NewLast -= this.OnLast;
             this.CurrentSymbol.NewLast += this.OnLast;
@@ -608,9 +715,15 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.hdm = null;
         this.poc15mHistory?.Dispose();
         this.poc15mHistory = null;
+        this.poc5mHistory?.Dispose();
+        this.poc5mHistory = null;
         this.pocCurrentMoveEngine = null;
         this.poc15mEngine = null;
+        this.poc5mEngine = null;
         this.pocTickQueue.Clear();
+        this.swingTracker = null;
+        this.deltaTracker = null;
+        this.deltaTickQueue.Clear();
     }
 
     private void OnLevel2(Symbol symbol, Level2Quote level2, DOMQuote dom)
@@ -620,8 +733,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// <summary>
     /// §10-style discipline, same as Finch-Lite's own indicator: no work on the market-data
     /// thread beyond a comparison and an enqueue. POC counts every trade's own volume toward its
-    /// own price regardless of which side was the aggressor, so unlike a delta/absorption feed
-    /// this needs no classification step at all — just price and size.
+    /// own price regardless of which side was the aggressor, so it always gets queued; the delta
+    /// filter DOES care about side, so it's only queued when actually classifiable.
     /// </summary>
     private void OnLast(Symbol symbol, Last last)
     {
@@ -629,6 +742,38 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             return;
 
         this.pocTickQueue.Enqueue((last.Price, last.Size));
+
+        if (this.DeltaFilterEnabled && TryClassify(symbol, last, out var isBuy))
+            this.deltaTickQueue.Enqueue((last.Time, last.Size, isBuy));
+    }
+
+    /// <summary>
+    /// Same aggressor-classification fallback as Finch-Lite's own indicator (`TryClassify`) —
+    /// trusts the feed's own AggressorFlag first, falls back to comparing the print's price
+    /// against the current bid/ask when the flag is missing/neither. A print that carries no
+    /// evidence either way (inside the spread, or a locked/crossed quote) is dropped, not guessed.
+    /// </summary>
+    private static bool TryClassify(Symbol symbol, Last last, out bool isBuy)
+    {
+        if (last.AggressorFlag == AggressorFlag.Buy) { isBuy = true; return true; }
+        if (last.AggressorFlag == AggressorFlag.Sell) { isBuy = false; return true; }
+
+        isBuy = false;
+
+        var bid = symbol.Bid;
+        var ask = symbol.Ask;
+
+        if (!double.IsFinite(bid) || !double.IsFinite(ask) || bid <= 0 || ask <= 0 || bid >= ask)
+            return false;
+
+        var takenByBuyer = last.Price >= ask;
+        var takenBySeller = last.Price <= bid;
+
+        if (takenByBuyer == takenBySeller)
+            return false;
+
+        isBuy = takenByBuyer;
+        return true;
     }
 
     // ---- the poll -----------------------------------------------------------------------------
@@ -709,9 +854,15 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         var levels = engine.Reconcile(nowUtc, dayStart, bids, asks, this.MinLevelSize, midPrice, distanceThreshold);
 
-        // ---- 2. feed any newly-closed chart bars into the IFVG + current-move POC engines ----
+        // ---- 2. feed any newly-closed chart bars into the IFVG + current-move POC + swing +
+        // delta engines ----
         Bar? latestClosedBar = null;
         var priorBars = Array.Empty<Bar>();
+
+        // Drained BEFORE the bar-close loop below so a bar's own delta reflects every tick that
+        // arrived for it, not whatever happened to already be queued a poll cycle late.
+        while (this.deltaTickQueue.TryDequeue(out var deltaTick))
+            this.deltaTracker?.FeedTick(deltaTick.TimeUtc, deltaTick.Size, deltaTick.IsBuy);
 
         if (hdm.Count > 1)
         {
@@ -728,6 +879,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
                 if (TryReadBar(hdm, i, out var bar))
                 {
                     fvg.Feed(bar);
+                    this.swingTracker?.FeedBar(bar);
+                    this.deltaTracker?.CloseBar(bar.OpenUtc);
 
                     if (this.PocCurrentMoveEnabled)
                         this.pocCurrentMoveEngine?.FeedBar(bar);
@@ -808,6 +961,19 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             this.poc15mBarsSeen = closedUpTo;
         }
 
+        if (this.Poc5mEnabled && this.poc5mHistory is { } h5 && this.poc5mEngine is { } m5 && h5.Count > 1)
+        {
+            var closedUpTo = h5.Count - 1;
+
+            for (var i = this.poc5mBarsSeen; i < closedUpTo; i++)
+            {
+                if (TryReadBar(h5, i, out var bar))
+                    m5.FeedBar(bar);
+            }
+
+            this.poc5mBarsSeen = closedUpTo;
+        }
+
         while (this.pocTickQueue.TryDequeue(out var tick))
         {
             if (this.PocCurrentMoveEnabled)
@@ -815,6 +981,9 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
             if (this.Poc15mEnabled)
                 this.poc15mEngine?.FeedTrade(tick.Price, tick.Size);
+
+            if (this.Poc5mEnabled)
+                this.poc5mEngine?.FeedTrade(tick.Price, tick.Size);
         }
     }
 
@@ -880,9 +1049,15 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             if (!hasAlignedIfvg) continue;
 
             var side = level.IsBid ? Side.Buy : Side.Sell;
-            var stopPrice = level.IsBid
-                ? level.Price - (this.StopBufferTicks * tickSize)
-                : level.Price + (this.StopBufferTicks * tickSize);
+            if (!this.PassesDeltaFilter(side)) continue;
+
+            // "stop losses should be places at recent swing low for longs and recent swing high
+            // for shorts" (2026-09-27) — falls back to the old level-relative calculation only if
+            // no swing has confirmed yet this run (early-session edge case).
+            var stopPrice = this.ComputeSwingStop(level.IsBid, tickSize)
+                ?? (level.IsBid
+                    ? level.Price - (this.StopBufferTicks * tickSize)
+                    : level.Price + (this.StopBufferTicks * tickSize));
             stopPrice = this.EnforceMinStopDistance(stopPrice, price, level.IsBid, tickSize);
 
             var hasTarget = this.TryComputeTarget(
@@ -946,6 +1121,9 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         if (this.PocCurrentMoveEnabled && this.pocCurrentMoveEngine?.Poc is { } cmPoc && IsAhead(cmPoc))
             candidates.Add((cmPoc, "current-move POC"));
 
+        if (this.Poc5mEnabled && this.poc5mEngine?.Poc is { } m5Poc && IsAhead(m5Poc))
+            candidates.Add((m5Poc, "5m POC"));
+
         if (this.Poc15mEnabled && this.poc15mEngine?.Poc is { } htfPoc && IsAhead(htfPoc))
             candidates.Add((htfPoc, "15m POC"));
 
@@ -972,7 +1150,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
         IReadOnlyList<FairValueGapEngine.InverseFvgZone> ifvgZones)
     {
-        if (!this.PocCurrentMoveEnabled && !this.Poc15mEnabled) return;
+        if (!this.PocCurrentMoveEnabled && !this.Poc5mEnabled && !this.Poc15mEnabled) return;
         if (this.waitOpenPosition || this.waitClosePositions) return;
         if (this.dailyLimitHit || this.drawdownLimitHit || this.tradesLimitHit) return;
         if (this.MyPositions().Any()) return;
@@ -984,18 +1162,69 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         if (this.PocCurrentMoveEnabled && this.pocCurrentMoveEngine?.Poc is { } cmPoc
             && TryPocRejection(bar, cmPoc, buffer, out var cmSide)
-            && HasGenuineApproach(priorBars, cmPoc, approachDistance, cmSide))
+            && HasGenuineApproach(priorBars, cmPoc, approachDistance, cmSide)
+            && this.HasSufficientSwingSize(tickSize)
+            && this.PassesDeltaFilter(cmSide))
         {
             this.PlacePocEntry(cmSide, bar, cmPoc, tickSize, "current-move", levels, ifvgZones);
             return;
         }
 
+        if (this.Poc5mEnabled && this.poc5mEngine?.Poc is { } m5Poc
+            && TryPocRejection(bar, m5Poc, buffer, out var m5Side)
+            && HasGenuineApproach(priorBars, m5Poc, approachDistance, m5Side)
+            && this.PassesDeltaFilter(m5Side))
+        {
+            this.PlacePocEntry(m5Side, bar, m5Poc, tickSize, "5m", levels, ifvgZones);
+            return;
+        }
+
         if (this.Poc15mEnabled && this.poc15mEngine?.Poc is { } htfPoc
             && TryPocRejection(bar, htfPoc, buffer, out var htfSide)
-            && HasGenuineApproach(priorBars, htfPoc, approachDistance, htfSide))
+            && HasGenuineApproach(priorBars, htfPoc, approachDistance, htfSide)
+            && this.PassesDeltaFilter(htfSide))
         {
             this.PlacePocEntry(htfSide, bar, htfPoc, tickSize, "15m", levels, ifvgZones);
         }
+    }
+
+    /// <summary>See <see cref="PocCurrentMoveMinSwingTicks"/>'s own doc comment. Only gates the
+    /// current-move POC — 0 (the default-off value would be surprising here; default is
+    /// non-zero) disables the check entirely.</summary>
+    private bool HasSufficientSwingSize(double tickSize)
+    {
+        if (this.PocCurrentMoveMinSwingTicks <= 0) return true;
+        if (this.swingTracker?.LastSwingHigh is not { } high) return false;
+        if (this.swingTracker?.LastSwingLow is not { } low) return false;
+
+        return (high - low) >= this.PocCurrentMoveMinSwingTicks * tickSize;
+    }
+
+    /// <summary>See <see cref="DeltaFilterEnabled"/>'s own doc comment — a HARD block, not a
+    /// confirmation: a long is skipped entirely when the rolling delta window is net negative, a
+    /// short is skipped entirely when it's net positive. Applies to every entry pathway.</summary>
+    private bool PassesDeltaFilter(Side side)
+    {
+        if (!this.DeltaFilterEnabled || this.deltaTracker is null) return true;
+
+        var rollingDelta = this.deltaTracker.RollingDelta(this.DeltaLookbackBars);
+
+        if (side == Side.Buy && rollingDelta < 0) return false;
+        if (side == Side.Sell && rollingDelta > 0) return false;
+
+        return true;
+    }
+
+    /// <summary>See <see cref="SwingTracker"/>'s own class doc comment for why stop placement
+    /// uses a dedicated, always-running tracker rather than any POC engine's internal swing
+    /// state. Null (no swing confirmed yet this run) lets the caller fall back to its own
+    /// previous stop calculation.</summary>
+    private double? ComputeSwingStop(bool isLong, double tickSize)
+    {
+        var swing = isLong ? this.swingTracker?.LastSwingLow : this.swingTracker?.LastSwingHigh;
+        if (swing is not { } s) return null;
+
+        return isLong ? s - (this.StopBufferTicks * tickSize) : s + (this.StopBufferTicks * tickSize);
     }
 
     /// <summary>
@@ -1073,13 +1302,15 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
         IReadOnlyList<FairValueGapEngine.InverseFvgZone> ifvgZones)
     {
-        // Stop sits beyond the rejection bar's OWN extreme — the wick that got rejected — using
-        // the same StopBufferTicks concept the DOM/absorption pathway's own stop uses.
-        var stopPrice = side == Side.Sell
-            ? rejectionBar.High + (this.StopBufferTicks * tickSize)
-            : rejectionBar.Low - (this.StopBufferTicks * tickSize);
-
         var isLong = side == Side.Buy;
+
+        // "stop losses should be places at recent swing low for longs and recent swing high for
+        // shorts" (2026-09-27) — falls back to the rejection bar's own extreme only if no swing
+        // has confirmed yet this run.
+        var stopPrice = this.ComputeSwingStop(isLong, tickSize)
+            ?? (side == Side.Sell
+                ? rejectionBar.High + (this.StopBufferTicks * tickSize)
+                : rejectionBar.Low - (this.StopBufferTicks * tickSize));
 
         // The rejection bar's own CLOSE, not the POC price itself, stands in for "current price"
         // here — same role `midPrice` plays for the DOM/absorption pathway's own target call.
