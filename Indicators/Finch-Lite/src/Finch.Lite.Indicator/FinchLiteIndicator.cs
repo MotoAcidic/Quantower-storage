@@ -412,9 +412,15 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     [InputParameter("POC: enable 15m higher-timeframe", 81)]
     public bool Poc15mEnabled { get; set; } = true;
 
+    /// <summary>"add the 5min poc to my indicator also" (2026-09-28) — mirrors the strategy's own
+    /// same-day addition of a 5-minute POC, a middle ground between the fast current-move POC and
+    /// the slow 15m one.</summary>
+    [InputParameter("POC: enable 5m", 86)]
+    public bool Poc5mEnabled { get; set; } = true;
+
     /// <summary>Bars required on EACH side of a candidate before it counts as a confirmed swing
     /// high/low, on WHICHEVER timeframe each PocEngine instance is fed — same fractal rule as
-    /// order blocks, shared by both the current-move and 15m engines rather than exposing two
+    /// order blocks, shared by the current-move, 5m, and 15m engines rather than exposing three
     /// near-identical sliders for one concept.</summary>
     [InputParameter("POC: swing pivot lookback (bars)", 82, 1, 20, 1, 0)]
     public int PocSwingPivotLookback { get; set; } = 3;
@@ -425,11 +431,14 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     [InputParameter("POC: 15m colour", 84)]
     public Color Poc15mColor { get; set; } = Color.FromArgb(0x40, 0xC4, 0xFF);
 
-    /// <summary>How far back the dedicated 15-minute series loads on attach — only needs enough
-    /// bars to locate the current swing structure, not a long trading history, since the profile
+    [InputParameter("POC: 5m colour", 87)]
+    public Color Poc5mColor { get; set; } = Color.FromArgb(0xB0, 0x00, 0xE6);
+
+    /// <summary>How far back the dedicated 5m/15m series load on attach — only needs enough bars
+    /// to locate the current swing structure, not a long trading history, since the profile
     /// itself only ever accumulates LIVE ticks going forward (see PocEngine's own "known lag"
     /// doc comment) — no historical volume to backfill regardless of how far back this reaches.</summary>
-    [InputParameter("POC: 15m history lookback (days)", 85, 1, 90, 1, 0)]
+    [InputParameter("POC: 5m/15m history lookback (days)", 85, 1, 90, 1, 0)]
     public int PocLookbackDays { get; set; } = 5;
 
     /// <summary>
@@ -445,6 +454,9 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     private PocEngine? poc15mEngine;
     private HistoricalData? poc15mHistory;
     private int poc15mBarsSeen;
+    private PocEngine? poc5mEngine;
+    private HistoricalData? poc5mHistory;
+    private int poc5mBarsSeen;
 
     /// <summary>Own cursor into the SAME chart HistoricalData the IFVG section above reads —
     /// deliberately not shared with <see cref="chartBarsSeen"/>, since that one stops advancing
@@ -631,6 +643,21 @@ public sealed class FinchLiteIndicator : Qt.Indicator
                 this.overlayFault = $"15m POC unavailable: {ex.GetType().Name}: {ex.Message}";
             }
         }
+
+        if (this.Poc5mEnabled && this.poc5mHistory is null)
+        {
+            try
+            {
+                var lookback = DateTime.UtcNow.AddDays(-Math.Max(1, this.PocLookbackDays));
+                this.poc5mHistory = symbol.GetHistory(Period.MIN5, symbol.HistoryType, lookback);
+                this.poc5mEngine = new PocEngine(this.PocSwingPivotLookback);
+                this.poc5mBarsSeen = 0;
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = $"5m POC unavailable: {ex.GetType().Name}: {ex.Message}";
+            }
+        }
     }
 
     /// <summary>
@@ -648,7 +675,7 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         // gate below — gated only on whether either POC feature is actually on, so the queue
         // never grows once both are switched off (same "nothing running that isn't currently
         // shown" discipline as everything else in this indicator).
-        if (last.Size > 0 && (this.PocCurrentMoveEnabled || this.Poc15mEnabled))
+        if (last.Size > 0 && (this.PocCurrentMoveEnabled || this.Poc5mEnabled || this.Poc15mEnabled))
             this.pocTickQueue.Enqueue((last.Price, last.Size));
 
         // Prints that carry no evidence either way (unusable quote, or strictly inside the
@@ -744,6 +771,10 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.poc15mHistory?.Dispose();
         this.poc15mHistory = null;
         this.poc15mBarsSeen = 0;
+        this.poc5mEngine = null;
+        this.poc5mHistory?.Dispose();
+        this.poc5mHistory = null;
+        this.poc5mBarsSeen = 0;
         this.pocChartBarsSeen = -1;
         this.pocTickQueue.Clear();
         this.pocDrawable = PocDrawable.Empty;
@@ -1247,6 +1278,22 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             }
         }
 
+        if (this.Poc5mEnabled && this.poc5mHistory is { } h5 && this.poc5mEngine is { } m5 && h5.Count > 1)
+        {
+            var closedUpTo = h5.Count - 1;
+
+            for (var i = this.poc5mBarsSeen; i < closedUpTo; i++)
+            {
+                if (TryReadBar(h5, i, out var bar))
+                {
+                    m5.FeedBar(bar);
+                    changed = true;
+                }
+            }
+
+            this.poc5mBarsSeen = closedUpTo;
+        }
+
         if (this.Poc15mEnabled && this.poc15mHistory is { } h15 && this.poc15mEngine is { } htf && h15.Count > 1)
         {
             var closedUpTo = h15.Count - 1;
@@ -1270,6 +1317,9 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             if (this.PocCurrentMoveEnabled)
                 this.pocCurrentMoveEngine?.FeedTrade(tick.Price, tick.Size);
 
+            if (this.Poc5mEnabled)
+                this.poc5mEngine?.FeedTrade(tick.Price, tick.Size);
+
             if (this.Poc15mEnabled)
                 this.poc15mEngine?.FeedTrade(tick.Price, tick.Size);
         }
@@ -1277,13 +1327,16 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         if (!changed)
             return;
 
-        var points = new List<PocDraw>(2);
+        var points = new List<PocDraw>(3);
 
         if (this.PocCurrentMoveEnabled && this.pocCurrentMoveEngine?.Poc is { } cmPoc)
-            points.Add(new PocDraw(cmPoc, this.pocCurrentMoveEngine.MoveStartUtc, IsHigherTimeframe: false));
+            points.Add(new PocDraw(cmPoc, this.pocCurrentMoveEngine.MoveStartUtc, "current-move"));
+
+        if (this.Poc5mEnabled && this.poc5mEngine?.Poc is { } m5Poc)
+            points.Add(new PocDraw(m5Poc, this.poc5mEngine.MoveStartUtc, "5m"));
 
         if (this.Poc15mEnabled && this.poc15mEngine?.Poc is { } htfPoc)
-            points.Add(new PocDraw(htfPoc, this.poc15mEngine.MoveStartUtc, IsHigherTimeframe: true));
+            points.Add(new PocDraw(htfPoc, this.poc15mEngine.MoveStartUtc, "15m"));
 
         this.pocDrawable = new PocDrawable(points.ToArray());
     }
@@ -1411,13 +1464,13 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             this.overlayFault = $"The big-trade overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
         }
 
-        if (this.PocCurrentMoveEnabled || this.Poc15mEnabled)
+        if (this.PocCurrentMoveEnabled || this.Poc5mEnabled || this.Poc15mEnabled)
         {
             try
             {
                 this.pocOverlay.Draw(
                     graphics, window, this.pocDrawable,
-                    new PocOverlay.Options(this.PocCurrentMoveColor, this.Poc15mColor),
+                    new PocOverlay.Options(this.PocCurrentMoveColor, this.Poc5mColor, this.Poc15mColor),
                     registry);
             }
             catch (Exception ex)
@@ -1462,6 +1515,7 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.ob15mHistory?.Dispose();
         this.ob1hHistory?.Dispose();
         this.poc15mHistory?.Dispose();
+        this.poc5mHistory?.Dispose();
         this.faultFont.Dispose();
         this.faultBrush.Dispose();
         this.faultBack.Dispose();

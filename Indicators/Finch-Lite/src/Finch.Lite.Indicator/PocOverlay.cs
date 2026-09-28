@@ -11,9 +11,10 @@ namespace FinchLite;
 /// <param name="MoveStartUtc">When the current move started — the line draws from here to "now",
 /// same "still extending" convention already used for large-order/unfinished-auction lines,
 /// rather than spanning the whole pane.</param>
-/// <param name="IsHigherTimeframe">False for the chart-timeframe "current move" POC, true for the
-/// 15-minute higher-timeframe one — drives both colour and label text.</param>
-internal readonly record struct PocDraw(double Price, DateTime MoveStartUtc, bool IsHigherTimeframe);
+/// <param name="Label">One of "current-move", "5m", or "15m" — drives both colour and label text.
+/// CHANGED 2026-09-28 from a bool (current-move vs. 15m only) to a string when the 5m POC was
+/// added, so a third category didn't need a second boolean bolted on.</param>
+internal readonly record struct PocDraw(double Price, DateTime MoveStartUtc, string Label);
 
 /// <summary>Immutable paint snapshot: the poll writes it, the paint reads it.</summary>
 internal sealed record PocDrawable(PocDraw[] Points)
@@ -29,7 +30,7 @@ internal sealed record PocDrawable(PocDraw[] Points)
 /// </summary>
 internal sealed class PocOverlay : IDisposable
 {
-    internal readonly record struct Options(Color CurrentMoveColor, Color HigherTimeframeColor);
+    internal readonly record struct Options(Color CurrentMoveColor, Color Poc5mColor, Color Poc15mColor);
 
     private readonly Font font = new(FontFamily.GenericSansSerif, 8f, FontStyle.Bold);
     private readonly SolidBrush labelBack = new(Color.FromArgb(190, 16, 18, 24));
@@ -64,13 +65,18 @@ internal sealed class PocOverlay : IDisposable
                 if (TryX(converter, point.MoveStartUtc, pane.Left, pane.Right, out var originX))
                     lineStartX = originX;
 
-                var colour = point.IsHigherTimeframe ? options.HigherTimeframeColor : options.CurrentMoveColor;
+                var colour = point.Label switch
+                {
+                    "5m" => options.Poc5mColor,
+                    "15m" => options.Poc15mColor,
+                    _ => options.CurrentMoveColor,
+                };
 
                 graphics.DrawLine(this.Pen(colour), lineStartX, y, pane.Right, y);
 
-                var text = point.IsHigherTimeframe
-                    ? $"POC 15m {point.Price:0.####}"
-                    : $"POC {point.Price:0.####}";
+                var text = point.Label == "current-move"
+                    ? $"POC {point.Price:0.####}"
+                    : $"POC {point.Label} {point.Price:0.####}";
                 var size = graphics.MeasureString(text, this.font);
                 var rect = new RectangleF(
                     pane.Right - size.Width - 10f, y - size.Height - 1f, size.Width + 6f, size.Height);

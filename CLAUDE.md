@@ -1745,6 +1745,27 @@ live chart — restart Quantower and confirm two dashed reference lines appear o
 confirmed on each timeframe, each labeled with its own price, each extending from its own move's
 start rather than the whole pane.
 
+**FOLLOW-UP 2026-09-28 — 5-minute POC added, mirroring the strategy's own same-day addition.**
+"add the 5min poc to my indicator also," directly following `finchDomScalpStrategy` growing a 5m
+POC pathway the same day (a middle ground between the fast current-move POC and the slow 15m one —
+see that strategy's own Catalog entry below). New `Poc5mEnabled` (default on, index 86) and
+`Poc5mColor` (default a magenta/purple, index 87) mirror the 15m POC's own shape exactly — own
+dedicated 5-minute `HistoricalData`, own `PocEngine` instance, own bar-drain cursor
+(`poc5mBarsSeen`), sharing `PocSwingPivotLookback`/`PocLookbackDays` with the 15m one (renamed in
+its own doc comment from "15m history lookback" to "5m/15m history lookback" to reflect that).
+
+**One structural change this required**: `PocDraw`'s `IsHigherTimeframe` bool (current-move vs.
+15m only) couldn't represent a third category cleanly, so `PocOverlay.cs` changed it to a
+`string Label` ("current-move"/"5m"/"15m"), used for both colour selection and the label text
+(`PocOverlay.Options` grew a third colour, `Poc5mColor`, alongside `CurrentMoveColor`/`Poc15mColor`).
+
+**Verified 2026-09-28**: `dotnet build ... -c Release -p:QuantowerSdkPath="...v1.147.4\bin\..."`
+— 0 errors, 29 warnings (all pre-existing nullable-annotation-context style, none new). Deployed
+to `C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`, `sha256sum`
+confirms the deployed DLL matches. Not yet confirmed on a live chart — restart Quantower and
+confirm a THIRD dashed reference line (5m, its own colour) appears alongside the existing
+current-move/15m ones once a swing confirms on that timeframe.
+
 ### Order-Flow Scalping Setup (`Indicators/order-flow-scalping/`) — added 2026-09-14
 **Not a project** - a configuration/diagnosis document for getting `ORB-IX` (above) to show
 delta, DOM/resting orders, absorption, auto-drawn fib, and FRVP+AVP (higher/lower timeframe
