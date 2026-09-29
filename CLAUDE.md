@@ -2982,6 +2982,195 @@ where they used to gate on `RthOnly`.
 **Verified 2026-09-28 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
 -c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live.**
 
+#### EIGHTEENTH FEATURE, 2026-09-29 — broader trend filter, from a full overnight loss review
+
+Operator: "review some of the trades from last night in the logs and see what we could have done
+better because we are down -130ish over the night." Pulled every `FinchDomScalp`-tagged `Trade`
+event from the platform's own Serilog (`C:\Quantower\Logs\Serilog\20260929.slog`) and paired them
+into round trips against the strategy's own signal log: **20 round trips, 9 wins (+$313), 11
+losses (-$419), net -$106 gross** (matches "-130ish" once commissions are included).
+
+**One pattern caused almost all of it**: from 08:07 to 10:52, the DOM/absorption pathway
+(`TryEnter`) took 9 separate short entries, ALL anchored on the same resting ask level around
+30635, while price was in a sustained overnight rally from ~30500 to past 30700. Only 3 of those 9
+shorts won (+$111.50 combined); the other 6 lost -$278.00. The signal log's own "absorbed" count
+for that level kept climbing across every re-entry (201 → 246 → 377 → 428 → 439 → 457 → 513 → 573 →
+604) — read by the entry logic as growing conviction to short, when a level that keeps refilling
+while price keeps climbing through it is actually the opposite signal. Meanwhile every LONG entry
+anchored on the opposing bid level (trading WITH that same rally) went 4-2 for +$124.50 net.
+
+`PassesDeltaFilter` (the existing hard block) was already wired into this pathway, confirmed in
+code — it just wasn't enough: its rolling window (default 8 bars) is local enough to clear on
+almost any short pullback, even inside an hours-long trend, so nothing stopped the pathway from
+re-fading the same level over and over through a directionally one-sided night.
+
+Presented the finding and three candidate fixes via `AskUserQuestion` (a broader trend filter, a
+per-level cooldown/blacklist, or simply widening the existing delta window) — **operator chose the
+broader trend filter**. Built as `PassesTrendFilter`, reusing the exact same `DeltaTracker`
+mechanism as `PassesDeltaFilter` (no new engine needed — `RollingDelta` already accepts any
+lookback), just with its own much longer window (`TrendDeltaLookbackBars`, default 60 bars vs. the
+local filter's 8) and its own independent on/off switch (`TrendFilterEnabled`, default on) — either
+filter, both, or neither can be active, since they answer different questions ("did the last few
+bars just react against me" vs. "is the whole session running against me"). Applied at every call
+site `PassesDeltaFilter` already was (the DOM/absorption pathway and all three POC pathways).
+`deltaTracker` construction and the `NewLast` tick subscription gate both extended to run whenever
+EITHER filter is enabled, not just the local one.
+
+**Verified 2026-09-29**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c
+Release` — 0 errors. Deployed folder still clean. **NOT YET verified live** — the real test is
+whether a future session with a similarly strong one-directional trend stops producing this same
+repeated-fade pattern.
+
+#### NINETEENTH FEATURE, 2026-09-29 (same day) — DOM/absorption becomes POC confluence, not its own trigger
+
+A follow-up loss review (this time from `C:\Quantower\Logs\Serilog\` and the Quantower Trades
+panel directly, cross-referenced chronologically) found something the earlier gross-total review
+missed: last night had TWO separate 5-loss-in-a-row streaks (-$214 and -$140), and — more useful —
+**8 of the roughly 10 losing round trips came from the standalone DOM/absorption pathway
+(`TryEnter`)**, virtually all of them re-fading a level price had already moved well past before
+the entry even fired. The operator: "would it make more sense to use the absorption levels and
+resting orders as a confluence to the poc trading instead of its own trading since it doesnt work
+out really well on its own?"
+
+Confirmed via `AskUserQuestion` (two questions): **remove `TryEnter` entirely** (no standalone
+DOM/absorption entry trigger of any kind going forward) and make a qualifying resting-order level a
+**hard requirement** inside the POC-rejection pathway, not a soft confidence boost.
+
+**Built**:
+- `HasAbsorptionConfluence(side, poc, tickSize, levels, out confirmingLevel)` — a qualifying level
+  (same `MinLevelSize`/`AbsorptionStrongContracts` thresholds the old standalone pathway used) must
+  sit within `PocAbsorptionProximityTicks` (new, default 10) of the POC price, on the side that
+  actually defends the rejection direction (a BID for a bullish/Buy rejection, an ASK for a
+  bearish/Sell one). Returns the nearest qualifying level, not just a bool, so the trade's own log
+  line can name which order flow actually backed it.
+- Added as a new hard `&&` condition alongside the existing delta/trend filters in all three POC
+  pathways (`CheckPocRejection`) — current-move, 5m, and 15m all now require it independently.
+- `TryEnter` removed entirely, along with its call site in `RunPoll` and the now-dead
+  `IfvgProximityTicks` parameter (IFVG alignment was only ever checked inside `TryEnter`; IFVG
+  zones are still consumed elsewhere, as a target candidate in `TryComputeTarget`, unaffected).
+  `CheckPocRejection` is now the only entry trigger in this strategy.
+
+**Related, same conversation** — the operator flagged a second issue from a live chart screenshot
+while this was in progress: "i also see this were the stop is right ontop of the resting orders
+which is were price normaly wants to go to pick up orders so it should be a few ticks past that so
+if it comes and touches it doesnt stop us out but we need to be out if it blows through those
+orders." A resting order sitting right where the stop naturally lands is exactly where price is
+likely to go to sweep that liquidity — not evidence the trade is wrong, just normal order-flow
+behavior — so a stop parked directly on top of one risks getting clipped by a bare touch rather
+than a genuine break. **Built** `ExtendStopPastRestingLevel(stopPrice, isLong, tickSize, levels)`:
+scans for a qualifying resting level (same thresholds) within one `StopBufferTicks` width of the
+already-computed stop, on the side that would defend against it, and pushes the stop
+`StopBufferTicks` further PAST that level instead — only ever widening the stop, never tightening
+it. Called in `PlacePocEntry` right after the existing `EnforceMinStopDistance` step.
+
+**Verified 2026-09-29 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live** — this is a genuine
+architecture change (one fewer entry pathway, a new hard gate on the only remaining one), so the
+real test is both trade FREQUENCY (confluence + POC rejection lining up simultaneously may be rare)
+and whether the quality bar this adds actually holds up.
+
+#### TWENTIETH FEATURE, 2026-09-29 (same day) — observability: signal-skip logging + heartbeat
+
+Direct follow-up to the confluence change above, since it added several new stacked gates in one
+pass: "is there a way to show logs on if some of the conditions are not met so i know its working
+becuase it hasnt gotten in a trade in a while." Pure observability — neither addition touches
+trading logic.
+
+- **`[Signal skipped]` logging** (`TryGatePocSignal`, `LogPocSignalSkipped`): once a genuine POC
+  rejection is actually detected (a real touch-and-close-beyond-buffer pattern with a confirmed
+  prior approach — not routine chop), the remaining gates (swing size for current-move only, local
+  delta, trend, absorption confluence) are now checked one at a time instead of one big `&&` chain,
+  and the FIRST one that fails logs exactly which it was and why (e.g. the actual rolling delta
+  value, or that no absorption sat within `PocAbsorptionProximityTicks`). Only fires on a genuine
+  near-miss — a rejection pattern that almost became a trade — never as noise on an ordinary bar
+  where nothing was ever close.
+- **`[Heartbeat]` logging** (`CheckHeartbeat`, `HeartbeatIntervalMinutes` — new, default 15 min,
+  0=off): a periodic snapshot (current POC levels, local/trend delta readings, session-filter
+  state, minutes since the last trade) logged on a fixed interval regardless of whether any
+  rejection pattern has even been attempted — this is what actually answers "is the loop alive" for
+  a session where price never even approaches a POC, which the skip-logging above can't cover since
+  it only fires once a rejection is already detected. Skipped entirely while a position is open —
+  the open position is already proof of life.
+
+**Verified 2026-09-29 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean.
+
+#### TWENTY-FIRST ISSUE, 2026-09-29 (same day) — confluence proximity confirmed too tight, widened
+
+The new observability logging (nineteenth/twentieth features above) did exactly what it was built
+for: within an hour of going live, "did we make the restrictions to tight now" was answered with
+real data instead of a guess. The skip log showed a strongly trending session (60-bar trend delta
+around -2181) where Buy rejections were correctly blocked by the trend/delta filters (working as
+designed — don't fight a real trend), but Sell rejections ALIGNED with that same trend were
+clearing delta/trend fine and dying specifically on "no qualifying absorption within 10 ticks" —
+zero trades fired all session, and the confluence gate (`PocAbsorptionProximityTicks`, added
+earlier the same day at a default of 10) was the confirmed bottleneck, not the directional filters.
+
+Confirmed via `AskUserQuestion`: widen the proximity rather than touch `MinLevelSize`/
+`AbsorptionStrongContracts` (those thresholds also define "real absorption" everywhere else, so a
+proximity change is more targeted). **`PocAbsorptionProximityTicks` default changed 10 → 20.**
+
+**Verified 2026-09-29 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. **Reminder**: this is a CODE default change
+only — the live instance's own saved setting (10, from earlier the same day) will NOT pick this up
+automatically; Quantower persists parameter values by name across restarts regardless of what the
+constructor default changes to (same lesson as the breakeven-buffer incident). Update it directly in
+the strategy's own settings panel, or detach/reattach fresh, to actually apply 20 to the running
+instance.
+
+**IMPORTANT — direct file-edit attempt failed**: tried editing the running instance's own saved
+`info.xml` directly on disk (strategy was confirmed STOPPED at the time) to apply this plus the
+breakeven-buffer and cooldown fixes without making the operator retype them in the UI. Confirmed
+this does NOT work: Quantower held its own in-memory copy of the old settings and overwrote the
+on-disk edit the moment the strategy was started again — all three edited values reverted to their
+pre-edit numbers. **Settings changes must go through the strategy's own settings panel in the UI;
+direct `info.xml` edits do not survive a start, even from a cleanly stopped state.**
+
+#### TWENTY-SECOND ISSUE, 2026-09-29 (same day) — local delta filter structurally fights reversal entries, disabled by default
+
+Almost immediately after the confluence-proximity widen above, the new skip-log showed the LOCAL
+(8-bar) delta filter blocking nearly every genuine rejection attempt: "it keeps saying local delta
+blocks everything is the delta really important to this trading style?"
+
+Diagnosed as a structural mismatch, not a tuning problem: a POC rejection is a REVERSAL bet — it's
+betting price is about to turn AWAY from what it was just doing. `PassesDeltaFilter` requires the
+last `DeltaLookbackBars` (8) bars' order flow to ALREADY agree with the NEW direction before letting
+the trade through. But at the exact moment of a genuine rejection, recent delta is still going to
+reflect the OLD, about-to-reverse direction almost by definition — that's what a turning point looks
+like. This filter fits a continuation/trend entry far better than the reversal entries this strategy
+actually trades (especially since `TryEnter`, the one pathway that WAS a continuation-style trade,
+was removed the day before).
+
+Confirmed via `AskUserQuestion`: **`DeltaFilterEnabled` now defaults to false.** `TrendFilterEnabled`
+(60-bar window) stays on by default — it asks a different, still-valid question ("is the whole
+SESSION running against this trade"), which doesn't have the same immediate-pre-reversal conflict.
+
+**Verified 2026-09-29 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. Same caveat as every other default change
+today: this needs to be applied through the strategy's own settings UI on the running instance, not
+assumed to take effect automatically.
+
+#### TWENTY-THIRD FEATURE, 2026-09-29 (same day) — absorption confluence on/off checkbox
+
+Even after widening the confluence proximity (twenty-first issue) and disabling the conflicting
+local delta filter (twenty-second issue), absorption confluence kept rejecting trades the operator
+felt should have gone through: "it keeps rejecting trades based on absorption has this always been
+apart of the strategy?" (answered: absorption itself has been part of the strategy since
+2026-09-25, but only as confirmation for the now-removed standalone `TryEnter` pathway — making it
+a HARD requirement on the POC pathway, the only pathway left, was today's change). Immediate
+follow-up: "lets make a check box to add that confluence so to enable or disable it."
+
+**Built** `PocAbsorptionConfluenceEnabled` (plain checkbox, default true — does NOT silently revert
+the nineteenth-feature architecture change). When off, `HasAbsorptionConfluence` is bypassed
+entirely (always passes, `confirmingLevel` stays null) and a POC rejection can fire on the
+delta/trend/R:R gates alone, exactly how the POC pathway worked before absorption confluence became
+a requirement. Gives the operator a direct way to fall back to "POC-only" trading without touching
+`PocAbsorptionProximityTicks` or reverting the pathway-removal decision.
+
+**Verified 2026-09-29 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. Same UI-application caveat as every other
+default/parameter change today.
+
 ---
 
 ## Common Architecture Patterns

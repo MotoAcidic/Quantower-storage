@@ -262,6 +262,63 @@ namespace finchDomScalpStrategy;
 /// shouldn't stop the trade out, only a genuine break of it should. Same ratchet-only discipline as
 /// breakeven (a worse candidate than the current stop is simply skipped) and the same benign-race
 /// handling on a failed modify.
+///
+/// TREND FILTER, added 2026-09-29, from a full overnight loss review ("review some of the trades
+/// from last night in the logs and see what we could have done better because we are down -130ish
+/// over the night"): 9 of 20 round trips were the DOM/absorption pathway re-shorting the SAME
+/// resting ask level over ~3 hours against a sustained overnight rally (only 3 of the 9 won, the
+/// other 6 combined for -$278), while the mirror-image longs off the opposing level (trading WITH
+/// that rally) went 4-2 for +$124.50. `PassesDeltaFilter` was already wired into this pathway but
+/// its default 8-bar window is local enough to clear on almost any short pullback inside an
+/// hours-long trend. `PassesTrendFilter` adds a second, independent hard block on the SAME
+/// `DeltaTracker` with a much longer window (`TrendDeltaLookbackBars`, default 60) — meant to catch
+/// "is the whole session running against this trade," not just the last few bars' local reaction.
+///
+/// ABSORPTION AS POC CONFLUENCE, added 2026-09-29 — SUPERSEDES the original 2026-09-25 design at
+/// the top of this comment. The overnight review above (see "TREND FILTER") showed the standalone
+/// DOM/absorption pathway (`TryEnter` — the ANCHOR/CONFIRMATION design from that original section)
+/// was where nearly all of one bad night's losses actually came from. The operator's own question:
+/// "would it make more sense to use the absorption levels and resting orders as a confluence to the
+/// poc trading instead of its own trading since it doesnt work out really well on its own?" —
+/// confirmed via `AskUserQuestion`: remove `TryEnter` ENTIRELY (no standalone DOM/absorption
+/// trigger at all anymore) and make a qualifying resting-order level a HARD requirement inside the
+/// POC-rejection pathway instead, via `HasAbsorptionConfluence`. Every POC rejection now needs a
+/// qualifying level (same `MinLevelSize`/`AbsorptionStrongContracts` thresholds the old standalone
+/// pathway used) within `PocAbsorptionProximityTicks` of the POC, on the side that actually defends
+/// the rejection direction — no exceptions, however clean the rejection itself looks. Resting
+/// levels are still consumed elsewhere (as TARGET candidates in `TryComputeTarget`) — only their
+/// role as an independent ENTRY trigger is gone. `CheckPocRejection` is now the only entry trigger
+/// in this strategy.
+///
+/// STOP vs. RESTING LIQUIDITY, same day — a separate, related observation from live charts: "the
+/// stop is right on top of the resting orders which is were price normally wants to go to pick up
+/// orders so it should be a few ticks past that so if it comes and touches it doesnt stop us out
+/// but we need to be out if it blows through those orders." A resting order sitting right where the
+/// stop already lands is a magnet for a normal liquidity sweep, not evidence the trade is wrong —
+/// `ExtendStopPastRestingLevel` pushes the stop `StopBufferTicks` further past any such level
+/// instead of leaving it sitting on top of one, so a bare touch doesn't stop the trade out but a
+/// genuine break past that liquidity still does. Only ever widens the stop, never tightens it.
+///
+/// OBSERVABILITY, added 2026-09-29 ("is there a way to show logs on if some of the conditions are
+/// not met so i know its working becuase it hasnt gotten in a trade in a while") — with this many
+/// stacked gates now, a quiet stretch is ambiguous from the outside: nothing qualifying, or
+/// something stuck? Two additions, neither touches trading logic at all: `TryGatePocSignal` logs a
+/// `[Signal skipped]` line naming the EXACT gate (swing size, local delta, trend, absorption
+/// confluence) that blocked a rejection ONCE ONE IS ALREADY GENUINELY DETECTED — so it only fires
+/// on a real near-miss, never as noise on every ordinary bar. `CheckHeartbeat` logs a periodic
+/// snapshot (POC levels, delta readings, session state) on a fixed interval regardless of whether
+/// anything is happening at all — proof the poll loop itself is alive even when no rejection
+/// pattern has even been attempted. `HeartbeatIntervalMinutes` (0=off) controls the second one only;
+/// the skipped-signal logging is unconditional.
+///
+/// LOCAL DELTA FILTER DISABLED BY DEFAULT, same day — the observability logging above immediately
+/// showed the local (8-bar) delta filter blocking nearly every genuine rejection attempt. Not a
+/// tuning issue but a structural mismatch: a POC rejection is a REVERSAL bet, and this filter
+/// requires recent order flow to ALREADY agree with the new direction — but at the exact moment of
+/// a real rejection, recent delta still reflects the OLD, about-to-reverse direction almost by
+/// definition. `DeltaFilterEnabled` now defaults to false; `TrendFilterEnabled`'s 60-bar window
+/// asks a different, still-valid question ("is the whole session running against this trade") and
+/// stays on. See `DeltaFilterEnabled`'s own doc comment.
 /// </summary>
 public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 {
@@ -290,24 +347,24 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("DOM: levels to scan per side", 6, 5, 2000, 5, 0)]
     public int LevelsToScan { get; set; }
 
-    // ---- entry confluence: the DOM/UA level is the anchor ----------------------------------
+    // ---- resting-order/absorption thresholds — CHANGED 2026-09-29 from "the DOM/UA level is the
+    // anchor" (its own standalone entry trigger, `TryEnter`) to "absorption is a required
+    // CONFLUENCE check for a POC rejection" (see `HasAbsorptionConfluence` and the class doc
+    // comment's "ABSORPTION AS POC CONFLUENCE" section) — the operator's own call after review
+    // showed the standalone DOM pathway was where nearly all of one bad night's losses came from.
+    // These two thresholds are unchanged in meaning, just consumed by a different caller now. ----
 
     [InputParameter("Min level size (contracts)", 10, 1, 100000, 1, 0)]
     public int MinLevelSize { get; set; }
 
     /// <summary>Same tiering concept as the indicator's own "maxed out" absorption tier — a
     /// level must have this much size traded through it while still standing before it counts
-    /// as a confirmed anchor, not just a large resting order nobody has tested yet.</summary>
+    /// as confirmation, not just a large resting order nobody has tested yet.</summary>
     [InputParameter("Absorption: strong tier (contracts)", 11, 1, 1000000, 1, 0)]
     public int AbsorptionStrongContracts { get; set; }
 
     [InputParameter("Unfinished auction: price must move past by (ticks)", 12, 1, 100000, 1, 0)]
     public int UnfinishedDistanceTicks { get; set; }
-
-    /// <summary>How close (in ticks) a level's own price must be to an active IFVG zone's own
-    /// [Bottom, Top] range to count as "aligned" confirmation.</summary>
-    [InputParameter("IFVG: proximity tolerance (ticks)", 13, 0, 1000, 1, 0)]
-    public int IfvgProximityTicks { get; set; }
 
     // ---- exits ------------------------------------------------------------------------------
 
@@ -516,13 +573,60 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("POC current-move: minimum swing size to qualify (ticks, 0=off)", 48, 0, 100000, 1, 0)]
     public int PocCurrentMoveMinSwingTicks { get; set; }
 
+    /// <summary>FOUND 2026-09-29 ("would it make more sense to use the absorption levels and
+    /// resting orders as a confluence to the poc trading instead of its own trading since it
+    /// doesnt work out really well on its own?") — the operator's own call, after a loss review
+    /// showed the standalone DOM/absorption pathway (`TryEnter`, now REMOVED) was where nearly all
+    /// of one bad night's losses came from. A POC rejection now requires a qualifying resting-order
+    /// level (same `MinLevelSize`/`AbsorptionStrongContracts` thresholds the old standalone pathway
+    /// used) within this many ticks of the POC price, on the side that actually defends the
+    /// rejection direction — a BID near the POC for a bullish rejection, an ASK for a bearish one.
+    /// A HARD requirement (the operator's own choice, same as every other filter added this
+    /// project): no qualifying level nearby, no trade, however clean the POC rejection itself
+    /// looks. See `HasAbsorptionConfluence`.
+    ///
+    /// WIDENED 2026-09-29 from an original 10 to 20 — confirmed via the new `[Signal skipped]`
+    /// logging (built specifically to answer "did we make the restrictions to tight now") that this
+    /// was the actual bottleneck: a full 60 minutes into a strongly trending session (60-bar trend
+    /// delta around -2181), Sell rejections aligned WITH that trend were clearing the delta/trend
+    /// filters fine and dying here specifically — "no qualifying absorption within 10 ticks" — while
+    /// zero trades fired all session. Widened rather than touching `MinLevelSize`/
+    /// `AbsorptionStrongContracts` themselves, since those thresholds also define "real absorption"
+    /// everywhere else and a proximity change is more targeted.</summary>
+    [InputParameter("POC: required absorption confluence proximity (ticks)", 66, 1, 100000, 1, 0)]
+    public int PocAbsorptionProximityTicks { get; set; }
+
+    /// <summary>FOUND 2026-09-29 ("lets make a check box to add that confluence so to enable or
+    /// disable it") — even after widening `PocAbsorptionProximityTicks`, absorption confluence kept
+    /// rejecting trades the operator felt should have gone through, and there was no way to turn the
+    /// requirement off without reverting the whole architecture change. A plain checkbox instead:
+    /// when off, `HasAbsorptionConfluence` is bypassed entirely (always passes, no confirming level)
+    /// and a POC rejection can fire on the delta/trend/R:R gates alone, the way the POC pathway
+    /// originally worked before absorption became a hard requirement. Defaults to true — this does
+    /// NOT silently revert today's confluence change; the operator turns it off explicitly if the
+    /// gate proves too restrictive in practice.</summary>
+    [InputParameter("POC: require absorption confluence", 68)]
+    public bool PocAbsorptionConfluenceEnabled { get; set; }
+
     // ---- delta filter — see the class doc comment's "DELTA FILTER" section ------------------
 
     /// <summary>FOUND 2026-09-27 (operator: "if we keep trying to take longs when delta is
     /// negative and in the red we are just fighting our selves") — a HARD block (the operator's
     /// own choice over a softer confirmation): a long is skipped entirely when the rolling delta
     /// window is net negative, a short is skipped entirely when it's net positive, regardless of
-    /// which pathway or POC produced the signal.</summary>
+    /// which pathway or POC produced the signal.
+    ///
+    /// DISABLED BY DEFAULT 2026-09-29 ("it keeps saying local delta blocks everything is the delta
+    /// really important to this trading style?") — a structural conflict, not a tuning problem: a
+    /// POC rejection is a REVERSAL bet (price is expected to turn AWAY from what it was just doing),
+    /// but this filter requires the last <see cref="DeltaLookbackBars"/> bars' order flow to
+    /// ALREADY agree with the NEW direction before allowing entry. At the exact moment of a genuine
+    /// rejection, recent delta is still going to reflect the OLD, about-to-reverse direction almost
+    /// by definition — that's what a turning point looks like. This filter fits a continuation/trend
+    /// entry far better than a reversal one, which is what this strategy actually trades since
+    /// `TryEnter` was removed. `TrendFilterEnabled`'s own 60-bar window asks a different, still-
+    /// valid question ("is the whole SESSION running against this trade") and stays on by default.
+    /// </summary>
     [InputParameter("Delta filter: enable", 49)]
     public bool DeltaFilterEnabled { get; set; }
 
@@ -531,6 +635,44 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// without being as noisy as one bar alone.</summary>
     [InputParameter("Delta filter: rolling window (bars)", 50, 1, 200, 1, 0)]
     public int DeltaLookbackBars { get; set; }
+
+    /// <summary>FOUND 2026-09-29, reviewing an overnight session down ~$130 — 9 of the night's 20
+    /// trades were the DOM/absorption pathway re-shorting the SAME resting ask level over and over
+    /// across a ~3-hour stretch while price trended up the entire night (only 3 of those 9 won, a
+    /// combined -$278 on the other 6); the mirror-image longs off the opposing bid level, trading
+    /// WITH that same trend, went 4-2 for +$124.50. `PassesDeltaFilter`'s existing rolling window
+    /// (default 8 bars) is local enough to clear on almost any short pullback even inside an
+    /// hours-long trend, so it didn't stop the pathway from repeatedly fading a level the broader
+    /// session flow was actually running through. This is a SECOND, independent hard block — same
+    /// `DeltaTracker`, same rolling-sum mechanism, just a much longer window meant to capture the
+    /// broader session bias rather than the last few bars' reaction: a long is skipped if the LONG
+    /// window is net negative, a short is skipped if it's net positive, applied everywhere
+    /// `PassesDeltaFilter` already is. Independent on/off switch from the local delta filter, since
+    /// they answer different questions ("did the last few bars just react against me" vs. "is the
+    /// whole session running against me").</summary>
+    [InputParameter("Trend filter: enable", 64)]
+    public bool TrendFilterEnabled { get; set; }
+
+    /// <summary>Deliberately much larger than <see cref="DeltaLookbackBars"/> — meant to span
+    /// hours, not minutes, on whatever chart period this strategy is attached to.</summary>
+    [InputParameter("Trend filter: rolling window (bars)", 65, 1, 200, 1, 0)]
+    public int TrendDeltaLookbackBars { get; set; }
+
+    // ---- diagnostics — see the class doc comment's "OBSERVABILITY" section ------------------
+
+    /// <summary>FOUND 2026-09-29 ("is there a way to show logs on if some of the conditions are
+    /// not met so i know its working becuase it hasnt gotten in a trade in a while") — with as many
+    /// stacked gates as this strategy now has (delta, trend, absorption confluence, R:R, session,
+    /// cooldown...), a quiet stretch is genuinely ambiguous from the outside: is nothing qualifying,
+    /// or is something actually stuck? Two pieces of new logging answer that without needing to
+    /// touch a debugger: `CheckPocRejection` now logs a `[Signal skipped]` line naming EXACTLY which
+    /// gate blocked a genuine POC rejection once one is actually detected, and this heartbeat logs a
+    /// periodic snapshot (POC levels, delta readings, session state) even when nothing at all is
+    /// happening — proof the poll loop itself is alive. 0 disables the heartbeat entirely (the
+    /// skipped-signal logging is unconditional, since it only ever fires on a genuine near-miss, not
+    /// on every poll).</summary>
+    [InputParameter("Heartbeat: log interval (minutes, 0=off)", 67, 0, 1440, 1, 0)]
+    public int HeartbeatIntervalMinutes { get; set; }
 
     // ---- trailing stop (after breakeven) — see the class doc comment's "TRAILING STOP" section ----
 
@@ -594,6 +736,11 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     private bool waitOpenPosition;
     private bool waitClosePositions;
 
+    // ---- heartbeat — see HeartbeatIntervalMinutes's own doc comment -------------------------
+    private DateTime runStartUtc;
+    private DateTime lastHeartbeatUtc;
+    private DateTime? lastTradeOpenedUtc;
+
     // ---- protective stop/target — placed as separate orders once the position confirms open,
     // never as an embedded SlTpHolder bracket on the entry (see the class doc comment's
     // "SEPARATE STOP/TARGET ORDERS" section) ---------------------------------------------------
@@ -655,7 +802,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.MinLevelSize = 100;
         this.AbsorptionStrongContracts = 200;
         this.UnfinishedDistanceTicks = 8;
-        this.IfvgProximityTicks = 5;
 
         this.StopBufferTicks = 8;
         this.MinTargetDistanceTicks = 10;
@@ -676,9 +822,16 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.PocApproachLookbackBars = 5;
         this.PocApproachDistanceTicks = 10;
         this.PocCurrentMoveMinSwingTicks = 20;
+        this.PocAbsorptionProximityTicks = 20;
+        this.PocAbsorptionConfluenceEnabled = true;
 
-        this.DeltaFilterEnabled = true;
+        this.DeltaFilterEnabled = false;
         this.DeltaLookbackBars = 8;
+
+        this.TrendFilterEnabled = true;
+        this.TrendDeltaLookbackBars = 60;
+
+        this.HeartbeatIntervalMinutes = 15;
 
         this.TrailAfterBreakevenEnabled = true;
         this.TrailBufferTicks = 4;
@@ -704,6 +857,10 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
     protected override void OnRun()
     {
+        this.runStartUtc = Core.TimeUtils.DateTimeUtcNow;
+        this.lastHeartbeatUtc = this.runStartUtc;
+        this.lastTradeOpenedUtc = null;
+
         this.waitOpenPosition = false;
         this.waitClosePositions = false;
         this.dailyPnl = 0;
@@ -834,7 +991,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         // POC feature is enabled (see SwingTracker's own class doc comment).
         this.swingTracker = new SwingTracker(this.PocSwingPivotLookback);
 
-        if (this.DeltaFilterEnabled)
+        if (this.DeltaFilterEnabled || this.TrendFilterEnabled)
             this.deltaTracker = new DeltaTracker(this.Period.Duration);
 
         this.hdm = this.CurrentSymbol.GetHistory(this.Period, this.CurrentSymbol.HistoryType, this.StartPoint);
@@ -858,7 +1015,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         // Needed for POC's own volume-by-price accumulation AND (since 2026-09-27) the delta
         // filter's tick classification — the DOM/absorption/IFVG pathway alone never needed a
         // tick subscription (see the class doc comment).
-        if (this.PocCurrentMoveEnabled || this.Poc15mEnabled || this.Poc5mEnabled || this.DeltaFilterEnabled)
+        if (this.PocCurrentMoveEnabled || this.Poc15mEnabled || this.Poc5mEnabled || this.DeltaFilterEnabled
+            || this.TrendFilterEnabled)
         {
             this.CurrentSymbol.NewLast -= this.OnLast;
             this.CurrentSymbol.NewLast += this.OnLast;
@@ -927,7 +1085,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         this.pocTickQueue.Enqueue((last.Price, last.Size));
 
-        if (this.DeltaFilterEnabled && TryClassify(symbol, last, out var isBuy))
+        if ((this.DeltaFilterEnabled || this.TrendFilterEnabled) && TryClassify(symbol, last, out var isBuy))
             this.deltaTickQueue.Enqueue((last.Time, last.Size, isBuy));
     }
 
@@ -997,6 +1155,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.CheckSessionReset();
         this.CheckRiskLimits();
         this.CheckBreakeven();
+        this.CheckHeartbeat();
 
         // ---- 1. pull the DOM, reconcile tracked levels ----
         var market = symbol.DepthOfMarket;
@@ -1115,13 +1274,11 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         // ---- 3. drain the dedicated 15m POC series and every queued trade print ----
         this.DrainPoc();
 
-        // ---- 4. evaluate entries — the DOM/absorption/IFVG pathway first, then the standalone
-        // POC rejection pathway; whichever's own guard clauses let it through first wins (shared
-        // gating, see the class doc comment) ----
+        // ---- 4. evaluate entries — POC rejection is the ONLY entry trigger (CHANGED 2026-09-29,
+        // see the class doc comment's "ABSORPTION AS POC CONFLUENCE" section); DOM/absorption
+        // levels are now a required confirmation INSIDE that pathway, not a standalone trigger ----
         if (double.IsNaN(midPrice) || tickSize <= 0)
             return;
-
-        this.TryEnter(levels, fvg.Active, midPrice, tickSize);
 
         if (latestClosedBar is { } rejectionBar)
         {
@@ -1210,72 +1367,12 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
     // ---- entry logic --------------------------------------------------------------------------
 
-    private void TryEnter(
-        IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
-        IReadOnlyList<FairValueGapEngine.InverseFvgZone> ifvgZones,
-        double price, double tickSize)
-    {
-        if (this.waitOpenPosition || this.waitClosePositions) return;
-        if (this.dailyLimitHit || this.drawdownLimitHit || this.tradesLimitHit) return;
-        if (this.MyPositions().Any()) return;
-        if (!this.IsInAllowedSession()) return;
-        if (this.barCounter - this.lastEntryBarIndex < this.MinBarsBetweenEntries) return;
-
-        var proximity = this.IfvgProximityTicks * tickSize;
-
-        foreach (var level in levels)
-        {
-            if (level.Current < this.MinLevelSize) continue;
-            if (level.Absorbed < this.AbsorptionStrongContracts) continue;
-
-            var hasAlignedIfvg = ifvgZones.Any(z =>
-                z.IsBullish == level.IsBid
-                && level.Price >= z.Bottom - proximity
-                && level.Price <= z.Top + proximity);
-
-            if (!hasAlignedIfvg) continue;
-
-            var side = level.IsBid ? Side.Buy : Side.Sell;
-            if (!this.PassesDeltaFilter(side)) continue;
-
-            // "stop losses should be places at recent swing low for longs and recent swing high
-            // for shorts" (2026-09-27) — falls back to the old level-relative calculation only if
-            // no swing has confirmed yet this run (early-session edge case).
-            var stopPrice = this.ComputeSwingStop(level.IsBid, price, tickSize)
-                ?? (level.IsBid
-                    ? level.Price - (this.StopBufferTicks * tickSize)
-                    : level.Price + (this.StopBufferTicks * tickSize));
-            stopPrice = this.EnforceMinStopDistance(stopPrice, price, level.IsBid, tickSize);
-
-            var hasTarget = this.TryComputeTarget(
-                levels, ifvgZones, level.IsBid, price, tickSize, out var computedTarget, out var targetSource);
-
-            var targetPrice = hasTarget
-                ? computedTarget
-                : level.IsBid
-                    ? price + (this.FallbackTargetTicks * tickSize)
-                    : price - (this.FallbackTargetTicks * tickSize);
-
-            if (!hasTarget)
-                targetSource = "fallback R:R";
-
-            if (!this.PassesRiskRewardFilter(price, stopPrice, targetPrice)) continue;
-
-            var anchorDescription =
-                $"{(level.IsBid ? "BID" : "ASK")} {level.Price:0.####} absorbed={level.Absorbed:N0} "
-                + $"unfinished={level.IsUnfinished}";
-
-            this.PlaceEntry(side, stopPrice, targetPrice, anchorDescription, targetSource);
-            return; // one qualifying setup per poll — never stack multiple entries from one pass
-        }
-    }
-
     /// <summary>Nearest OPPOSING resting level, IFVG zone, or POC ahead of price in the trade's
     /// own direction, past the minimum-distance floor — same `IsAhead`/min-distance/nearest-wins
     /// shape as `directionAbsorptionScalpStrategy.TryComputeTarget`, built from Finch-Lite's own
-    /// engines instead of that strategy's HH/LL/VWAP/prior-day levels. Takes the trade's own
-    /// direction directly (not a `RestingLevel` anchor) so both the DOM/absorption entry pathway
-    /// AND the standalone POC-rejection pathway can share this same target logic.</summary>
+    /// engines instead of that strategy's HH/LL/VWAP/prior-day levels. Resting levels are still a
+    /// TARGET candidate here even though they no longer trigger entries on their own (see the class
+    /// doc comment's "ABSORPTION AS POC CONFLUENCE" section) — an unrelated use of the same data.</summary>
     private bool TryComputeTarget(
         IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
         IReadOnlyList<FairValueGapEngine.InverseFvgZone> ifvgZones,
@@ -1326,13 +1423,14 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         return true;
     }
 
-    // ---- standalone POC rejection pathway — see the class doc comment's "POC TRADING" section -
+    // ---- POC rejection — the ONLY entry pathway, see the class doc comment's "POC TRADING" and
+    // "ABSORPTION AS POC CONFLUENCE" sections --------------------------------------------------
 
     /// <summary>
     /// Checked once per poll against only the MOST RECENTLY closed chart bar — never the backlog
-    /// (see the class doc comment's "SAFETY NOTE ON BACKLOG BARS"). Fully independent of
-    /// <see cref="TryEnter"/>'s own DOM/absorption/IFVG logic; shares only the same risk/position
-    /// gates and the same <see cref="TryComputeTarget"/> exit logic.
+    /// (see the class doc comment's "SAFETY NOTE ON BACKLOG BARS"). CHANGED 2026-09-29: no longer
+    /// independent of DOM/absorption — <see cref="HasAbsorptionConfluence"/> is now a hard
+    /// requirement here, not a separate standalone pathway.
     /// </summary>
     private void CheckPocRejection(
         Bar bar, Bar[] priorBars, double tickSize,
@@ -1351,30 +1449,109 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         if (this.PocCurrentMoveEnabled && this.pocCurrentMoveEngine?.Poc is { } cmPoc
             && TryPocRejection(bar, cmPoc, buffer, out var cmSide)
-            && HasGenuineApproach(priorBars, cmPoc, approachDistance, cmSide)
-            && this.HasSufficientSwingSize(tickSize)
-            && this.PassesDeltaFilter(cmSide))
+            && HasGenuineApproach(priorBars, cmPoc, approachDistance, cmSide))
         {
-            this.PlacePocEntry(cmSide, bar, cmPoc, tickSize, "current-move", levels, ifvgZones);
-            return;
+            if (this.TryGatePocSignal("current-move", cmSide, cmPoc, tickSize, levels, requireSwingSize: true, out var cmLevel))
+            {
+                this.PlacePocEntry(cmSide, bar, cmPoc, tickSize, "current-move", levels, ifvgZones, cmLevel);
+                return;
+            }
         }
 
         if (this.Poc5mEnabled && this.poc5mEngine?.Poc is { } m5Poc
             && TryPocRejection(bar, m5Poc, buffer, out var m5Side)
-            && HasGenuineApproach(priorBars, m5Poc, approachDistance, m5Side)
-            && this.PassesDeltaFilter(m5Side))
+            && HasGenuineApproach(priorBars, m5Poc, approachDistance, m5Side))
         {
-            this.PlacePocEntry(m5Side, bar, m5Poc, tickSize, "5m", levels, ifvgZones);
-            return;
+            if (this.TryGatePocSignal("5m", m5Side, m5Poc, tickSize, levels, requireSwingSize: false, out var m5Level))
+            {
+                this.PlacePocEntry(m5Side, bar, m5Poc, tickSize, "5m", levels, ifvgZones, m5Level);
+                return;
+            }
         }
 
         if (this.Poc15mEnabled && this.poc15mEngine?.Poc is { } htfPoc
             && TryPocRejection(bar, htfPoc, buffer, out var htfSide)
-            && HasGenuineApproach(priorBars, htfPoc, approachDistance, htfSide)
-            && this.PassesDeltaFilter(htfSide))
+            && HasGenuineApproach(priorBars, htfPoc, approachDistance, htfSide))
         {
-            this.PlacePocEntry(htfSide, bar, htfPoc, tickSize, "15m", levels, ifvgZones);
+            if (this.TryGatePocSignal("15m", htfSide, htfPoc, tickSize, levels, requireSwingSize: false, out var htfLevel))
+                this.PlacePocEntry(htfSide, bar, htfPoc, tickSize, "15m", levels, ifvgZones, htfLevel);
         }
+    }
+
+    /// <summary>Runs the remaining gates (swing size for current-move only, delta, trend,
+    /// absorption confluence) for a POC rejection that's ALREADY confirmed genuine — a real
+    /// rejection pattern with a real prior approach, not chop. Only reached at that point, so a
+    /// `[Signal skipped]` log here (see <see cref="HeartbeatIntervalMinutes"/>'s own doc comment)
+    /// means something genuinely close to a trade got blocked, not routine noise on every bar.</summary>
+    private bool TryGatePocSignal(
+        string pocLabel, Side side, double poc, double tickSize,
+        IReadOnlyList<RestingOrderEngine.RestingLevel> levels, bool requireSwingSize,
+        out RestingOrderEngine.RestingLevel? confirmingLevel)
+    {
+        confirmingLevel = null;
+
+        if (requireSwingSize && !this.HasSufficientSwingSize(tickSize))
+        {
+            this.LogPocSignalSkipped(pocLabel, side, poc, "swing leg too small to qualify (PocCurrentMoveMinSwingTicks)");
+            return false;
+        }
+
+        if (!this.PassesDeltaFilter(side))
+        {
+            var rollingDelta = this.deltaTracker?.RollingDelta(this.DeltaLookbackBars);
+            this.LogPocSignalSkipped(pocLabel, side, poc, $"local delta filter ({this.DeltaLookbackBars}-bar delta={rollingDelta:F0} against this side)");
+            return false;
+        }
+
+        if (!this.PassesTrendFilter(side))
+        {
+            var trendDelta = this.deltaTracker?.RollingDelta(this.TrendDeltaLookbackBars);
+            this.LogPocSignalSkipped(pocLabel, side, poc, $"trend filter ({this.TrendDeltaLookbackBars}-bar delta={trendDelta:F0} against this side)");
+            return false;
+        }
+
+        if (!this.HasAbsorptionConfluence(side, poc, tickSize, levels, out confirmingLevel))
+        {
+            this.LogPocSignalSkipped(pocLabel, side, poc, $"no qualifying absorption within {this.PocAbsorptionProximityTicks} ticks (PocAbsorptionProximityTicks)");
+            return false;
+        }
+
+        return true;
+    }
+
+    private void LogPocSignalSkipped(string pocLabel, Side side, double poc, string reason)
+    {
+        this.Log($"[Signal skipped] {side} rejection off {pocLabel} POC {poc:0.####} blocked: {reason}.", StrategyLoggingLevel.Trading);
+    }
+
+    /// <summary>See <see cref="PocAbsorptionProximityTicks"/>'s own doc comment — a HARD gate, not
+    /// a confirmation: a qualifying resting-order level (`MinLevelSize`/`AbsorptionStrongContracts`)
+    /// must sit within proximity of the POC, on the side that actually defends the rejection
+    /// direction (a BID for a bullish/Buy rejection, an ASK for a bearish/Sell one). Returns the
+    /// NEAREST qualifying level to the POC for logging/stop use, not just a bool, since the caller
+    /// wants to say which order flow actually backed the trade. See
+    /// <see cref="PocAbsorptionConfluenceEnabled"/>'s own doc comment for the on/off switch.</summary>
+    private bool HasAbsorptionConfluence(
+        Side side, double poc, double tickSize,
+        IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
+        out RestingOrderEngine.RestingLevel? confirmingLevel)
+    {
+        confirmingLevel = null;
+        if (!this.PocAbsorptionConfluenceEnabled) return true;
+
+        var proximity = this.PocAbsorptionProximityTicks * tickSize;
+        var wantBid = side == Side.Buy;
+
+        confirmingLevel = levels
+            .Where(l => l.IsBid == wantBid
+                && l.Current >= this.MinLevelSize
+                && l.Absorbed >= this.AbsorptionStrongContracts
+                && Math.Abs(l.Price - poc) <= proximity)
+            .OrderBy(l => Math.Abs(l.Price - poc))
+            .Cast<RestingOrderEngine.RestingLevel?>()
+            .FirstOrDefault();
+
+        return confirmingLevel is not null;
     }
 
     /// <summary>See <see cref="PocCurrentMoveMinSwingTicks"/>'s own doc comment. Only gates the
@@ -1400,6 +1577,22 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         if (side == Side.Buy && rollingDelta < 0) return false;
         if (side == Side.Sell && rollingDelta > 0) return false;
+
+        return true;
+    }
+
+    /// <summary>See <see cref="TrendFilterEnabled"/>'s own doc comment — same hard-block shape as
+    /// <see cref="PassesDeltaFilter"/>, same underlying tracker, just a much longer window meant to
+    /// catch a multi-hour session bias rather than the last few bars' local reaction. Independent
+    /// of the local delta filter: either, both, or neither can be on.</summary>
+    private bool PassesTrendFilter(Side side)
+    {
+        if (!this.TrendFilterEnabled || this.deltaTracker is null) return true;
+
+        var trendDelta = this.deltaTracker.RollingDelta(this.TrendDeltaLookbackBars);
+
+        if (side == Side.Buy && trendDelta < 0) return false;
+        if (side == Side.Sell && trendDelta > 0) return false;
 
         return true;
     }
@@ -1530,7 +1723,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     private void PlacePocEntry(
         Side side, Bar rejectionBar, double poc, double tickSize, string pocLabel,
         IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
-        IReadOnlyList<FairValueGapEngine.InverseFvgZone> ifvgZones)
+        IReadOnlyList<FairValueGapEngine.InverseFvgZone> ifvgZones,
+        RestingOrderEngine.RestingLevel? confirmingLevel)
     {
         var isLong = side == Side.Buy;
 
@@ -1548,12 +1742,22 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         // anchoring target/fallback distance to the POC price instead would measure from a point
         // price has already moved away from.
         stopPrice = this.EnforceMinStopDistance(stopPrice, rejectionBar.Close, isLong, tickSize);
+
+        // "the stop is right on top of the resting orders which is were price normally wants to go
+        // to pick up orders so it should be a few ticks past that so if it comes and touches it
+        // doesnt stop us out but we need to be out if it blows through those orders" (2026-09-29)
+        // — if a qualifying resting-order level sits right where the stop already landed, price
+        // sweeping THAT liquidity (a normal thing for price to do, not evidence the trade is wrong)
+        // would trigger the stop before any real reversal even has a chance to show up. Pushes the
+        // stop past that level instead, never tighter than the swing-based calculation above.
+        stopPrice = this.ExtendStopPastRestingLevel(stopPrice, isLong, tickSize, levels);
+
         var referencePrice = rejectionBar.Close;
 
         // Reuses the SAME levels/ifvgZones this poll already computed — RestingOrderEngine.
         // Reconcile is stateful (mutates its own tracking dictionaries as a side effect of being
         // called), so it must never be called a second time in the same poll just to get a
-        // "fresh" snapshot; doing so would corrupt the DOM/absorption pathway's own live state.
+        // "fresh" snapshot; doing so would corrupt its own live state.
         var hasTarget = this.TryComputeTarget(
             levels, ifvgZones, isLong, referencePrice, tickSize, out var computedTarget, out var targetSource);
 
@@ -1568,9 +1772,40 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         if (!this.PassesRiskRewardFilter(referencePrice, stopPrice, targetPrice)) return;
 
-        var anchorDescription = $"{pocLabel} POC {poc:0.####} rejection";
+        // Names the confirming resting order too — see HasAbsorptionConfluence's own doc comment;
+        // confirmingLevel is never null here (CheckPocRejection already required it to proceed).
+        var confluenceDescription = confirmingLevel is { } cl
+            ? $", confluence={(cl.IsBid ? "BID" : "ASK")} {cl.Price:0.####} absorbed={cl.Absorbed:N0}"
+            : string.Empty;
+        var anchorDescription = $"{pocLabel} POC {poc:0.####} rejection{confluenceDescription}";
 
         this.PlaceEntry(side, stopPrice, targetPrice, anchorDescription, targetSource);
+    }
+
+    /// <summary>See the class doc comment's "STOP vs. RESTING LIQUIDITY" section — if a qualifying
+    /// resting-order level (same thresholds as <see cref="HasAbsorptionConfluence"/>) sits within
+    /// one stop-buffer's width of the naive stop, on the side that would defend against it, the
+    /// stop is pushed <see cref="StopBufferTicks"/> further PAST that level instead of sitting on
+    /// top of it — a bare touch/sweep of that resting liquidity shouldn't stop the trade out, only
+    /// an actual break past it should. Only ever moves the stop FURTHER from entry (never tighter
+    /// than what the caller already computed).</summary>
+    private double ExtendStopPastRestingLevel(
+        double stopPrice, bool isLong, double tickSize, IReadOnlyList<RestingOrderEngine.RestingLevel> levels)
+    {
+        var buffer = this.StopBufferTicks * tickSize;
+        var wantBid = isLong; // a BID sits below price (defends a long's stop side); an ASK above (a short's)
+
+        foreach (var level in levels)
+        {
+            if (level.IsBid != wantBid) continue;
+            if (level.Current < this.MinLevelSize) continue;
+            if (Math.Abs(level.Price - stopPrice) > buffer) continue; // not near the stop — leave it alone
+
+            var extended = isLong ? level.Price - buffer : level.Price + buffer;
+            stopPrice = isLong ? Math.Min(stopPrice, extended) : Math.Max(stopPrice, extended);
+        }
+
+        return stopPrice;
     }
 
     /// <summary>See <see cref="SessionFilterEnabled"/>'s own doc comment. Returns true (trade
@@ -1873,6 +2108,40 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             StrategyLoggingLevel.Trading);
     }
 
+    /// <summary>See <see cref="HeartbeatIntervalMinutes"/>'s own doc comment — a periodic "still
+    /// running" snapshot for a quiet strategy, so the operator never has to wonder whether the poll
+    /// loop is stuck or genuinely just hasn't seen a qualifying setup. Skips logging while a
+    /// position is open — the position itself is already proof the strategy is working.</summary>
+    private void CheckHeartbeat()
+    {
+        if (this.HeartbeatIntervalMinutes <= 0) return;
+
+        var nowUtc = Core.TimeUtils.DateTimeUtcNow;
+        if ((nowUtc - this.lastHeartbeatUtc).TotalMinutes < this.HeartbeatIntervalMinutes) return;
+
+        this.lastHeartbeatUtc = nowUtc;
+
+        if (this.MyPositions().Any()) return;
+
+        static string Fmt(double? v) => v is { } x ? x.ToString("0.####") : "n/a";
+
+        var sinceLastTrade = this.lastTradeOpenedUtc is { } t
+            ? $"{(nowUtc - t).TotalMinutes:F0} min since last trade"
+            : $"{(nowUtc - this.runStartUtc).TotalMinutes:F0} min since start, no trade yet";
+
+        var localDelta = this.DeltaFilterEnabled ? this.deltaTracker?.RollingDelta(this.DeltaLookbackBars) : null;
+        var trendDelta = this.TrendFilterEnabled ? this.deltaTracker?.RollingDelta(this.TrendDeltaLookbackBars) : null;
+
+        this.Log(
+            $"[Heartbeat] still running, flat, {sinceLastTrade}. "
+            + $"Session={(this.IsInAllowedSession() ? "allowed" : "BLOCKED")}. "
+            + $"POC: current-move={Fmt(this.pocCurrentMoveEngine?.Poc)} 5m={Fmt(this.poc5mEngine?.Poc)} "
+            + $"15m={Fmt(this.poc15mEngine?.Poc)}. "
+            + $"Delta: local({this.DeltaLookbackBars})={Fmt(localDelta)} trend({this.TrendDeltaLookbackBars})={Fmt(trendDelta)}. "
+            + "Waiting for a genuine POC rejection with absorption confluence.",
+            StrategyLoggingLevel.Trading);
+    }
+
     // ---- position isolation ---------------------------------------------------------------
 
     /// <summary>
@@ -2004,6 +2273,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.protectiveOrdersPlaced = true;
         this.waitOpenPosition = false;
         this.breakevenMoved = false;
+        this.lastTradeOpenedUtc = Core.TimeUtils.DateTimeUtcNow;
 
         try
         {
