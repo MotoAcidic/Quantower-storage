@@ -237,6 +237,31 @@ namespace finchDomScalpStrategy;
 ///   the log). `Core_PositionRemoved` now also resets `lastEntryBarIndex` to the current bar on
 ///   every close, so a new entry needs the full cooldown from whichever happened more recently —
 ///   the last entry OR the last close.
+///
+/// A TENTH issue, found the very next round of live testing after the above three fixes: a trade
+/// entered off the current-move POC with a stop that was technically on the correct side (passed
+/// the ninth fix's own check) but 84 points away — an unretraced rally had left the last confirmed
+/// swing low far below current price — producing roughly a 1:5.5 risk:reward trade ("what is this
+/// risk to reward here this is crazy"). A maximum-distance cap on the stop itself was considered
+/// and rejected: a wide-but-PROPORTIONATE stop (an earlier legitimate trade risked 118 ticks for a
+/// ~2.9:1 reward) shouldn't be rejected just for being wide. `PassesRiskRewardFilter` checks the
+/// actual economics instead — reward must be worth at least `MinRewardRiskPercent` of the risk,
+/// regardless of what produced either number — applied as the LAST gate before any entry, in both
+/// pathways.
+///
+/// TRAILING STOP, added 2026-09-28 ("does it ever trail the stop loss after it keeps going in
+/// profit?" — no, `CheckBreakeven` was always a ONE-TIME move). Watching an open, well-in-profit
+/// trade keep climbing after its breakeven move, the operator proposed "trail to the bottom of the
+/// previous candle once its in profit already," then validated the idea live by moving that same
+/// trade's stop manually: "worked wonders price came down to it but never hit it because that is
+/// the support area for the continue push up" — and framed the goal as "look for the point were we
+/// can move the stop more into profit but avoid being filled." `CheckTrailingStop` implements
+/// exactly that: once `CheckBreakeven` has already fired (never before, never as a replacement for
+/// it), every newly-closed chart bar ratchets the stop to just beyond that bar's own low (long) /
+/// high (short) — a level price has just finished respecting, so an ordinary pullback retesting it
+/// shouldn't stop the trade out, only a genuine break of it should. Same ratchet-only discipline as
+/// breakeven (a worse candidate than the current stop is simply skipped) and the same benign-race
+/// handling on a failed modify.
 /// </summary>
 public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 {
@@ -311,11 +336,21 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("Minimum reward:risk (%, 0=off)", 25, 0, 100000, 1, 0)]
     public int MinRewardRiskPercent { get; set; }
 
+    /// <summary>FOUND 2026-09-28 ("is there a way we can have a button to turn off break evens") —
+    /// the trigger field below already doubled as an off-switch at 0, but that's a numeric trick,
+    /// not an obvious toggle. This is a plain checkbox instead. Gates `CheckBreakeven` directly, on
+    /// top of (not instead of) the trigger's own 0-disables behavior. NOTE: since
+    /// `CheckTrailingStop` only ever activates once breakeven has already fired (the operator's own
+    /// choice — see `TrailAfterBreakevenEnabled`'s doc comment), turning this OFF also means the
+    /// stop will never trail for that run.</summary>
+    [InputParameter("Breakeven: enable", 53)]
+    public bool BreakevenEnabled { get; set; }
+
     /// <summary>
     /// Open profit required before the stop moves to breakeven+buffer, as a PERCENTAGE of the
     /// trade's own risk (its stop's own distance from the actual fill) — a ONE-TIME move, not a
     /// continuous trail (see the class doc comment's "BREAKEVEN" section). 0 disables the feature
-    /// entirely.
+    /// entirely (redundant with `BreakevenEnabled` above, kept for anyone who already relies on it).
     ///
     /// CHANGED 2026-09-28 from a fixed tick count ("i got this error on break even stop failed
     /// after it got out of the trade... the rr for trades are way negative because it will loose
@@ -375,14 +410,51 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("Cooldown between entries (bars)", 33, 0, 500, 1, 0)]
     public int MinBarsBetweenEntries { get; set; }
 
-    [InputParameter("RTH only (0=24h, 1=RTH only)", 34, 0, 1, 1, 0)]
-    public int RthOnly { get; set; }
+    /// <summary>FOUND 2026-09-28 ("i also need the ability to choose to trade in asia and london
+    /// and ny sessions so i need to be able to turn on and off sessions") — replaces the old single
+    /// RTH on/off window (which was really just a crude stand-in for "NY session only") with the
+    /// standard order-flow session breakdown the operator's own long-term vision is built on. Master
+    /// switch: when off, every session toggle below is ignored and trading runs 24h, matching this
+    /// strategy's behavior before this feature existed. When on, a signal is only allowed through if
+    /// the current time (America/New_York, same `SessionZone` every other time-of-day check in this
+    /// file already uses) falls inside at least one ENABLED session's own window — see
+    /// `IsInAllowedSession`. NOTE: this is a different "session" than `CheckSessionReset`'s daily
+    /// P&L-rollover session — that one tracks the trading DAY boundary, this one tracks which market
+    /// (Asia/London/New York) is open.</summary>
+    [InputParameter("Session filter: enable (off = trade 24h)", 54)]
+    public bool SessionFilterEnabled { get; set; }
 
-    [InputParameter("RTH start hour (EST)", 35, 0, 23, 1, 0)]
-    public int RthStartHour { get; set; }
+    /// <summary>Default 19:00–04:00 ET, spanning midnight (Tokyo/Sydney open) — `IsInHourWindow`
+    /// handles the wraparound.</summary>
+    [InputParameter("Session - Asia: enable", 55)]
+    public bool AsiaSessionEnabled { get; set; }
 
-    [InputParameter("RTH end hour (EST)", 36, 0, 23, 1, 0)]
-    public int RthEndHour { get; set; }
+    [InputParameter("Session - Asia: start hour (ET)", 56, 0, 23, 1, 0)]
+    public int AsiaSessionStartHour { get; set; }
+
+    [InputParameter("Session - Asia: end hour (ET)", 57, 0, 23, 1, 0)]
+    public int AsiaSessionEndHour { get; set; }
+
+    /// <summary>Default 03:00–12:00 ET (London open through the NY overlap).</summary>
+    [InputParameter("Session - London: enable", 58)]
+    public bool LondonSessionEnabled { get; set; }
+
+    [InputParameter("Session - London: start hour (ET)", 59, 0, 23, 1, 0)]
+    public int LondonSessionStartHour { get; set; }
+
+    [InputParameter("Session - London: end hour (ET)", 60, 0, 23, 1, 0)]
+    public int LondonSessionEndHour { get; set; }
+
+    /// <summary>Default 08:00–17:00 ET — the full NY futures session (wider than the old RTH
+    /// default of 9–16, which was specifically equity regular hours).</summary>
+    [InputParameter("Session - New York: enable", 61)]
+    public bool NySessionEnabled { get; set; }
+
+    [InputParameter("Session - New York: start hour (ET)", 62, 0, 23, 1, 0)]
+    public int NySessionStartHour { get; set; }
+
+    [InputParameter("Session - New York: end hour (ET)", 63, 0, 23, 1, 0)]
+    public int NySessionEndHour { get; set; }
 
     // ---- POC — target candidates for both entry pathways, plus its own standalone rejection
     // trigger (see the class doc comment's "POC TRADING" section) ----------------------------
@@ -459,6 +531,29 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// without being as noisy as one bar alone.</summary>
     [InputParameter("Delta filter: rolling window (bars)", 50, 1, 200, 1, 0)]
     public int DeltaLookbackBars { get; set; }
+
+    // ---- trailing stop (after breakeven) — see the class doc comment's "TRAILING STOP" section ----
+
+    /// <summary>FOUND 2026-09-28 — the operator watched a trade move to breakeven twice as it kept
+    /// running, then asked "does it ever trail the stop loss after it keeps going in profit?" The
+    /// existing breakeven move is a ONE-TIME step; this is a SEPARATE, CONTINUOUS mechanism that
+    /// takes over only once breakeven has already fired (never instead of it, never before it).
+    /// The operator's own proposed reference: "trail to the bottom of the previous candle once its
+    /// in profit already" — confirmed live by the operator manually doing exactly this ("like were
+    /// i just moved the stop manually worked wonders price came down to it but never hit it because
+    /// that is the support area for the continue push up") and by the explicit goal "look for the
+    /// point were we can move the stop more into profit but avoid being filled" — i.e. trail using
+    /// a level price has already respected (the prior closed bar's own low/high) rather than a
+    /// tight, noise-prone distance, so an ordinary pullback that retests support/resistance doesn't
+    /// stop the trade out of its own trend. See <see cref="CheckTrailingStop"/>.</summary>
+    [InputParameter("Trailing stop after breakeven: enable", 51)]
+    public bool TrailAfterBreakevenEnabled { get; set; }
+
+    /// <summary>How far beyond the prior closed bar's own low (long) / high (short) the trailing
+    /// stop sits — same slippage/fee reasoning as <see cref="BreakevenBufferTicks"/>, just applied
+    /// on every ratchet instead of once.</summary>
+    [InputParameter("Trailing stop: buffer beyond prior candle (ticks)", 52, 0, 1000, 1, 0)]
+    public int TrailBufferTicks { get; set; }
 
     // ---- lifecycle state --------------------------------------------------------------------
 
@@ -567,6 +662,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.FallbackTargetTicks = 40;
         this.MinRewardRiskPercent = 100;
 
+        this.BreakevenEnabled = true;
         this.BreakevenTriggerRiskPercent = 50;
         this.BreakevenBufferTicks = 15;
         this.MinStopDistanceTicks = 20;
@@ -584,13 +680,24 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.DeltaFilterEnabled = true;
         this.DeltaLookbackBars = 8;
 
+        this.TrailAfterBreakevenEnabled = true;
+        this.TrailBufferTicks = 4;
+
         this.MaxDailyLoss = 0;
         this.MaxDrawdown = 2000;
         this.MaxTradesPerSession = 10;
         this.MinBarsBetweenEntries = 5;
-        this.RthOnly = 0;
-        this.RthStartHour = 9;
-        this.RthEndHour = 16;
+
+        this.SessionFilterEnabled = false;
+        this.AsiaSessionEnabled = true;
+        this.AsiaSessionStartHour = 19;
+        this.AsiaSessionEndHour = 4;
+        this.LondonSessionEnabled = true;
+        this.LondonSessionStartHour = 3;
+        this.LondonSessionEndHour = 12;
+        this.NySessionEnabled = true;
+        this.NySessionStartHour = 8;
+        this.NySessionEndHour = 17;
     }
 
     // ---- lifecycle ----------------------------------------------------------------------------
@@ -1017,7 +1124,10 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.TryEnter(levels, fvg.Active, midPrice, tickSize);
 
         if (latestClosedBar is { } rejectionBar)
+        {
             this.CheckPocRejection(rejectionBar, priorBars, tickSize, levels, fvg.Active);
+            this.CheckTrailingStop(rejectionBar, tickSize);
+        }
     }
 
     /// <summary>Feeds the dedicated 15-minute series into the higher-timeframe POC engine (own
@@ -1108,7 +1218,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         if (this.waitOpenPosition || this.waitClosePositions) return;
         if (this.dailyLimitHit || this.drawdownLimitHit || this.tradesLimitHit) return;
         if (this.MyPositions().Any()) return;
-        if (this.RthOnly == 1 && !this.IsInRth()) return;
+        if (!this.IsInAllowedSession()) return;
         if (this.barCounter - this.lastEntryBarIndex < this.MinBarsBetweenEntries) return;
 
         var proximity = this.IfvgProximityTicks * tickSize;
@@ -1233,7 +1343,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         if (this.waitOpenPosition || this.waitClosePositions) return;
         if (this.dailyLimitHit || this.drawdownLimitHit || this.tradesLimitHit) return;
         if (this.MyPositions().Any()) return;
-        if (this.RthOnly == 1 && !this.IsInRth()) return;
+        if (!this.IsInAllowedSession()) return;
         if (this.barCounter - this.lastEntryBarIndex < this.MinBarsBetweenEntries) return;
 
         var buffer = this.PocRejectionBufferTicks * tickSize;
@@ -1463,10 +1573,34 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.PlaceEntry(side, stopPrice, targetPrice, anchorDescription, targetSource);
     }
 
-    private bool IsInRth()
+    /// <summary>See <see cref="SessionFilterEnabled"/>'s own doc comment. Returns true (trade
+    /// allowed) whenever the filter is off, or the current ET hour falls inside at least one
+    /// ENABLED session's own window.</summary>
+    private bool IsInAllowedSession()
     {
-        var est = TimeZoneInfo.ConvertTimeFromUtc(Core.TimeUtils.DateTimeUtcNow, SessionZone);
-        return est.Hour >= this.RthStartHour && est.Hour < this.RthEndHour;
+        if (!this.SessionFilterEnabled) return true;
+
+        var hour = TimeZoneInfo.ConvertTimeFromUtc(Core.TimeUtils.DateTimeUtcNow, SessionZone).Hour;
+
+        if (this.AsiaSessionEnabled && IsInHourWindow(hour, this.AsiaSessionStartHour, this.AsiaSessionEndHour))
+            return true;
+        if (this.LondonSessionEnabled && IsInHourWindow(hour, this.LondonSessionStartHour, this.LondonSessionEndHour))
+            return true;
+        if (this.NySessionEnabled && IsInHourWindow(hour, this.NySessionStartHour, this.NySessionEndHour))
+            return true;
+
+        return false;
+    }
+
+    /// <summary>Hour-of-day window check that handles a session spanning midnight (e.g. Asia's
+    /// default 19:00–04:00 ET) — a plain `hour >= start && hour < end` only works when start &lt;
+    /// end.</summary>
+    private static bool IsInHourWindow(int hour, int startHour, int endHour)
+    {
+        if (startHour == endHour) return true; // full 24h window
+        return startHour < endHour
+            ? hour >= startHour && hour < endHour
+            : hour >= startHour || hour < endHour;
     }
 
     /// <summary>Places ONLY the entry order — no embedded bracket. The stop/target are placed as
@@ -1634,7 +1768,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// </summary>
     private void CheckBreakeven()
     {
-        if (this.breakevenMoved || this.BreakevenTriggerRiskPercent <= 0) return;
+        if (this.breakevenMoved || !this.BreakevenEnabled || this.BreakevenTriggerRiskPercent <= 0) return;
         if (!this.protectiveOrdersPlaced) return;
 
         var positions = this.MyPositions();
@@ -1684,6 +1818,58 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.Log(
             $"[Risk] moved stop to breakeven+buffer ({breakevenPrice:0.####}) after "
             + $"{position.GrossPnLTicks:F1} ticks profit.",
+            StrategyLoggingLevel.Trading);
+    }
+
+    /// <summary>
+    /// CONTINUOUS trail, layered on top of (never instead of, never before) the one-time
+    /// <see cref="CheckBreakeven"/> move — see <see cref="TrailAfterBreakevenEnabled"/>'s own doc
+    /// comment for the operator's own reasoning. Runs once per newly-closed chart bar (the same
+    /// "latestClosedBar" event `CheckPocRejection` already reacts to), ratcheting the stop to just
+    /// beyond that bar's own low (long) / high (short) — a level price has just finished respecting,
+    /// which is the whole point: an ordinary pullback that retests it shouldn't stop the trade out,
+    /// only a genuine break of it should. Only ever moves the stop FURTHER into profit (a stale or
+    /// wider candidate than the current stop is simply skipped), so this can never give back
+    /// ground the breakeven move (or an earlier trail step) already locked in.
+    /// </summary>
+    private void CheckTrailingStop(Bar priorBar, double tickSize)
+    {
+        if (!this.TrailAfterBreakevenEnabled || !this.breakevenMoved) return;
+        if (!this.protectiveOrdersPlaced || tickSize <= 0) return;
+
+        var positions = this.MyPositions();
+        if (positions.Length == 0) return;
+
+        var position = positions[0]; // one position at a time, by design
+        var stopOrder = this.FindProtectiveStopOrder();
+        if (stopOrder is null) return; // not found yet (or already filled/cancelled) — try again next bar
+
+        var isLong = position.Side == Side.Buy;
+        var buffer = this.TrailBufferTicks * tickSize;
+        var candidate = isLong ? priorBar.Low - buffer : priorBar.High + buffer;
+
+        // Ratchet only — never move the stop backward toward (or past) where it already sits.
+        var isImprovement = isLong ? candidate > stopOrder.TriggerPrice : candidate < stopOrder.TriggerPrice;
+        if (!isImprovement) return;
+
+        var request = new ModifyOrderRequestParameters(stopOrder) { TriggerPrice = candidate };
+        var result = Core.Instance.ModifyOrder(request);
+
+        if (result.Status == TradingOperationResultStatus.Failure)
+        {
+            // Same benign race as CheckBreakeven's own modify (see its doc comment): the position
+            // may have closed between the snapshot above and this call reaching the broker.
+            if (this.MyPositions().Length == 0)
+                this.Log($"[Risk] trailing stop move skipped: position closed first ({result.Message}).", StrategyLoggingLevel.Trading);
+            else
+                this.Log($"[Risk] trailing stop move failed: {result.Message}", StrategyLoggingLevel.Error);
+
+            return;
+        }
+
+        this.Log(
+            $"[Risk] trailed stop to {candidate:0.####} (beyond prior candle {(isLong ? "low" : "high")} "
+            + $"{(isLong ? priorBar.Low : priorBar.High):0.####}).",
             StrategyLoggingLevel.Trading);
     }
 

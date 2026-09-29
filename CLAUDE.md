@@ -2879,6 +2879,109 @@ observation of typical slippage on this instrument/connection.
 **Verified 2026-09-28 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
 -c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live.**
 
+#### FOURTEENTH ISSUE, 2026-09-28 (same day) — technically-valid but absurd risk:reward
+
+Operator, on the very next live trade after the thirteenth fix: "also playing off the 1min poc
+this makes no sense the rr for this trade is super negative," then, once it was clear which trade
+they meant: "what is this risk to reward here this is crazy." The trade's stop passed the tenth
+fix's own wrong-side check (it WAS on the correct side of entry) but sat roughly 84 points away —
+an unretraced rally had left the last confirmed swing low far below current price, and nothing in
+`ComputeSwingStop` or `MinStopDistanceTicks` catches "correct side, but stale and absurdly far." The
+resulting trade risked ~84 points to make ~15.25 — roughly 1:5.5 AGAINST the trade.
+
+A maximum stop-distance cap was considered and rejected: an earlier, legitimate live trade had
+risked 118 ticks for a ~2.9:1 reward, and a distance cap alone can't distinguish that trade from
+this one — both are "wide," only one is proportionate. **Fix**: `PassesRiskRewardFilter` checks
+the actual economics directly — `reward / risk >= MinRewardRiskPercent / 100.0` — computed fresh
+from whatever stop/target the rest of the pipeline produced, regardless of what produced either
+number. Applied as the LAST gate before any entry, in both the DOM/absorption/IFVG pathway
+(`TryEnter`) and the POC-rejection pathway (`PlacePocEntry`). Default 100 (require at least 1:1);
+0 disables the check entirely.
+
+**Verified 2026-09-28 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live** at the time this was
+written; confirmed on a LATER live trade the same day (a long that ran to +$50.68 off a current-move
+POC entry with two prior breakeven moves logged), which is what prompted the fifteenth feature below.
+
+#### FIFTEENTH FEATURE, 2026-09-28 (same day) — continuous trailing stop after breakeven
+
+Operator, watching that same well-in-profit long keep climbing past its second breakeven move:
+"does it ever trail the stop loss after it keeps going in profit?" — answer: no, `CheckBreakeven`
+was always a deliberate ONE-TIME move (the operator's own earlier choice via `AskUserQuestion`, over
+a continuous trail). The operator then proposed a specific design: "maybe we should trail to the
+bottom of the previous candle once its in profit already like its already trailed the stop into
+profit and it keeps going up like this." Immediately validated by doing exactly that BY HAND on the
+same live trade: "like were i just moved the stop manually worked wonders price came down to it but
+never hit it because that is the support area for the continue push up" — and summarized the actual
+goal as "look for the point were we can move the stop more into profit but avoid being filled."
+
+**Built as `CheckTrailingStop`**, layered on top of (never instead of, never before) the existing
+one-time breakeven move:
+- Gated on `TrailAfterBreakevenEnabled` AND `this.breakevenMoved` already being true — this never
+  runs until the one-time breakeven step has already fired.
+- Runs once per newly-closed chart bar (the same `latestClosedBar` event `CheckPocRejection` already
+  reacts to, called right alongside it in `RunPoll`), not every poll — the reference level (the
+  bar's own low/high) only changes when a bar actually closes.
+- Candidate stop = that bar's own Low (long) / High (short), offset by `TrailBufferTicks` (default
+  4) beyond it — same "trail behind a level price already respected" idea the operator validated
+  manually, deliberately NOT a tight ATR/percentage-based trail, so an ordinary pullback that
+  retests support/resistance doesn't stop the trade out of its own trend.
+- **Ratchet-only**: the candidate is only applied if it's strictly more favorable than the stop
+  order's current `TriggerPrice` (higher for a long, lower for a short) — a worse or equal candidate
+  is silently skipped, so this can never give back ground the breakeven move or an earlier trail
+  step already locked in.
+- Same benign-race handling as `CheckBreakeven`'s own modify: a failed `ModifyOrder` is logged as
+  informational (not an error) if the position has already closed by the time the request reaches
+  the broker, since that's a race with the trade finishing first, not a real failure.
+
+**Verified 2026-09-28 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live.**
+
+#### SIXTEENTH FEATURE, 2026-09-28 (same day) — explicit breakeven on/off checkbox
+
+Operator: "is there a way we can have a button to turn off break evens." `BreakevenTriggerRiskPercent`
+already doubled as an off-switch at 0, but that's a numeric-field trick, not an obvious toggle.
+Added `BreakevenEnabled` (plain checkbox, default true) gating `CheckBreakeven` directly, alongside
+(not replacing) the trigger's own 0-disables behavior.
+
+Asked explicitly via `AskUserQuestion` whether the new trailing stop (fifteenth feature, above)
+should keep depending on breakeven having fired, or gain its own independent profit trigger so it
+could still run with breakeven off. **Operator's choice: keep it dependent** — turning
+`BreakevenEnabled` off also means the stop will never trail for that run, since `CheckTrailingStop`
+only activates once `this.breakevenMoved` is true. Simpler behavior, explicitly traded off against
+losing trailing whenever breakeven itself is disabled.
+
+**Verified 2026-09-28 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live.**
+
+#### SEVENTEENTH FEATURE, 2026-09-28 (same day) — Asia/London/New York session toggles
+
+Operator: "i also need the ability to choose to trade in asia and london and ny sessions so i need
+to be able to turn on and off sessions" — the standard order-flow session breakdown, directly tied
+to the strategy's own long-term direction (see `finchdomscalp-orderflow-vision` memory).
+
+**Replaced** the old single RTH on/off window (`RthOnly`/`RthStartHour`/`RthEndHour`, which was
+really just a crude stand-in for "NY session only") with three independently toggleable sessions,
+each with its own enable checkbox and start/end hour (ET, same `SessionZone` every other
+time-of-day check in this file already uses):
+- `SessionFilterEnabled` — master switch, default OFF (24h trading, matching this strategy's
+  behavior before this feature existed; a non-breaking default, same reasoning as every other
+  toggle added this session).
+- Asia: default ON, 19:00–04:00 ET (spans midnight — Tokyo/Sydney open).
+- London: default ON, 03:00–12:00 ET (London open through the NY overlap).
+- New York: default ON, 08:00–17:00 ET (the full NY futures session — wider than the old RTH
+  default of 9–16, which was specifically equity regular hours).
+
+`IsInAllowedSession` (replaces `IsInRth`) returns true whenever the filter itself is off, or the
+current hour falls inside at least one ENABLED session's window — sessions are OR'd together, so
+enabling Asia+London lets a signal through during either, not just their overlap. `IsInHourWindow`
+handles the midnight-wraparound case (start hour > end hour) that a plain `hour >= start && hour <
+end` comparison can't. Both entry pathways (`TryEnter`, `CheckPocRejection`) gate on this exactly
+where they used to gate on `RthOnly`.
+
+**Verified 2026-09-28 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live.**
+
 ---
 
 ## Common Architecture Patterns
