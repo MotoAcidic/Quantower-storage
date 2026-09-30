@@ -3171,6 +3171,74 @@ a requirement. Gives the operator a direct way to fall back to "POC-only" tradin
 -c Release` — 0 errors. Deployed folder still clean. Same UI-application caveat as every other
 default/parameter change today.
 
+#### TWENTY-FOURTH FEATURE, 2026-09-29 (same day) — absorption-miss diagnostics + SDK path break
+
+Operator: "what qualifies as an absorption level for a trade to be triggered because maybe we have
+that value to high" — answered by walking through `RestingOrderEngine.Reconcile`'s actual mechanics
+(a level needs BOTH live `Current >= MinLevelSize` right now AND cumulative `Absorbed >=
+AbsorptionStrongContracts` built up over repeated tests at that exact price, not just one big
+resting order). Follow-up: "we need to narrow this down to see if the poc never gets near the
+absorption level and if this confluence is not needed or making way to strict."
+
+**Built**: `HasAbsorptionConfluence` now returns a `missDetail` string on failure — the nearest
+same-side level's actual distance from the POC plus its real current/absorbed numbers next to the
+configured thresholds, or a plain "no level tracked at all on this side" if even that's missing.
+`[Signal skipped]` now surfaces this instead of the old generic "no qualifying absorption within N
+ticks" — e.g. `nearest BID is 34 ticks from POC (current=120, absorbed=85; needs current>=100,
+absorbed>=200, within 20 ticks)`, which immediately tells you whether the miss is a PROXIMITY
+problem (POC never gets near any resting order) or a THRESHOLD problem (something's there but
+under-sized) — the two very different explanations the operator was trying to separate.
+
+**Unrelated build break found and fixed along the way**: `dotnet build` failed with `CS0246: The
+type or namespace name 'TradingPlatform' could not be found` — Quantower had auto-updated from
+v1.147.4 to v1.147.5 sometime during tonight's restarts, and `finchDomScalpStrategy.csproj`'s SDK
+`HintPath` was still hardcoded to the old version's now-nonexistent path. This is a known recurring
+risk in this project (flagged in the original build plan: "confirm the live version under
+`C:\Quantower\TradingPlatform\` at build time"). Fixed by updating the `HintPath` to
+`v1.147.5\bin\TradingPlatform.BusinessLayer.dll`. Worth checking this path first if a FUTURE build
+ever fails with the same `TradingPlatform` namespace-not-found error, before assuming a real code
+problem.
+
+**Verified 2026-09-29 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean.
+
+#### TWENTY-FIFTH FEATURE, 2026-09-29 (same day) — TryEnter restored as a second, independent pathway
+
+Same-day reversal of the nineteenth feature's "remove `TryEnter` entirely" decision. Sequence: "is
+even having the absorption level close to the poc even a valid trade" (a fair challenge to whether
+POC rejection needs absorption confluence at all) → "should we have both in seperate strategies
+working indepentally" → clarified to "like have both in the single strategy in quantower but let
+them both fire on their own but only have 1 order open at a time" → clarified further "also be able
+to turn each one of them off if i want" → and the conceptual split that settled the design: "poc
+should be for quick scalps and purely scalping and absorption levels should tell us its going the
+other direction."
+
+**Built**: `TryEnter` restored as written before its removal, PLUS everything added to the POC
+pathway since (`ExtendStopPastRestingLevel`, matching `[Signal skipped]` diagnostics via a new
+`LogAbsorptionSignalSkipped`). Runs as a genuinely separate pathway from `CheckPocRejection` — not
+a confirmation gate on it, which is what the nineteenth feature had turned absorption into.
+`HasAbsorptionConfluence`/`PocAbsorptionConfluenceEnabled` on the POC side are UNCHANGED and still
+fully available; the two roles now coexist rather than one replacing the other.
+
+Two new independent toggles, one per pathway: `AbsorptionEntryEnabled` (new, default true) for
+`TryEnter`; POC already had the equivalent (all three of `PocCurrentMoveEnabled`/`Poc5mEnabled`/
+`Poc15mEnabled` off = POC fully disabled), so no new parameter was needed there. `IfvgProximityTicks`
+(removed in the nineteenth feature as dead code) is also back, since `TryEnter`'s own IFVG-alignment
+requirement needs it again.
+
+Both pathways share every existing risk gate (one position at a time, cooldown, daily-loss/
+drawdown/trade-count limits, session filter) — `RunPoll` calls `TryEnter` first, then
+`CheckPocRejection`; whichever clears its own conditions first in a given poll wins, and both check
+"already in a position" before doing anything, so only one trade is ever open regardless of which
+pathway produced it.
+
+**Verified 2026-09-29 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live** — `TryEnter` in this
+form (with the trend/R:R filters and resting-liquidity stop extension it never had originally) has
+never actually traded; its previous incarnation is what produced most of one bad night's losses, so
+this is a genuine re-test of the same concept with more protection around it, not an assumption it's
+now safe.
+
 ---
 
 ## Common Architecture Patterns

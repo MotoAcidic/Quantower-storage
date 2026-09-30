@@ -319,6 +319,31 @@ namespace finchDomScalpStrategy;
 /// definition. `DeltaFilterEnabled` now defaults to false; `TrendFilterEnabled`'s 60-bar window
 /// asks a different, still-valid question ("is the whole session running against this trade") and
 /// stays on. See `DeltaFilterEnabled`'s own doc comment.
+///
+/// TWO INDEPENDENT PATHWAYS, restored 2026-09-29, same day — the "ABSORPTION AS POC CONFLUENCE"
+/// section above described removing `TryEnter` entirely in favor of a single POC-only pathway with
+/// absorption as a required gate on it. That lasted about the same day: absorption confluence kept
+/// rejecting trades the operator felt should have gone through ("is even having the absorption
+/// level close to the poc even a valid trade"), and testing whether POC needs absorption at all
+/// raised a bigger question — the operator wanted BOTH concepts trading, independently: "like have
+/// both in the single strategy in quantower but let them both fire on their own but only have 1
+/// order open at a time." `TryEnter` is back as a second, fully independent entry pathway
+/// alongside POC rejection, not a confirmation gate on it — `CheckPocRejection`'s own
+/// `HasAbsorptionConfluence` requirement is UNCHANGED and still available (toggle via
+/// `PocAbsorptionConfluenceEnabled`), it's just no longer the only way absorption factors in.
+///
+/// The operator's own conceptual framing for why these are two DIFFERENT signals, not the same
+/// idea twice: "poc should be for quick scalps and purely scalping and absorption levels should
+/// tell us its going the other direction." POC rejection is the faster, more reactive read (a
+/// level held on THIS bar, expect a quick move away from it). The DOM/absorption pathway is a
+/// REVERSAL read (a large, proven resting order defends a price, implying a turn away from it) —
+/// exactly `TryEnter`'s original 2026-09-25 direction logic (`level.IsBid ? Buy : Sell`), unchanged
+/// since it was first built. Both independently toggleable: `AbsorptionEntryEnabled` for this
+/// pathway, POC's existing three timeframe checkboxes (all off = POC fully disabled) for that one.
+/// Both now share everything added to either pathway since 2026-09-25 — swing-based stops, the
+/// trend filter, the R:R filter, and the resting-liquidity stop extension — and both check "already
+/// in a position" before doing anything, so exactly one trade is ever open at a time regardless of
+/// which pathway produced it.
 /// </summary>
 public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 {
@@ -347,12 +372,12 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("DOM: levels to scan per side", 6, 5, 2000, 5, 0)]
     public int LevelsToScan { get; set; }
 
-    // ---- resting-order/absorption thresholds — CHANGED 2026-09-29 from "the DOM/UA level is the
-    // anchor" (its own standalone entry trigger, `TryEnter`) to "absorption is a required
-    // CONFLUENCE check for a POC rejection" (see `HasAbsorptionConfluence` and the class doc
-    // comment's "ABSORPTION AS POC CONFLUENCE" section) — the operator's own call after review
-    // showed the standalone DOM pathway was where nearly all of one bad night's losses came from.
-    // These two thresholds are unchanged in meaning, just consumed by a different caller now. ----
+    // ---- resting-order/absorption — TWO INDEPENDENT ROLES since 2026-09-29 (see the class doc
+    // comment's "TWO INDEPENDENT PATHWAYS" section): these thresholds define what counts as a
+    // "real" resting order EVERYWHERE they're used — both as `TryEnter`'s own standalone entry
+    // trigger (a REVERSAL signal: a defended level implies price turns the OTHER way) and as
+    // `HasAbsorptionConfluence`'s required confirmation for a POC rejection (a QUICK SCALP signal).
+    // Same numbers, two different consumers, the operator's own conceptual split. ----------------
 
     [InputParameter("Min level size (contracts)", 10, 1, 100000, 1, 0)]
     public int MinLevelSize { get; set; }
@@ -365,6 +390,29 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
     [InputParameter("Unfinished auction: price must move past by (ticks)", 12, 1, 100000, 1, 0)]
     public int UnfinishedDistanceTicks { get; set; }
+
+    /// <summary>RESTORED 2026-09-29 ("like have both in the single strategy in quantower but let
+    /// them both fire on their own but only have 1 order open at a time") — brings back `TryEnter`,
+    /// the original standalone DOM/absorption entry trigger removed earlier the same day, as a
+    /// SECOND, fully independent pathway alongside POC rejection rather than only a confirmation
+    /// gate on it. The operator's own framing of the split: "poc should be for quick scalps and
+    /// purely scalping and absorption levels should tell us its going the other direction" — a
+    /// defended resting order implies a REVERSAL away from it, POC rejection is the faster, more
+    /// reactive scalp signal. Both share every existing risk gate (one position at a time, same
+    /// cooldown, same daily-loss/drawdown/trade-count limits, same session filter) and both now
+    /// benefit from everything added since `TryEnter` was first built: swing-based stops, the trend
+    /// filter, the R:R filter, and the resting-liquidity stop extension. See
+    /// <see cref="AbsorptionEntryEnabled"/> for the on/off switch — POC's own three timeframe
+    /// toggles already provide the equivalent "turn POC off entirely" switch on that side.</summary>
+    [InputParameter("Absorption: enable standalone entry", 69)]
+    public bool AbsorptionEntryEnabled { get; set; }
+
+    /// <summary>How close (in ticks) a level's own price must be to an active IFVG zone's own
+    /// [Bottom, Top] range to count as "aligned" confirmation — `TryEnter`'s own original
+    /// requirement (the level is the ANCHOR, the IFVG is CONFIRMATION), unchanged since 2026-09-25.
+    /// </summary>
+    [InputParameter("IFVG: proximity tolerance (ticks)", 70, 0, 1000, 1, 0)]
+    public int IfvgProximityTicks { get; set; }
 
     // ---- exits ------------------------------------------------------------------------------
 
@@ -802,6 +850,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.MinLevelSize = 100;
         this.AbsorptionStrongContracts = 200;
         this.UnfinishedDistanceTicks = 8;
+        this.AbsorptionEntryEnabled = true;
+        this.IfvgProximityTicks = 5;
 
         this.StopBufferTicks = 8;
         this.MinTargetDistanceTicks = 10;
@@ -1274,11 +1324,16 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         // ---- 3. drain the dedicated 15m POC series and every queued trade print ----
         this.DrainPoc();
 
-        // ---- 4. evaluate entries — POC rejection is the ONLY entry trigger (CHANGED 2026-09-29,
-        // see the class doc comment's "ABSORPTION AS POC CONFLUENCE" section); DOM/absorption
-        // levels are now a required confirmation INSIDE that pathway, not a standalone trigger ----
+        // ---- 4. evaluate entries — TWO independent pathways since 2026-09-29 (see the class doc
+        // comment's "TWO INDEPENDENT PATHWAYS" section): the standalone DOM/absorption pathway
+        // (TryEnter, a reversal signal), then POC rejection (a quick-scalp signal, still requiring
+        // its own absorption confluence if that's enabled). Whichever clears its own gates first in
+        // a given poll wins — both check "already in a position" before doing anything, so only one
+        // trade is ever open at a time regardless of which pathway produced it. ----
         if (double.IsNaN(midPrice) || tickSize <= 0)
             return;
+
+        this.TryEnter(levels, fvg.Active, midPrice, tickSize);
 
         if (latestClosedBar is { } rejectionBar)
         {
@@ -1367,12 +1422,109 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
     // ---- entry logic --------------------------------------------------------------------------
 
+    /// <summary>The standalone DOM/absorption/IFVG entry pathway — see
+    /// <see cref="AbsorptionEntryEnabled"/>'s own doc comment for why this exists alongside (not
+    /// instead of) POC rejection. A REVERSAL signal: a large, proven resting order implies price
+    /// turns AWAY from it, unlike POC rejection's faster scalp framing. Shares every risk gate with
+    /// the POC pathway; whichever pathway's own conditions clear first in a given poll wins, since
+    /// both check "already in a position" before doing anything.</summary>
+    private void TryEnter(
+        IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
+        IReadOnlyList<FairValueGapEngine.InverseFvgZone> ifvgZones,
+        double price, double tickSize)
+    {
+        if (!this.AbsorptionEntryEnabled) return;
+        if (this.waitOpenPosition || this.waitClosePositions) return;
+        if (this.dailyLimitHit || this.drawdownLimitHit || this.tradesLimitHit) return;
+        if (this.MyPositions().Any()) return;
+        if (!this.IsInAllowedSession()) return;
+        if (this.barCounter - this.lastEntryBarIndex < this.MinBarsBetweenEntries) return;
+
+        var proximity = this.IfvgProximityTicks * tickSize;
+
+        foreach (var level in levels)
+        {
+            if (level.Current < this.MinLevelSize) continue;
+            if (level.Absorbed < this.AbsorptionStrongContracts) continue;
+
+            var hasAlignedIfvg = ifvgZones.Any(z =>
+                z.IsBullish == level.IsBid
+                && level.Price >= z.Bottom - proximity
+                && level.Price <= z.Top + proximity);
+
+            if (!hasAlignedIfvg) continue;
+
+            var side = level.IsBid ? Side.Buy : Side.Sell;
+            var anchorLabel = $"{(level.IsBid ? "BID" : "ASK")} {level.Price:0.####} absorbed={level.Absorbed:N0}";
+
+            // Only logged past this point — a level with no aligned IFVG at all is routine, not a
+            // near-miss worth surfacing (see LogAbsorptionSignalSkipped's own doc comment).
+            if (!this.PassesDeltaFilter(side))
+            {
+                var rollingDelta = this.deltaTracker?.RollingDelta(this.DeltaLookbackBars);
+                this.LogAbsorptionSignalSkipped(anchorLabel, side, $"local delta filter ({this.DeltaLookbackBars}-bar delta={rollingDelta:F0} against this side)");
+                continue;
+            }
+
+            if (!this.PassesTrendFilter(side))
+            {
+                var trendDelta = this.deltaTracker?.RollingDelta(this.TrendDeltaLookbackBars);
+                this.LogAbsorptionSignalSkipped(anchorLabel, side, $"trend filter ({this.TrendDeltaLookbackBars}-bar delta={trendDelta:F0} against this side)");
+                continue;
+            }
+
+            // "stop losses should be places at recent swing low for longs and recent swing high
+            // for shorts" (2026-09-27) — falls back to the old level-relative calculation only if
+            // no swing has confirmed yet this run (early-session edge case).
+            var stopPrice = this.ComputeSwingStop(level.IsBid, price, tickSize)
+                ?? (level.IsBid
+                    ? level.Price - (this.StopBufferTicks * tickSize)
+                    : level.Price + (this.StopBufferTicks * tickSize));
+            stopPrice = this.EnforceMinStopDistance(stopPrice, price, level.IsBid, tickSize);
+
+            // "the stop is right on top of the resting orders... it should be a few ticks past
+            // that" (2026-09-29) — same fix `PlacePocEntry` already applies, now shared here too.
+            stopPrice = this.ExtendStopPastRestingLevel(stopPrice, level.IsBid, tickSize, levels);
+
+            var hasTarget = this.TryComputeTarget(
+                levels, ifvgZones, level.IsBid, price, tickSize, out var computedTarget, out var targetSource);
+
+            var targetPrice = hasTarget
+                ? computedTarget
+                : level.IsBid
+                    ? price + (this.FallbackTargetTicks * tickSize)
+                    : price - (this.FallbackTargetTicks * tickSize);
+
+            if (!hasTarget)
+                targetSource = "fallback R:R";
+
+            if (!this.PassesRiskRewardFilter(price, stopPrice, targetPrice))
+            {
+                this.LogAbsorptionSignalSkipped(anchorLabel, side, "risk:reward filter (MinRewardRiskPercent)");
+                continue;
+            }
+
+            var anchorDescription = $"{anchorLabel} unfinished={level.IsUnfinished}";
+
+            this.PlaceEntry(side, stopPrice, targetPrice, anchorDescription, targetSource);
+            return; // one qualifying setup per poll — never stack multiple entries from one pass
+        }
+    }
+
+    /// <summary>Same "only a real near-miss, never routine noise" philosophy as
+    /// <see cref="LogPocSignalSkipped"/> — only called once a level has already cleared the
+    /// absorption-size and aligned-IFVG bars, so a log here means something genuinely close to a
+    /// trade got blocked by delta/trend/R:R, not that a level merely existed somewhere.</summary>
+    private void LogAbsorptionSignalSkipped(string anchorLabel, Side side, string reason)
+    {
+        this.Log($"[Signal skipped] {side} absorption setup off {anchorLabel} blocked: {reason}.", StrategyLoggingLevel.Trading);
+    }
+
     /// <summary>Nearest OPPOSING resting level, IFVG zone, or POC ahead of price in the trade's
     /// own direction, past the minimum-distance floor — same `IsAhead`/min-distance/nearest-wins
     /// shape as `directionAbsorptionScalpStrategy.TryComputeTarget`, built from Finch-Lite's own
-    /// engines instead of that strategy's HH/LL/VWAP/prior-day levels. Resting levels are still a
-    /// TARGET candidate here even though they no longer trigger entries on their own (see the class
-    /// doc comment's "ABSORPTION AS POC CONFLUENCE" section) — an unrelated use of the same data.</summary>
+    /// engines instead of that strategy's HH/LL/VWAP/prior-day levels. Shared by both entry
+    /// pathways.</summary>
     private bool TryComputeTarget(
         IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
         IReadOnlyList<FairValueGapEngine.InverseFvgZone> ifvgZones,
@@ -1510,9 +1662,9 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             return false;
         }
 
-        if (!this.HasAbsorptionConfluence(side, poc, tickSize, levels, out confirmingLevel))
+        if (!this.HasAbsorptionConfluence(side, poc, tickSize, levels, out confirmingLevel, out var missDetail))
         {
-            this.LogPocSignalSkipped(pocLabel, side, poc, $"no qualifying absorption within {this.PocAbsorptionProximityTicks} ticks (PocAbsorptionProximityTicks)");
+            this.LogPocSignalSkipped(pocLabel, side, poc, $"no qualifying absorption confluence ({missDetail})");
             return false;
         }
 
@@ -1530,13 +1682,24 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// direction (a BID for a bullish/Buy rejection, an ASK for a bearish/Sell one). Returns the
     /// NEAREST qualifying level to the POC for logging/stop use, not just a bool, since the caller
     /// wants to say which order flow actually backed the trade. See
-    /// <see cref="PocAbsorptionConfluenceEnabled"/>'s own doc comment for the on/off switch.</summary>
+    /// <see cref="PocAbsorptionConfluenceEnabled"/>'s own doc comment for the on/off switch.
+    ///
+    /// FOUND 2026-09-29 ("we need to narrow this down to see if the poc never gets near the
+    /// absorption level and if this confluence is not needed or making way to strict") — a plain
+    /// "no qualifying absorption" skip message couldn't distinguish "nothing resting anywhere near
+    /// this POC at all" from "something's resting nearby but under-sized." On a miss,
+    /// <paramref name="missDetail"/> now reports the NEAREST level on the correct side regardless of
+    /// whether it actually qualifies — its distance from the POC and its real current/absorbed
+    /// numbers next to the configured thresholds — or says plainly that nothing is tracked on that
+    /// side at all if even that's missing.</summary>
     private bool HasAbsorptionConfluence(
         Side side, double poc, double tickSize,
         IReadOnlyList<RestingOrderEngine.RestingLevel> levels,
-        out RestingOrderEngine.RestingLevel? confirmingLevel)
+        out RestingOrderEngine.RestingLevel? confirmingLevel,
+        out string missDetail)
     {
         confirmingLevel = null;
+        missDetail = string.Empty;
         if (!this.PocAbsorptionConfluenceEnabled) return true;
 
         var proximity = this.PocAbsorptionProximityTicks * tickSize;
@@ -1551,7 +1714,24 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             .Cast<RestingOrderEngine.RestingLevel?>()
             .FirstOrDefault();
 
-        return confirmingLevel is not null;
+        if (confirmingLevel is not null) return true;
+
+        // Diagnostic-only pass below, reached only on a miss: same-side levels regardless of
+        // whether they'd actually qualify, so the log can say WHY this missed.
+        var nearest = levels
+            .Where(l => l.IsBid == wantBid)
+            .OrderBy(l => Math.Abs(l.Price - poc))
+            .Cast<RestingOrderEngine.RestingLevel?>()
+            .FirstOrDefault();
+
+        var sideLabel = wantBid ? "BID" : "ASK";
+        missDetail = nearest is { } n
+            ? $"nearest {sideLabel} is {Math.Abs(n.Price - poc) / tickSize:F0} ticks from POC "
+              + $"(current={n.Current:N0}, absorbed={n.Absorbed:N0}; needs current>={this.MinLevelSize}, "
+              + $"absorbed>={this.AbsorptionStrongContracts}, within {this.PocAbsorptionProximityTicks} ticks)"
+            : $"no {sideLabel} level tracked at all right now";
+
+        return false;
     }
 
     /// <summary>See <see cref="PocCurrentMoveMinSwingTicks"/>'s own doc comment. Only gates the

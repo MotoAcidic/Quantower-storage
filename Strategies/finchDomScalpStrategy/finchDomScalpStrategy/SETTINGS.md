@@ -10,15 +10,24 @@ checks what account it's running on. Attaching it to a sim/eval account is on yo
 
 ## How an entry actually fires
 
-Every trade comes from **POC rejection** — a bar that touched a point-of-control and closed back
-away from it, meaning the level held rather than got accepted through. There is no other entry
-pathway anymore (the original DOM/absorption standalone trigger was removed 2026-09-29). For a
-trade to fire, ALL of the following have to line up, checked in this order:
+There are **two fully independent entry pathways**, each individually switchable, sharing every
+risk gate (one position at a time, cooldown, daily-loss/drawdown/trade-count limits, session
+filter). Whichever pathway clears its own conditions first in a given poll wins — both check
+"already in a position" before doing anything, so exactly one trade is ever open at a time
+regardless of which pathway produced it.
+
+- **POC rejection** — a bar touched a point-of-control and closed back away from it, meaning the
+  level held rather than got accepted through. The faster, more reactive **quick-scalp** signal.
+- **DOM/absorption (`TryEnter`)** — a large, proven resting order (size + real absorbed volume)
+  confirmed by an aligned IFVG. The **reversal** signal: a defended level implies price turns AWAY
+  from it, not a scalp off local structure.
+
+### POC rejection requirements, checked in order
 
 1. At least one of the three POC timeframes (current-move / 5m / 15m) is enabled.
 2. Not already waiting on a just-placed order to confirm.
 3. Daily-loss, drawdown, and trade-count limits haven't tripped.
-4. Currently flat — one position at a time, by design.
+4. Currently flat.
 5. Current time falls inside an allowed session (only checked if the session filter is on).
 6. Enough bars have passed since the last entry *or* the last close (cooldown).
 7. **Rejection pattern**: the bar's high/low touched or pierced the POC, but its close ended up
@@ -35,9 +44,27 @@ trade to fire, ALL of the following have to line up, checked in this order:
 13. **Risk:reward filter**: once the stop and target are computed, the reward has to be worth at
     least the configured percentage of the risk — checked LAST, right before the order goes out.
 
-Only when all 13 pass does an order actually get placed. Each POC timeframe is tried in order
-(current-move, then 5m, then 15m) and the first one that clears everything wins — only one trade
-per bar close, never multiple.
+Each POC timeframe is tried in order (current-move, then 5m, then 15m) and the first one that
+clears everything wins.
+
+### DOM/absorption (`TryEnter`) requirements, checked in order
+
+1. `AbsorptionEntryEnabled` is on.
+2. Not already waiting on a just-placed order to confirm.
+3. Daily-loss, drawdown, and trade-count limits haven't tripped.
+4. Currently flat.
+5. Current time falls inside an allowed session.
+6. Enough bars have passed since the last entry *or* close (cooldown).
+7. A tracked resting order clears both size thresholds (`Min level size`, `Absorption: strong
+   tier`).
+8. **Aligned IFVG**: an active inverse fair value gap on the matching side sits within proximity
+   of the level's own price.
+9. **Local delta filter** — off by default, same as the POC side.
+10. **Trend filter** — same 60-bar check.
+11. **Risk:reward filter** — same last-gate economic check, once the stop/target are computed.
+
+Only one qualifying level per poll fires a trade — the first one found in the scanned book, not
+every level that happens to qualify.
 
 ---
 
@@ -52,14 +79,16 @@ per bar close, never multiple.
 
 ## Resting-order / absorption thresholds
 
-These define what counts as a "real" resting order anywhere it's checked (originally the DOM
-pathway's own anchor requirement; today, purely the input to absorption confluence — see below).
+These define what counts as a "real" resting order everywhere it's checked — both `TryEnter`'s own
+standalone entry trigger and POC's absorption confluence gate use the SAME two thresholds.
 
 | Setting | Default | Why |
 |---|---|---|
 | Min level size (contracts) | 100 | Floor for a resting order to be tracked as a real level at all. |
 | Absorption: strong tier (contracts) | 200 | How much size has to have traded through a level while it's still standing before it counts as genuinely defended, not just a large order nobody's tested yet. |
-| Unfinished auction: price must move past by (ticks) | 8 | How far price has to move past a level before it's flagged "unfinished" (informational only now — no longer gates anything since the standalone DOM pathway was removed). |
+| Unfinished auction: price must move past by (ticks) | 8 | How far price has to move past a level before it's flagged "unfinished" (informational only — logged, doesn't gate anything). |
+| Absorption: enable standalone entry | true | On/off switch for the whole `TryEnter` pathway. Turn off to trade POC only. |
+| IFVG: proximity tolerance (ticks) | 5 | How close a level's price has to be to an active inverse fair value gap's own range to count as aligned confirmation — `TryEnter`'s own requirement, not used anywhere else. |
 
 ## Stops & targets
 
@@ -105,7 +134,7 @@ leave a gap you didn't intend, or embrace it if you did.
 
 | Setting | Default | Why |
 |---|---|---|
-| POC: enable current-move / 5m / 15m | all true | Three independent timeframes, each can anchor its own rejection trade. Current-move resets every time a new swing confirms (fastest, noisiest); 5m and 15m are fixed, slower, more deliberate. |
+| POC: enable current-move / 5m / 15m | all true | Three independent timeframes, each can anchor its own rejection trade. Current-move resets every time a new swing confirms (fastest, noisiest); 5m and 15m are fixed, slower, more deliberate. Turning all three off is the equivalent of a master "disable POC entirely" switch — trade absorption only. |
 | POC: swing pivot lookback (bars) | 3 | How many bars on each side confirm a swing pivot — feeds both the current-move POC's own reset logic and the stop-placement swing tracker. |
 | POC: 5m/15m history lookback (days) | 5 | How much backlog the 5m/15m POC engines prime from on attach. |
 | POC: rejection close buffer (ticks) | 3 | How far beyond the POC a bar's close has to end up to count as a genuine rejection, not just noise. |
@@ -113,12 +142,15 @@ leave a gap you didn't intend, or embrace it if you did.
 | POC rejection: minimum approach distance (ticks) | 10 | How far away those prior bars have to have been from the POC to count as a real approach. |
 | POC current-move: minimum swing size to qualify (ticks, 0=off) | 20 | Current-move POC only — requires the swing that formed it to be a real move, not a tiny wiggle producing a target sized like any other. |
 
-## Absorption confluence (the POC entry gate)
+## Absorption confluence (an OPTIONAL extra gate on POC rejection)
+
+Separate from `TryEnter` — this is an additional requirement you can layer onto POC rejection
+specifically, not the DOM/absorption pathway itself.
 
 | Setting | Default | Why |
 |---|---|---|
-| POC: require absorption confluence | **true** | The core 2026-09-29 architecture change: a POC rejection now needs a real resting order backing it up, on the side that defends the rejection direction. This checkbox exists specifically so you can drop back to "POC-only" trading (no absorption requirement) without touching anything else if it proves too restrictive. |
-| POC: required absorption confluence proximity (ticks) | **20** | How close that resting order has to be to the POC. Started at 10, confirmed too tight in a live trending session (zero trades fired all session; otherwise-qualifying, trend-aligned trades were dying here specifically) — widened to 20. |
+| POC: require absorption confluence | **true** | If on, a POC rejection ALSO needs a real resting order backing it up nearby, on the side that defends the rejection direction — on top of whatever `TryEnter` is separately doing with absorption. Turn off to let POC trade purely on its own rejection/delta/trend/R:R logic, no absorption involved at all. Worth testing off, since it's unproven whether a POC rejection genuinely needs a resting order to coincide with it — see the open question in this file's history. |
+| POC: required absorption confluence proximity (ticks) | **20** | How close that resting order has to be to the POC, if the gate above is on. Started at 10, confirmed too tight in a live trending session (zero trades fired all session) — widened to 20. |
 
 ## Delta & trend filters
 
@@ -139,4 +171,4 @@ Pure logging — neither of these touches trading logic.
 | Setting | Default | What it does |
 |---|---|---|
 | Heartbeat: log interval (minutes, 0=off) | 15 | Logs a snapshot (POC levels, delta readings, session state, minutes since last trade) on a fixed interval regardless of whether anything's happening — proof the poll loop is alive during a quiet stretch. Goes silent while a position is open. |
-| *(always on, no switch)* | — | Once a genuine POC rejection is actually detected, a `[Signal skipped]` log line names the exact gate (swing size, delta, trend, absorption confluence) that blocked it and why — e.g. the actual rolling delta value, or that no absorption sat within the configured proximity. Only fires on a real near-miss, never as noise on an ordinary bar. |
+| *(always on, no switch)* | — | Once a genuine setup is actually detected — a real POC rejection, or a resting level that already cleared its size + aligned-IFVG bars — a `[Signal skipped]` log line names the exact gate that blocked it and why: swing size, local delta, trend, absorption confluence, or risk:reward, with the real numbers (e.g. the actual rolling delta value, or the nearest same-side level's real current/absorbed numbers next to what's required). Only fires on a real near-miss, from either pathway, never as noise on an ordinary bar. |
