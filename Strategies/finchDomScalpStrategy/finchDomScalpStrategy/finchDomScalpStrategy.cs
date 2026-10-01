@@ -344,6 +344,25 @@ namespace finchDomScalpStrategy;
 /// trend filter, the R:R filter, and the resting-liquidity stop extension — and both check "already
 /// in a position" before doing anything, so exactly one trade is ever open at a time regardless of
 /// which pathway produced it.
+///
+/// NEAR-LEVEL PUSHBACK, added 2026-09-29 — a live trade ran deep into profit, grazed its target,
+/// then reversed all the way back toward its original stop with nothing protecting it: "if there is
+/// big push back from the take profit line it should just close out instead of running all the way
+/// back like this did." The operator has `BreakevenEnabled` off ("i found the break even feature
+/// losses me money in the long run"), so `CheckTrailingStop` — which only ever activates after
+/// breakeven fires — never engages either; this is a THIRD, fully independent risk mechanism,
+/// unaffected by either being on or off. Same rule applied symmetrically to the mirror case per the
+/// operator's own follow-up ("if it edges stop loss like that with pressure going back in the other
+/// direction it should just close it"): tracks the best price reached toward target and the worst
+/// price reached toward stop; if either extreme came within `NearLevelPercent` of THAT LEG'S OWN
+/// entry-to-level distance and price has since reversed away from that extreme by
+/// `PushbackClosePercent` of the same distance, the position closes immediately — protecting the
+/// gain on the target side, taking the smaller loss rather than risking a full round-trip back to
+/// stop on the other. CHANGED same day from flat tick counts to per-leg percentages ("now will this
+/// mess up the smaller scalps being 15 ticks away and a pull back from what i set to 10 ticks") —
+/// the exact same class of bug already fixed once for `BreakevenTriggerRiskPercent`: a flat tick
+/// count is "near" on a wide swing target but triggers almost immediately on a tight scalp one. See
+/// `CheckNearLevelPushback`.
 /// </summary>
 public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 {
@@ -506,6 +525,15 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("Max daily loss ($, 0=off)", 30, 0, 100000, 50, 0)]
     public int MaxDailyLoss { get; set; }
 
+    /// <summary>FOUND 2026-09-30 ("lets add in a feature to set a profit target and once its met on
+    /// the day it stops trading") — the profit-side mirror of <see cref="MaxDailyLoss"/>. Checked in
+    /// <see cref="CheckRiskLimits"/> against realized + unrealized daily P&amp;L, same as the loss
+    /// limit, but — unlike the loss limit — also evaluated while FLAT (no open position), since the
+    /// whole point is to stay flat and refuse new entries for the rest of the day once a winning
+    /// trade pushes the realized total past the target, not just to close an already-open one.</summary>
+    [InputParameter("Daily profit target ($, 0=off)", 79, 0, 100000, 50, 0)]
+    public int DailyProfitTarget { get; set; }
+
     [InputParameter("Max drawdown ($, 0=off)", 31, 0, 100000, 50, 0)]
     public int MaxDrawdown { get; set; }
 
@@ -560,6 +588,31 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
     [InputParameter("Session - New York: end hour (ET)", 63, 0, 23, 1, 0)]
     public int NySessionEndHour { get; set; }
+
+    /// <summary>FOUND 2026-09-30 (a live Buy fired right at the 9:30 ET NY open with a swing-based
+    /// stop 68+ points away — "i dont want to trade the first 15mins of the ny open because it has
+    /// entered me into a stupid trade with a massive stop loss") — the opening minutes of RTH are
+    /// exactly when a swing-based stop is most likely to be absurdly wide, since the "recent swing"
+    /// reference hasn't reset to a genuine intraday range yet. This is a separate, minute-precision
+    /// EXCLUSION window, independent of <see cref="SessionFilterEnabled"/>'s own hour-only session
+    /// ALLOW-list above (that system decides which market is open at all; this one carves a narrow
+    /// no-trade gap out of an already-allowed session) — see <see cref="IsInNyOpenBlackout"/>. Checked
+    /// as an additional gate alongside <see cref="IsInAllowedSession"/> at both entry pathways.
+    /// Default on, 09:30-09:45 ET, matching the operator's own "first 15mins" ask.</summary>
+    [InputParameter("NY open blackout: enable", 74)]
+    public bool NyOpenBlackoutEnabled { get; set; }
+
+    [InputParameter("NY open blackout: start hour (ET)", 75, 0, 23, 1, 0)]
+    public int NyOpenBlackoutStartHour { get; set; }
+
+    [InputParameter("NY open blackout: start minute", 76, 0, 59, 1, 0)]
+    public int NyOpenBlackoutStartMinute { get; set; }
+
+    [InputParameter("NY open blackout: end hour (ET)", 77, 0, 23, 1, 0)]
+    public int NyOpenBlackoutEndHour { get; set; }
+
+    [InputParameter("NY open blackout: end minute", 78, 0, 59, 1, 0)]
+    public int NyOpenBlackoutEndMinute { get; set; }
 
     // ---- POC — target candidates for both entry pathways, plus its own standalone rejection
     // trigger (see the class doc comment's "POC TRADING" section) ----------------------------
@@ -745,6 +798,44 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("Trailing stop: buffer beyond prior candle (ticks)", 52, 0, 1000, 1, 0)]
     public int TrailBufferTicks { get; set; }
 
+    /// <summary>FOUND 2026-09-29 ("if there is big push back from the take profit line it should
+    /// just close out instead of running all the way back like this did" — and the mirror case,
+    /// "if it edges stop loss like that with pressure going back in the other direction it should
+    /// just close it") — completely INDEPENDENT of breakeven/trailing (the operator has
+    /// `BreakevenEnabled` off — "i found the break even feature losses me money in the long run" —
+    /// so `CheckTrailingStop`, which only ever activates after breakeven fires, never engages
+    /// either; without this, a trade that ran deep into profit and grazed the target had NOTHING
+    /// protecting it on the way back to the original stop). Tracks the best price toward target and
+    /// the worst price toward stop reached since entry; if either came within
+    /// <see cref="NearLevelPercent"/> of its own level and price has since reversed away from that
+    /// extreme by at least <see cref="PushbackClosePercent"/>, the position is closed immediately —
+    /// protecting the gain on the target side, taking the smaller loss rather than risking a full
+    /// round-trip back to stop on the other. Looks up the REAL current stop/target order prices on
+    /// demand (same `FindProtectiveStopOrder`-style lookup already proven reliable) rather than the
+    /// signal-time `pendingStopPrice`/`pendingTargetPrice`, so this stays correct even if breakeven/
+    /// trailing has since moved the stop.</summary>
+    [InputParameter("Near-level pushback: enable", 71)]
+    public bool NearLevelPushbackEnabled { get; set; }
+
+    /// <summary>CHANGED 2026-09-29 from a fixed tick count to a PERCENTAGE of the trade's own
+    /// entry-to-level distance ("now will this mess up the smaller scalps being 15 ticks away and a
+    /// pull back from what i set to 10 ticks") — exactly the same fix already applied once to
+    /// `BreakevenTriggerRiskPercent` for the same reason: a flat tick count means "near" on a wide
+    /// swing-sized target (80+ ticks away) but triggers almost immediately on a tight scalp target
+    /// (20-30 ticks away), where 10-15 ticks is already most of the move. "Near target" is now
+    /// measured against THAT trade's own entry-to-target distance; "near stop" against that same
+    /// trade's own entry-to-stop distance — each leg scaled by its own length, so a tight scalp and
+    /// a wide swing both mean "the last N% of THIS move," not a one-size-fits-all tick count.
+    /// </summary>
+    [InputParameter("Near-level pushback: proximity to level (% of entry-to-level distance)", 72, 1, 100, 1, 0)]
+    public int NearLevelPercent { get; set; }
+
+    /// <summary>Same percentage-of-that-leg's-own-distance scaling as <see cref="NearLevelPercent"/>
+    /// — how far price has to reverse away from the best/worst extreme reached, as a percentage of
+    /// that same entry-to-level distance, before the position closes.</summary>
+    [InputParameter("Near-level pushback: reversal to trigger close (% of entry-to-level distance)", 73, 1, 100, 1, 0)]
+    public int PushbackClosePercent { get; set; }
+
     // ---- lifecycle state --------------------------------------------------------------------
 
     private Timer? pollTimer;
@@ -822,10 +913,17 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
     private bool breakevenMoved;
 
+    /// <summary>Best/worst price reached since entry, toward target/stop respectively — see
+    /// <see cref="NearLevelPushbackEnabled"/>'s own doc comment. Reset per-trade in
+    /// <see cref="Core_PositionAdded"/> and on every fresh <see cref="OnRun"/>.</summary>
+    private double? bestPriceSinceEntry;
+    private double? worstPriceSinceEntry;
+
     private double dailyPnl;
     private double totalRealizedPnl;
     private double peakEquity;
     private bool dailyLimitHit;
+    private bool profitTargetHit;
     private bool drawdownLimitHit;
     private bool tradesLimitHit;
     private int tradesThisSession;
@@ -886,7 +984,12 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.TrailAfterBreakevenEnabled = true;
         this.TrailBufferTicks = 4;
 
+        this.NearLevelPushbackEnabled = true;
+        this.NearLevelPercent = 25;
+        this.PushbackClosePercent = 25;
+
         this.MaxDailyLoss = 0;
+        this.DailyProfitTarget = 0;
         this.MaxDrawdown = 2000;
         this.MaxTradesPerSession = 10;
         this.MinBarsBetweenEntries = 5;
@@ -901,6 +1004,12 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.NySessionEnabled = true;
         this.NySessionStartHour = 8;
         this.NySessionEndHour = 17;
+
+        this.NyOpenBlackoutEnabled = true;
+        this.NyOpenBlackoutStartHour = 9;
+        this.NyOpenBlackoutStartMinute = 30;
+        this.NyOpenBlackoutEndHour = 9;
+        this.NyOpenBlackoutEndMinute = 45;
     }
 
     // ---- lifecycle ----------------------------------------------------------------------------
@@ -916,6 +1025,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.dailyPnl = 0;
         this.lastResetDay = -1;
         this.dailyLimitHit = false;
+        this.profitTargetHit = false;
         this.totalRealizedPnl = 0;
         this.peakEquity = 0;
         this.drawdownLimitHit = false;
@@ -939,6 +1049,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.pendingRiskDistance = 0;
         this.protectiveOrdersPlaced = false;
         this.breakevenMoved = false;
+        this.bestPriceSinceEntry = null;
+        this.worstPriceSinceEntry = null;
         this.resolvedSymbolId = null;
         this.poc5mBarsSeen = 0;
 
@@ -1205,6 +1317,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.CheckSessionReset();
         this.CheckRiskLimits();
         this.CheckBreakeven();
+        this.CheckNearLevelPushback();
         this.CheckHeartbeat();
 
         // ---- 1. pull the DOM, reconcile tracked levels ----
@@ -1435,9 +1548,10 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     {
         if (!this.AbsorptionEntryEnabled) return;
         if (this.waitOpenPosition || this.waitClosePositions) return;
-        if (this.dailyLimitHit || this.drawdownLimitHit || this.tradesLimitHit) return;
+        if (this.dailyLimitHit || this.profitTargetHit || this.drawdownLimitHit || this.tradesLimitHit) return;
         if (this.MyPositions().Any()) return;
         if (!this.IsInAllowedSession()) return;
+        if (this.IsInNyOpenBlackout()) return;
         if (this.barCounter - this.lastEntryBarIndex < this.MinBarsBetweenEntries) return;
 
         var proximity = this.IfvgProximityTicks * tickSize;
@@ -1591,9 +1705,10 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     {
         if (!this.PocCurrentMoveEnabled && !this.Poc5mEnabled && !this.Poc15mEnabled) return;
         if (this.waitOpenPosition || this.waitClosePositions) return;
-        if (this.dailyLimitHit || this.drawdownLimitHit || this.tradesLimitHit) return;
+        if (this.dailyLimitHit || this.profitTargetHit || this.drawdownLimitHit || this.tradesLimitHit) return;
         if (this.MyPositions().Any()) return;
         if (!this.IsInAllowedSession()) return;
+        if (this.IsInNyOpenBlackout()) return;
         if (this.barCounter - this.lastEntryBarIndex < this.MinBarsBetweenEntries) return;
 
         var buffer = this.PocRejectionBufferTicks * tickSize;
@@ -2018,6 +2133,25 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             : hour >= startHour || hour < endHour;
     }
 
+    /// <summary>See <see cref="NyOpenBlackoutEnabled"/>'s own doc comment. Minute-precision, unlike
+    /// <see cref="IsInHourWindow"/> — ported from `oceansStackStrategy`'s own `IsInWindow` helper,
+    /// which was built for the same reason (hour granularity isn't precise enough for a 15-minute
+    /// boundary).</summary>
+    private bool IsInNyOpenBlackout()
+    {
+        if (!this.NyOpenBlackoutEnabled) return false;
+
+        var local = TimeZoneInfo.ConvertTimeFromUtc(Core.TimeUtils.DateTimeUtcNow, SessionZone);
+        var startTotal = this.NyOpenBlackoutStartHour * 60 + this.NyOpenBlackoutStartMinute;
+        var endTotal = this.NyOpenBlackoutEndHour * 60 + this.NyOpenBlackoutEndMinute;
+        var nowTotal = local.Hour * 60 + local.Minute;
+
+        if (startTotal == endTotal) return false; // zero-width window = no-op, not a full block
+        return startTotal < endTotal
+            ? nowTotal >= startTotal && nowTotal < endTotal
+            : nowTotal >= startTotal || nowTotal < endTotal;
+    }
+
     /// <summary>Places ONLY the entry order — no embedded bracket. The stop/target are placed as
     /// separate orders once <see cref="Core_PositionAdded"/> confirms the position is actually
     /// open (see the class doc comment's "SEPARATE STOP/TARGET ORDERS" section for why).</summary>
@@ -2176,6 +2310,12 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     private Order? FindProtectiveStopOrder() =>
         this.MyOrders().FirstOrDefault(o => string.Equals(o.OrderTypeId, this.stopOrderTypeId, StringComparison.Ordinal));
 
+    /// <summary>Same on-demand lookup as <see cref="FindProtectiveStopOrder"/>, for the target leg
+    /// — needed by <see cref="CheckNearLevelPushback"/> so it reads the REAL current target price
+    /// rather than the signal-time <see cref="pendingTargetPrice"/>.</summary>
+    private Order? FindProtectiveTargetOrder() =>
+        this.MyOrders().FirstOrDefault(o => string.Equals(o.OrderTypeId, this.limitOrderTypeId, StringComparison.Ordinal));
+
     /// <summary>
     /// ONE-TIME move to breakeven+buffer — see the class doc comment's "BREAKEVEN" section. Modifies
     /// the existing protective stop order's own TriggerPrice in place rather than cancelling and
@@ -2288,6 +2428,97 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             StrategyLoggingLevel.Trading);
     }
 
+    /// <summary>See <see cref="NearLevelPushbackEnabled"/>'s own doc comment — completely
+    /// independent of breakeven/trailing, runs every poll regardless of whether either is enabled.
+    /// Tracks the best price toward target and worst price toward stop reached since entry; once
+    /// either extreme has come within <see cref="NearLevelPercent"/> of THAT LEG'S OWN entry-to-
+    /// level distance, a reversal of at least <see cref="PushbackClosePercent"/> of that same
+    /// distance closes the position immediately — protecting the gain on the target side, taking
+    /// the smaller loss rather than a full round-trip back to stop on the other. Each leg is scaled
+    /// by its OWN distance (entry-to-target for the target check, entry-to-stop for the stop check)
+    /// rather than a shared unit, so a tight scalp target and a wide swing-based stop on the SAME
+    /// trade are each judged against their own length, not a one-size-fits-all number.</summary>
+    private void CheckNearLevelPushback()
+    {
+        if (!this.NearLevelPushbackEnabled) return;
+        if (!this.protectiveOrdersPlaced) return;
+
+        var positions = this.MyPositions();
+        if (positions.Length == 0) return;
+
+        var position = positions[0]; // one position at a time, by design
+
+        var tickSize = this.CurrentSymbol.TickSize;
+        var currentPrice = this.CurrentSymbol.Last;
+        if (tickSize <= 0 || currentPrice <= 0) return;
+
+        var stopOrder = this.FindProtectiveStopOrder();
+        var targetOrder = this.FindProtectiveTargetOrder();
+        if (stopOrder is null || targetOrder is null) return; // not found yet — try again next poll
+
+        var isLong = position.Side == Side.Buy;
+        var entryPrice = position.OpenPrice;
+
+        this.bestPriceSinceEntry = this.bestPriceSinceEntry is { } best
+            ? (isLong ? Math.Max(best, currentPrice) : Math.Min(best, currentPrice))
+            : currentPrice;
+        this.worstPriceSinceEntry = this.worstPriceSinceEntry is { } worst
+            ? (isLong ? Math.Min(worst, currentPrice) : Math.Max(worst, currentPrice))
+            : currentPrice;
+
+        // Near target, then pushed back away from it — protect the gain rather than risk it
+        // running all the way back toward the stop. Scaled by THIS trade's own entry-to-target
+        // distance, not a flat tick count — a tight scalp target and a wide swing target each get
+        // judged against their own length.
+        var targetLegDistance = Math.Abs(targetOrder.Price - entryPrice);
+        var nearTargetBand = targetLegDistance * (this.NearLevelPercent / 100.0);
+        var pushbackFromTargetBand = targetLegDistance * (this.PushbackClosePercent / 100.0);
+
+        var distanceToTarget = Math.Abs(targetOrder.Price - this.bestPriceSinceEntry.Value);
+        var pushbackFromBest = isLong
+            ? this.bestPriceSinceEntry.Value - currentPrice
+            : currentPrice - this.bestPriceSinceEntry.Value;
+
+        if (distanceToTarget <= nearTargetBand && pushbackFromBest >= pushbackFromTargetBand)
+        {
+            this.ClosePositionForNearLevelPushback(
+                position, "near target then pushed back", this.bestPriceSinceEntry.Value, currentPrice, tickSize);
+            return;
+        }
+
+        // Near stop, then recovered away from it — take the reduced loss/scratch rather than risk
+        // rolling back down to actually hit the stop. Scaled by THIS trade's own entry-to-stop
+        // distance (its own risk), separately from the target leg above.
+        var stopLegDistance = Math.Abs(stopOrder.TriggerPrice - entryPrice);
+        var nearStopBand = stopLegDistance * (this.NearLevelPercent / 100.0);
+        var recoveryFromStopBand = stopLegDistance * (this.PushbackClosePercent / 100.0);
+
+        var distanceToStop = Math.Abs(stopOrder.TriggerPrice - this.worstPriceSinceEntry.Value);
+        var recoveryFromWorst = isLong
+            ? currentPrice - this.worstPriceSinceEntry.Value
+            : this.worstPriceSinceEntry.Value - currentPrice;
+
+        if (distanceToStop <= nearStopBand && recoveryFromWorst >= recoveryFromStopBand)
+        {
+            this.ClosePositionForNearLevelPushback(
+                position, "near stop then recovered", this.worstPriceSinceEntry.Value, currentPrice, tickSize);
+        }
+    }
+
+    private void ClosePositionForNearLevelPushback(
+        Position position, string reason, double extremePrice, double currentPrice, double tickSize)
+    {
+        this.Log(
+            $"[Risk] {reason} (extreme={extremePrice:0.####} current={currentPrice:0.####}, "
+            + $"{Math.Abs(currentPrice - extremePrice) / tickSize:F0} ticks) — closing early rather "
+            + "than risk the full round-trip.",
+            StrategyLoggingLevel.Trading);
+
+        var result = position.Close();
+        if (result.Status != TradingOperationResultStatus.Success)
+            this.Log($"[Order] failed to close on near-level pushback: {result.Message}", StrategyLoggingLevel.Error);
+    }
+
     /// <summary>See <see cref="HeartbeatIntervalMinutes"/>'s own doc comment — a periodic "still
     /// running" snapshot for a quiet strategy, so the operator never has to wonder whether the poll
     /// loop is stuck or genuinely just hasn't seen a qualifying setup. Skips logging while a
@@ -2314,7 +2545,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         this.Log(
             $"[Heartbeat] still running, flat, {sinceLastTrade}. "
-            + $"Session={(this.IsInAllowedSession() ? "allowed" : "BLOCKED")}. "
+            + $"Session={(this.IsInAllowedSession() ? "allowed" : "BLOCKED")}"
+            + $"{(this.IsInNyOpenBlackout() ? " (NY-open BLACKOUT active)" : "")}. "
             + $"POC: current-move={Fmt(this.pocCurrentMoveEngine?.Poc)} 5m={Fmt(this.poc5mEngine?.Poc)} "
             + $"15m={Fmt(this.poc15mEngine?.Poc)}. "
             + $"Delta: local({this.DeltaLookbackBars})={Fmt(localDelta)} trend({this.TrendDeltaLookbackBars})={Fmt(trendDelta)}. "
@@ -2453,6 +2685,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.protectiveOrdersPlaced = true;
         this.waitOpenPosition = false;
         this.breakevenMoved = false;
+        this.bestPriceSinceEntry = null;
+        this.worstPriceSinceEntry = null;
         this.lastTradeOpenedUtc = Core.TimeUtils.DateTimeUtcNow;
 
         try
@@ -2476,6 +2710,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             this.waitClosePositions = false;
             this.protectiveOrdersPlaced = false;
             this.breakevenMoved = false;
+            this.bestPriceSinceEntry = null;
+            this.worstPriceSinceEntry = null;
 
             // FOUND 2026-09-28 ("it opened another order instantly with no stop loss" / "going
             // into stacked orders"): MinBarsBetweenEntries only ever measured bars since the last
@@ -2546,6 +2782,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             this.lastResetDay = dayKey;
             this.dailyPnl = 0;
             this.dailyLimitHit = false;
+            this.profitTargetHit = false;
             this.Log("[Risk] daily P&L reset (new EST session).", StrategyLoggingLevel.Trading);
         }
 
@@ -2562,11 +2799,37 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         if (this.waitOpenPosition || this.waitClosePositions) return;
 
         var positions = this.MyPositions();
-        if (!positions.Any()) return;
 
-        var unrealizedPnlTicks = positions.Sum(x => x.GrossPnLTicks);
-        var tickValue = this.CurrentSymbol.TickSize > 0 ? this.CurrentSymbol.GetTickCost(1) : 0;
-        var unrealizedPnl = unrealizedPnlTicks * tickValue;
+        var unrealizedPnl = 0.0;
+        if (positions.Any())
+        {
+            var unrealizedPnlTicks = positions.Sum(x => x.GrossPnLTicks);
+            var tickValue = this.CurrentSymbol.TickSize > 0 ? this.CurrentSymbol.GetTickCost(1) : 0;
+            unrealizedPnl = unrealizedPnlTicks * tickValue;
+        }
+
+        // Evaluated even while FLAT (unlike the loss/drawdown checks below, which return early with
+        // nothing to close) — see DailyProfitTarget's own doc comment for why: the whole point is to
+        // refuse new entries for the rest of the day, which must still hold true after the winning
+        // trade that hit the target has already closed and no position remains open.
+        if (this.DailyProfitTarget > 0 && !this.profitTargetHit)
+        {
+            var totalDailyPnl = this.dailyPnl + unrealizedPnl;
+            if (totalDailyPnl >= this.DailyProfitTarget)
+            {
+                this.profitTargetHit = true;
+                var hasPositions = positions.Any();
+                this.waitClosePositions = hasPositions;
+                this.Log(
+                    $"[Risk] DAILY PROFIT TARGET HIT — ${totalDailyPnl:F2} >= ${this.DailyProfitTarget}. "
+                    + (hasPositions ? "Closing all, no more trades today." : "No more trades today."),
+                    StrategyLoggingLevel.Trading);
+                foreach (var pos in positions) pos.Close();
+                return;
+            }
+        }
+
+        if (!positions.Any()) return;
 
         if (this.MaxDailyLoss > 0 && !this.dailyLimitHit)
         {

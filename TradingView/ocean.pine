@@ -1,0 +1,708 @@
+//@version=6
+// ===========================================================================
+//  OCEAN'S STACK v2 - the chart reads itself. No table. ASCII only.
+//
+//  ZONES (boxes) at prior-day VAH / VAL. Color = readiness:
+//    grey  = value edge only (1/3)            -> don't touch
+//    dim   = 2/3 but no fuel                  -> watch
+//    cyan  = ARMED: score >= min AND fuel      -> wait for the sweep
+//    white = SWEPT: pool taken, delta counting -> reclaim = trigger
+//    red/green = FIRED: entry / stop / T1 / T2 on the label
+//  Every line carries its name on the right end.
+//  FUEL marker = the pool the open must sweep for the zone to fire.
+//  Absorption dots: net aggressive delta one way, bar closes the other way.
+//  OPEN read at RTH start: open inside / above / below prior value (Dalton).
+//  QQQ->NQ: drawn only when it disagrees with NQ's own value by >= X pts.
+//  Weekly overlay: prior-week VAH / POC / VAL / H / L (orange).
+//
+//  Absorption and delta are candle-inferred proxies. ATAS 5F is the judge.
+// ===========================================================================
+indicator("Ocean's Stack v2", shorttitle = "Stack v2", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ---- INPUTS ---------------------------------------------------------------
+gS = "Sessions"
+tz       = input.string("America/Chicago", "Timezone", group = gS)
+rthSess  = input.session("0830-1500", "RTH (NQ)", group = gS)
+ovnSess  = input.session("1700-0830", "Overnight", group = gS)
+asiaSess = input.session("1900-0100", "Asia", group = gS)
+openWin  = input.session("0830-0930", "Sweep window", group = gS)
+
+gP = "Profile"
+ltfIn   = input.timeframe("1", "Intrabar TF", group = gP)
+binPts  = input.float(2.5, "NQ bin (pts)", step = 0.25, minval = 0.25, group = gP)
+vaPctIn = input.float(70, "Value area %", minval = 50, maxval = 95, group = gP)
+zoneTol = input.float(6, "Zone half-height (pts)", group = gP)
+dayW    = input.int(3, "Daily VAH / VAL / POC line width", minval = 1, maxval = 5, group = gP)
+wkAlpha = input.int(45, "Weekly line transparency (0-100)", minval = 0, maxval = 95, group = gP)
+
+gA = "Absorption proxy"
+absVolMult = input.float(1.2, "Bar volume >= x SMA(50)", step = 0.1, group = gA)
+absDelFrac = input.float(0.15, "|delta| >= x bar volume", step = 0.05, group = gA)
+absMustHold = input.bool(true, "Prior-day absorption must have HELD to count", group = gA)
+absHoldTol = input.float(5, "Broken if close beyond by (pts)", group = gA)
+absNearPts = input.float(15, "Counts toward edge if within (pts)", group = gA)
+
+gL = "LVN ledge"
+lvnPct  = input.float(30, "Bin vol <= % of max bin", group = gL)
+lvnBand = input.float(10, "Band beyond edge (pts)", group = gL)
+
+gF = "Fuel"
+poolMin = input.float(5, "Pool min pts beyond edge", group = gF)
+poolMax = input.float(80, "Pool max pts beyond edge", group = gF)
+useOvn  = input.bool(true, "Overnight H/L", group = gF)
+useAsia = input.bool(true, "Asia H/L", group = gF)
+usePD   = input.bool(true, "Prior-day H/L", group = gF)
+
+gQ = "QQQ -> NQ"
+useQQQ    = input.bool(true, "Enable", group = gQ)
+qqqSym    = input.symbol("NASDAQ:QQQ", "Symbol", group = gQ)
+qqqSess   = input.session("0830-1500", "QQQ RTH (same tz)", group = gQ)
+qBin      = input.float(0.05, "QQQ bin ($)", step = 0.01, minval = 0.01, group = gQ)
+qMinDiff  = input.float(3, "Draw QQQ level only if it disagrees >= (pts)", group = gQ)
+ratioMode = input.string("Prior RTH close", "Ratio anchor", options = ["Prior RTH close", "Live"], group = gQ)
+
+gW = "Weekly overlay"
+useWk  = input.bool(true, "Show prior-week VAH / POC / VAL + H / L", group = gW)
+wkFuel = input.bool(true, "Prior-week H/L count as fuel", group = gW)
+wkNear = input.float(15, "Flag weekly edge within (pts) of daily edge", group = gW)
+
+gX = "Signal / display"
+minScore = input.int(2, "Armed when score >=", minval = 1, maxval = 3, group = gX)
+stopBuf  = input.float(4, "Stop beyond sweep extreme (pts)", group = gX)
+keepDays = input.int(10, "Keep prior days on chart", minval = 0, maxval = 30, group = gX)
+histLabels = input.bool(false, "Keep labels on prior days (else boxes/lines only)", group = gX)
+lblOff     = input.int(3, "Line-name label offset (bars right of price)", minval = 1, maxval = 30, group = gX)
+lblPrice   = input.bool(true, "Show price in line-name labels", group = gX)
+
+gC = "Colors (defaults avoid GEX green/red/purple/orange)"
+cCyan  = input.color(#00FFFF, "Daily VAH / VAL + armed", group = gC)
+cWhite = input.color(#FFFFFF, "Daily POC + absorption at high", group = gC)
+cGrey  = input.color(#6E6E6E, "Pools (ovn / Asia / PD H-L) + idle zone", group = gC)
+cPink  = input.color(#9FB3C8, "QQQ -> NQ levels", group = gC)
+cOrng  = input.color(#3B82F6, "Weekly VAH / POC / VAL / H-L", group = gC)
+cSwept = input.color(#D9D9D9, "Zone swept", group = gC)
+cRed   = input.color(#FFFFFF, "Fired SHORT", group = gC)
+cGreen = input.color(#00FFFF, "Fired LONG", group = gC)
+cLblBg = input.color(#000000, "Label background", group = gC)
+
+// ---- SESSIONS -------------------------------------------------------------
+inSess(s) => not na(time(timeframe.period, s, tz))
+inRTH  = inSess(rthSess)
+inOvn  = inSess(ovnSess)
+inAsia = inSess(asiaSess)
+inOpen = inSess(openWin)
+inQ    = inSess(qqqSess)
+newRTH = inRTH and not inRTH[1]
+vaPct  = vaPctIn / 100
+
+// ---- INTRABARS ------------------------------------------------------------
+ltfEff = timeframe.in_seconds(ltfIn) < timeframe.in_seconds() ? ltfIn : timeframe.period
+[nqP, nqV, nqD] = request.security_lower_tf(syminfo.tickerid, ltfEff, [hl2, volume, math.sign(close - open) * volume])
+[qP, qV]        = request.security_lower_tf(qqqSym, ltfEff, [hl2, volume])
+qClose          = request.security(qqqSym, timeframe.period, close)
+barDelta = not na(nqD) and nqD.size() > 0 ? nqD.sum() : math.sign(close - open) * volume
+
+// ---- PROFILE MATH ---------------------------------------------------------
+f_acc(map<int, float> m, array<float> p, array<float> v, float bin) =>
+    if not na(p) and p.size() > 0
+        for i = 0 to p.size() - 1
+            k = int(math.round(p.get(i) / bin))
+            m.put(k, nz(m.get(k)) + nz(v.get(i)))
+
+f_va(map<int, float> m, float bin) =>
+    float poc = na
+    float vah = na
+    float val = na
+    if m.size() > 0
+        keys = m.keys()
+        keys.sort()
+        n = keys.size()
+        vols = array.new<float>(n, 0.0)
+        tot = 0.0
+        ip = 0
+        for i = 0 to n - 1
+            v = m.get(keys.get(i))
+            vols.set(i, v)
+            tot += v
+            if v > vols.get(ip)
+                ip := i
+        target = tot * vaPct
+        acc = vols.get(ip)
+        up = ip
+        dn = ip
+        while acc < target and (up < n - 1 or dn > 0)
+            vu = up < n - 1 ? vols.get(up + 1) : -1.0
+            vd = dn > 0 ? vols.get(dn - 1) : -1.0
+            if vu >= vd
+                up += 1
+                acc += vu
+            else
+                dn -= 1
+                acc += vd
+        poc := keys.get(ip) * bin
+        vah := (keys.get(up) + 0.5) * bin
+        val := (keys.get(dn) - 0.5) * bin
+    [poc, vah, val]
+
+f_isLVN(map<int, float> m, float edge, int dir, float bin) =>
+    res = false
+    if m.size() > 0 and not na(edge)
+        mx = 0.0
+        vals = m.values()
+        for i = 0 to vals.size() - 1
+            mx := math.max(mx, vals.get(i))
+        k0 = int(math.round(edge / bin))
+        kb = math.max(int(math.round(lvnBand / bin)), 1)
+        sum = 0.0
+        hit = 0
+        for j = 1 to kb
+            v = m.get(k0 + dir * j)
+            if not na(v)
+                hit += 1
+                sum += v
+        res := hit > 0 and mx > 0 and (sum / kb) <= mx * lvnPct / 100
+    res
+
+// ---- DAILY PROFILES -------------------------------------------------------
+var map<int, float> devNQ = map.new<int, float>()
+var map<int, float> devQ  = map.new<int, float>()
+var float pPOC = na
+var float pVAH = na
+var float pVAL = na
+var float qPOC = na
+var float qVAH = na
+var float qVAL = na
+if newRTH
+    [a, b, c] = f_va(devNQ, binPts)
+    if not na(a)
+        pPOC := a
+        pVAH := b
+        pVAL := c
+    devNQ.clear()
+    [d, e, f] = f_va(devQ, qBin)
+    if not na(d)
+        qPOC := d
+        qVAH := e
+        qVAL := f
+    devQ.clear()
+if inRTH
+    f_acc(devNQ, nqP, nqV, binPts)
+if inQ
+    f_acc(devQ, qP, qV, qBin)
+
+// ---- WEEKLY ---------------------------------------------------------------
+var map<int, float> wkMap = map.new<int, float>()
+var float pwPOC = na
+var float pwVAH = na
+var float pwVAL = na
+var float pwH = na
+var float pwL = na
+var float cwH = na
+var float cwL = na
+var int   lastWk = na
+wk = weekofyear(time, tz)
+newWeek = newRTH and (na(lastWk) or wk != lastWk)
+if newWeek
+    [wa, wb, wc] = f_va(wkMap, binPts)
+    if not na(wa)
+        pwPOC := wa
+        pwVAH := wb
+        pwVAL := wc
+    wkMap.clear()
+    pwH := cwH
+    pwL := cwL
+    cwH := na
+    cwL := na
+    lastWk := wk
+if inRTH
+    f_acc(wkMap, nqP, nqV, binPts)
+    cwH := na(cwH) ? high : math.max(cwH, high)
+    cwL := na(cwL) ? low : math.min(cwL, low)
+
+// ---- QQQ RATIO ------------------------------------------------------------
+var float ratioFixed = na
+if inQ[1] and not inQ and not na(qClose[1]) and qClose[1] > 0
+    ratioFixed := close[1] / qClose[1]
+ratioLive = not na(qClose) and qClose > 0 ? close / qClose : na
+ratio  = ratioMode == "Live" ? ratioLive : nz(ratioFixed, ratioLive)
+qPOCnq = qPOC * ratio
+qVAHnq = qVAH * ratio
+qVALnq = qVAL * ratio
+
+// ---- POOLS ----------------------------------------------------------------
+var float ovnH = na
+var float ovnL = na
+var float asiaH = na
+var float asiaL = na
+var float rthH = na
+var float rthL = na
+var float pdH = na
+var float pdL = na
+if inOvn
+    ovnH := inOvn[1] ? math.max(ovnH, high) : high
+    ovnL := inOvn[1] ? math.min(ovnL, low) : low
+if inAsia
+    asiaH := inAsia[1] ? math.max(asiaH, high) : high
+    asiaL := inAsia[1] ? math.min(asiaL, low) : low
+if newRTH
+    pdH := rthH
+    pdL := rthL
+    rthH := high
+    rthL := low
+else if inRTH
+    rthH := math.max(rthH, high)
+    rthL := math.min(rthL, low)
+
+f_fuel(float edge, int dir) =>
+    float best = na
+    string nm = ""
+    if not na(edge)
+        cands = array.new<float>()
+        names = array.new<string>()
+        bool up = dir > 0
+        if useOvn
+            float c1 = up ? ovnH : ovnL
+            string n1 = up ? "ovnH" : "ovnL"
+            cands.push(c1)
+            names.push(n1)
+        if useAsia
+            float c2 = up ? asiaH : asiaL
+            string n2 = up ? "asiaH" : "asiaL"
+            cands.push(c2)
+            names.push(n2)
+        if usePD
+            float c3 = up ? pdH : pdL
+            string n3 = up ? "PDH" : "PDL"
+            cands.push(c3)
+            names.push(n3)
+        if wkFuel
+            float c4 = up ? pwH : pwL
+            string n4 = up ? "PWH" : "PWL"
+            cands.push(c4)
+            names.push(n4)
+        for i = 0 to cands.size() - 1
+            p = cands.get(i)
+            if not na(p)
+                dist = (p - edge) * dir
+                if dist >= poolMin and dist <= poolMax and (na(best) or dist < (best - edge) * dir)
+                    best := p
+                    nm := names.get(i)
+    [best, nm]
+
+// ---- ABSORPTION (delta-based) ---------------------------------------------
+volSma = ta.sma(volume, 50)
+bigVol = volume >= absVolMult * volSma
+absRes = inRTH and bigVol and barDelta >=  absDelFrac * volume and close <= open
+absSup = inRTH and bigVol and barDelta <= -absDelFrac * volume and close >= open
+
+var array<float> curAbsL  = array.new<float>()
+var array<int>   curAbsS  = array.new<int>()
+var array<float> heldAbsL = array.new<float>()
+var array<int>   heldAbsS = array.new<int>()
+if newRTH
+    heldAbsL := curAbsL.copy()
+    heldAbsS := curAbsS.copy()
+    curAbsL.clear()
+    curAbsS.clear()
+if inRTH
+    if absMustHold and curAbsL.size() > 0
+        for i = curAbsL.size() - 1 to 0
+            l = curAbsL.get(i)
+            s = curAbsS.get(i)
+            if (s > 0 and close > l + absHoldTol) or (s < 0 and close < l - absHoldTol)
+                curAbsL.remove(i)
+                curAbsS.remove(i)
+    if absRes
+        curAbsL.push(high)
+        curAbsS.push(1)
+    if absSup
+        curAbsL.push(low)
+        curAbsS.push(-1)
+
+plotshape(absRes, "Absorption at high", shape.circle, location.abovebar, cWhite, size = size.tiny)
+plotshape(absSup, "Absorption at low",  shape.circle, location.belowbar, cCyan, size = size.tiny)
+
+f_absNear(float edge, int side) =>
+    r = false
+    if not na(edge) and heldAbsL.size() > 0
+        for i = 0 to heldAbsL.size() - 1
+            if heldAbsS.get(i) == side and math.abs(heldAbsL.get(i) - edge) <= absNearPts
+                r := true
+    r
+
+// ---- SCORE ----------------------------------------------------------------
+absT = f_absNear(pVAH, 1)
+absB = f_absNear(pVAL, -1)
+lvnT = f_isLVN(devNQ, pVAH, 1, binPts)
+lvnB = f_isLVN(devNQ, pVAL, -1, binPts)
+[fuelT, fuelTN] = f_fuel(pVAH, 1)
+[fuelB, fuelBN] = f_fuel(pVAL, -1)
+int e1 = na(pVAH) ? 0 : 1
+int e2 = absT ? 1 : 0
+int e3 = lvnT ? 1 : 0
+int f1 = na(pVAL) ? 0 : 1
+int f2 = absB ? 1 : 0
+int f3 = lvnB ? 1 : 0
+scoreT = e1 + e2 + e3
+scoreB = f1 + f2 + f3
+armedT = scoreT >= minScore and not na(fuelT)
+armedB = scoreB >= minScore and not na(fuelB)
+
+// ---- SWEEP-AND-FAIL -------------------------------------------------------
+var bool  swT = false
+var float swHiExt = na
+var float swHiDelta = 0.0
+var bool  swHiAbs = false
+var bool  firedT = false
+var bool  swB = false
+var float swLoExt = na
+var float swLoDelta = 0.0
+var bool  swLoAbs = false
+var bool  firedB = false
+var float sigEntry = na
+var float sigStop = na
+var float sigT1 = na
+var float sigT2 = na
+var int   latchT = 0
+var int   latchB = 0
+if newRTH
+    swT := false
+    swHiExt := na
+    swHiDelta := 0.0
+    swHiAbs := false
+    firedT := false
+    latchT := 0
+    latchB := 0
+    swB := false
+    swLoExt := na
+    swLoDelta := 0.0
+    swLoAbs := false
+    firedB := false
+
+sigShort = false
+sigLong  = false
+if inOpen
+    if armedT and not firedT
+        if high > fuelT
+            if not swT
+                latchT := scoreT
+            swT := true
+            swHiExt := na(swHiExt) ? high : math.max(swHiExt, high)
+            swHiDelta += barDelta
+            swHiAbs := swHiAbs or absRes
+        if swT and close < pVAH and swHiDelta <= 0
+            sigShort := true
+            firedT := true
+            swT := false
+            sigEntry := close
+            sigStop := swHiExt + stopBuf
+            sigT1 := pPOC
+            sigT2 := pVAL
+    if armedB and not firedB
+        if low < fuelB
+            if not swB
+                latchB := scoreB
+            swB := true
+            swLoExt := na(swLoExt) ? low : math.min(swLoExt, low)
+            swLoDelta += barDelta
+            swLoAbs := swLoAbs or absSup
+        if swB and close > pVAL and swLoDelta >= 0
+            sigLong := true
+            firedB := true
+            swB := false
+            sigEntry := close
+            sigStop := swLoExt - stopBuf
+            sigT1 := pPOC
+            sigT2 := pVAH
+
+plotshape(sigShort, "SWEEP-FAIL SHORT", shape.labeldown, location.abovebar, cRed, text = "SF", textcolor = #000000, size = size.small)
+plotshape(sigLong,  "SWEEP-FAIL LONG",  shape.labelup,   location.belowbar, cGreen, text = "SF", textcolor = #000000, size = size.small)
+alertcondition(sigShort, "Stack: SWEEP-FAIL SHORT", "Sweep-fail short at prior VAH")
+alertcondition(sigLong,  "Stack: SWEEP-FAIL LONG",  "Sweep-fail long at prior VAL")
+alertcondition(swT and not swT[1], "Stack: VAH pool swept", "Pool above VAH swept - watch for reclaim")
+alertcondition(swB and not swB[1], "Stack: VAL pool swept", "Pool below VAL swept - watch for reclaim")
+if sigShort
+    r = sigStop - sigEntry
+    string abS = swHiAbs ? "Y" : "n"
+    string msgS = "STACK SHORT " + str.tostring(sigEntry, "#.##") + " stop " + str.tostring(sigStop, "#.##") + " T1 " + str.tostring(sigT1, "#.##") + " (" + str.tostring((sigEntry - sigT1) / r, "#.#") + "R) T2 " + str.tostring(sigT2, "#.##") + " abs@sweep " + abS
+    alert(msgS, alert.freq_once_per_bar_close)
+if sigLong
+    r = sigEntry - sigStop
+    string abL = swLoAbs ? "Y" : "n"
+    string msgL = "STACK LONG " + str.tostring(sigEntry, "#.##") + " stop " + str.tostring(sigStop, "#.##") + " T1 " + str.tostring(sigT1, "#.##") + " (" + str.tostring((sigT1 - sigEntry) / r, "#.#") + "R) T2 " + str.tostring(sigT2, "#.##") + " abs@sweep " + abL
+    alert(msgL, alert.freq_once_per_bar_close)
+
+// ---- DRAWING --------------------------------------------------------------
+var array<line>  dayLines = array.new<line>()
+var array<label> dayLbls  = array.new<label>()
+var box   zT = na
+var box   zB = na
+var label lT = na
+var label lB = na
+var label lFuelT = na
+var label lFuelB = na
+var label lOpen = na
+var int   dayStart = na
+
+var array<line>  histLines = array.new<line>()
+var array<label> histLbls  = array.new<label>()
+var array<box>   histBoxes = array.new<box>()
+var array<int>   histDayLn = array.new<int>()
+var array<int>   histDayLb = array.new<int>()
+var array<int>   histDayBx = array.new<int>()
+var array<line>  wkLines = array.new<line>()
+var array<label> wkLbls  = array.new<label>()
+
+f_dropOldest() =>
+    nL = histDayLn.shift()
+    nB = histDayLb.shift()
+    nX = histDayBx.shift()
+    if nL > 0
+        for i = 1 to nL
+            line.delete(histLines.shift())
+    if nB > 0
+        for i = 1 to nB
+            label.delete(histLbls.shift())
+    if nX > 0
+        for i = 1 to nX
+            box.delete(histBoxes.shift())
+
+f_line(float y, string name, color c, string st, int w) =>
+    if not na(y)
+        dayLines.push(line.new(bar_index, y, bar_index + 1, y, extend = extend.right, color = c, style = st, width = w))
+        string tx = lblPrice ? name + "  " + str.tostring(y, "#.##") : name
+        color tc = color.new(c, 0)
+        dayLbls.push(label.new(bar_index + lblOff, y, tx, style = label.style_label_left, color = color.new(cLblBg, 35), textcolor = tc, size = size.tiny, textalign = text.align_left))
+
+f_wline(float y, string name, color c, string st, int w) =>
+    if not na(y)
+        wkLines.push(line.new(bar_index, y, bar_index + 1, y, extend = extend.right, color = c, style = st, width = w))
+        string tx = lblPrice ? name + "  " + str.tostring(y, "#.##") : name
+        color tc = color.new(c, 0)
+        wkLbls.push(label.new(bar_index + lblOff, y, tx, style = label.style_label_left, color = color.new(cLblBg, 35), textcolor = tc, size = size.tiny, textalign = text.align_left))
+
+f_zoneColor(int score, bool armed, bool swept, bool fired) =>
+    color c = color.new(cGrey, 80)
+    if score >= 2
+        c := color.new(cCyan, 82)
+    if armed
+        c := color.new(cCyan, 65)
+    if swept
+        c := color.new(cSwept, 45)
+    if fired
+        c := color.new(cWhite, 70)
+    c
+
+if newRTH
+    dayStart := bar_index
+    // freeze yesterday's objects into history
+    nL = 0
+    nB = 0
+    nX = 0
+    if dayLines.size() > 0
+        for i = 0 to dayLines.size() - 1
+            ln = dayLines.get(i)
+            line.set_extend(ln, extend.none)
+            line.set_x2(ln, bar_index - 1)
+            histLines.push(ln)
+            nL += 1
+            if histLabels
+                histLbls.push(dayLbls.get(i))
+                nB += 1
+            else
+                label.delete(dayLbls.get(i))
+        dayLines.clear()
+        dayLbls.clear()
+    if useWk and newWeek
+        if wkLines.size() > 0
+            for i = 0 to wkLines.size() - 1
+                wl = wkLines.get(i)
+                line.set_extend(wl, extend.none)
+                line.set_x2(wl, bar_index - 1)
+                histLines.push(wl)
+                histLbls.push(wkLbls.get(i))
+                nL += 1
+                nB += 1
+            wkLines.clear()
+            wkLbls.clear()
+        color cWk = color.new(cOrng, wkAlpha)
+        f_wline(pwVAH, "PW VAH", cWk, line.style_solid, 1)
+        f_wline(pwVAL, "PW VAL", cWk, line.style_solid, 1)
+        f_wline(pwPOC, "PW POC", cWk, line.style_dotted, 1)
+        f_wline(pwH, "PWH", cWk, line.style_dashed, 1)
+        f_wline(pwL, "PWL", cWk, line.style_dashed, 1)
+    if not na(zT)
+        histBoxes.push(zT)
+        nX += 1
+    if not na(zB)
+        histBoxes.push(zB)
+        nX += 1
+    if histLabels
+        if not na(lT)
+            histLbls.push(lT)
+            nB += 1
+        if not na(lB)
+            histLbls.push(lB)
+            nB += 1
+        if not na(lOpen)
+            histLbls.push(lOpen)
+            nB += 1
+    else
+        label.delete(lT)
+        label.delete(lB)
+        label.delete(lOpen)
+    label.delete(lFuelT)
+    label.delete(lFuelB)
+    if nL + nB + nX > 0
+        histDayLn.push(nL)
+        histDayLb.push(nB)
+        histDayBx.push(nX)
+    while histDayLn.size() > keepDays
+        f_dropOldest()
+
+    // today's lines
+    f_line(pVAH, "PD VAH", cCyan, line.style_solid, dayW)
+    f_line(pVAL, "PD VAL", cCyan, line.style_solid, dayW)
+    f_line(pPOC, "PD POC", cWhite, line.style_solid, dayW)
+    f_line(pdH, "PDH", color.new(cGrey, 30), line.style_dashed, 1)
+    f_line(pdL, "PDL", color.new(cGrey, 30), line.style_dashed, 1)
+    f_line(ovnH, "ovn H", color.new(cGrey, 40), line.style_dotted, 1)
+    f_line(ovnL, "ovn L", color.new(cGrey, 40), line.style_dotted, 1)
+    f_line(asiaH, "Asia H", color.new(cGrey, 40), line.style_dotted, 1)
+    f_line(asiaL, "Asia L", color.new(cGrey, 40), line.style_dotted, 1)
+    if heldAbsL.size() > 0
+        for i = 0 to heldAbsL.size() - 1
+            bool isRes = heldAbsS.get(i) > 0
+            string an = isRes ? "held abs v" : "held abs ^"
+            color ac = isRes ? color.new(cWhite, 35) : color.new(cCyan, 35)
+            f_line(heldAbsL.get(i), an, ac, line.style_dotted, 3)
+    if useQQQ and not na(ratio)
+        if math.abs(qVAHnq - pVAH) >= qMinDiff
+            f_line(qVAHnq, "QQQ VAH->NQ", cPink, line.style_dashed, 1)
+        if math.abs(qVALnq - pVAL) >= qMinDiff
+            f_line(qVALnq, "QQQ VAL->NQ", cPink, line.style_dashed, 1)
+        if math.abs(qPOCnq - pPOC) >= qMinDiff
+            f_line(qPOCnq, "QQQ POC->NQ", cPink, line.style_dotted, 1)
+
+    // zones
+    zT := na
+    zB := na
+    lT := na
+    lB := na
+    if not na(pVAH)
+        zT := box.new(bar_index, pVAH + zoneTol, bar_index + 1, pVAH - zoneTol, border_color = cCyan, border_width = 2, bgcolor = color.new(cGrey, 80))
+        lT := label.new(bar_index, pVAH + zoneTol, "", style = label.style_label_lower_left, color = color.new(cLblBg, 30), textcolor = cCyan, size = size.small, textalign = text.align_left)
+    if not na(pVAL)
+        zB := box.new(bar_index, pVAL + zoneTol, bar_index + 1, pVAL - zoneTol, border_color = cCyan, border_width = 2, bgcolor = color.new(cGrey, 80))
+        lB := label.new(bar_index, pVAL - zoneTol, "", style = label.style_label_upper_left, color = color.new(cLblBg, 30), textcolor = cCyan, size = size.small, textalign = text.align_left)
+
+    // Dalton open read
+    string ot = "no prior value"
+    if not na(pVAH)
+        if open > pVAH
+            ot := "OPEN ABOVE VALUE -> trend odds up, larger range. Fade VAH only if swept AND reclaimed."
+        else if open < pVAL
+            ot := "OPEN BELOW VALUE -> trend odds up, larger range. Fade VAL only if swept AND reclaimed."
+        else
+            ot := "OPEN INSIDE VALUE -> rotation odds up, smaller range. Edge fades favoured."
+    lOpen := label.new(bar_index, high, ot, style = label.style_label_down, color = color.new(cLblBg, 20), textcolor = cWhite, size = size.small, textalign = text.align_left)
+
+
+// one text builder for both edges (isT = VAH / short side)
+f_zoneText(bool isT, float edge, float oppEdge, int score, bool absF, bool lvnF, float fuel, string fuelN, bool fired, bool swept, float swExt, float swDelta, bool swAbs, bool armed, float qLvl, float wkEdge) =>
+    string nm   = isT ? "VAH" : "VAL"
+    string arrow = isT ? "v" : "^"
+    string side = isT ? "SHORT" : "LONG"
+    string cmp  = isT ? "<" : ">"
+    string opp  = isT ? "VAL" : "VAH"
+    string realSide = isT ? "buyers" : "sellers"
+    bool diverging = isT ? swDelta <= 0 : swDelta >= 0
+    string a1 = absF ? "Y" : "-"
+    string a2 = lvnF ? "Y" : "-"
+    string a3 = swAbs ? "Y" : "-"
+    string a4 = diverging ? "  Y diverging" : "  X " + realSide + " real"
+    string a5 = inOpen ? "" : "  [outside window]"
+    string t = nm + " " + str.tostring(edge, "#.##") + "  " + str.tostring(score) + "/3\n"
+    t := t + "edge Y  abs " + a1 + "  ledge " + a2 + "\n"
+    string body = "watch - score < " + str.tostring(minScore)
+    if na(fuel)
+        body := "NO FUEL within " + str.tostring(poolMax, "#") + " pts -> not tradeable"
+    if not na(fuel) and armed and not swept and not fired
+        body := "ARMED " + arrow + "  needs sweep of " + fuelN + " " + str.tostring(fuel, "#") + " (" + str.tostring(fuel - edge, "+#;-#") + ")" + a5
+    if not na(fuel) and swept and not fired
+        body := "SWEPT " + fuelN + " " + str.tostring(fuel, "#") + "  ext " + str.tostring(swExt, "#")
+        body := body + "\nDelta since sweep " + str.tostring(swDelta, "#") + a4 + "  abs " + a3
+        body := body + "\n-> close " + cmp + " " + str.tostring(edge, "#.##") + " = " + side
+    if not na(fuel) and fired
+        body := "FIRED " + arrow + "  entry " + str.tostring(sigEntry, "#.##") + " stop " + str.tostring(sigStop, "#.##")
+        body := body + "\nT1 POC " + str.tostring(pPOC, "#.##") + "  T2 " + opp + " " + str.tostring(oppEdge, "#.##") + "  abs@sweep " + a3
+    t := t + body
+    if useQQQ and not na(qLvl) and math.abs(qLvl - edge) < qMinDiff
+        t := t + "\nQQQ agrees D" + str.tostring(qLvl - edge, "+#;-#")
+    if useWk and not na(wkEdge) and math.abs(wkEdge - edge) <= wkNear
+        t := t + "\n* PW " + nm + " " + str.tostring(wkEdge, "#.##") + " stacked here"
+    if useWk and not na(pwPOC) and math.abs(pwPOC - edge) <= wkNear and not (not na(wkEdge) and math.abs(wkEdge - edge) <= wkNear)
+        t := t + "\n* PW POC " + str.tostring(pwPOC, "#.##") + " stacked here"
+    t
+
+// ---- PER-BAR UPDATES ------------------------------------------------------
+if inRTH
+    if dayLbls.size() > 0
+        for i = 0 to dayLbls.size() - 1
+            label.set_x(dayLbls.get(i), bar_index + lblOff)
+    if wkLbls.size() > 0
+        for i = 0 to wkLbls.size() - 1
+            label.set_x(wkLbls.get(i), bar_index + lblOff)
+
+    if not na(zT)
+        box.set_right(zT, bar_index + 1)
+        box.set_bgcolor(zT, f_zoneColor(math.max(scoreT, latchT), armedT, swT, firedT))
+        color bcT = cGrey
+        if armedT
+            bcT := cCyan
+        if swT
+            bcT := cSwept
+        if firedT
+            bcT := cRed
+        box.set_border_color(zT, bcT)
+        label.set_xy(lT, bar_index + lblOff + 6, pVAH + zoneTol)
+        int dispT = scoreT
+        if (swT or firedT) and latchT > 0
+            dispT := latchT
+        string sT = f_zoneText(true, pVAH, pVAL, dispT, absT, lvnT, fuelT, fuelTN, firedT, swT, swHiExt, swHiDelta, swHiAbs, armedT, qVAHnq, pwVAH)
+        label.set_text(lT, sT)
+        label.set_textcolor(lT, bcT)
+
+    if not na(zB)
+        box.set_right(zB, bar_index + 1)
+        box.set_bgcolor(zB, f_zoneColor(math.max(scoreB, latchB), armedB, swB, firedB))
+        color bcB = cGrey
+        if armedB
+            bcB := cCyan
+        if swB
+            bcB := cSwept
+        if firedB
+            bcB := cGreen
+        box.set_border_color(zB, bcB)
+        label.set_xy(lB, bar_index + lblOff + 6, pVAL - zoneTol)
+        int dispB = scoreB
+        if (swB or firedB) and latchB > 0
+            dispB := latchB
+        string sB = f_zoneText(false, pVAL, pVAH, dispB, absB, lvnB, fuelB, fuelBN, firedB, swB, swLoExt, swLoDelta, swLoAbs, armedB, qVALnq, pwVAL)
+        label.set_text(lB, sB)
+        label.set_textcolor(lB, bcB)
+
+    // fuel markers
+    label.delete(lFuelT)
+    label.delete(lFuelB)
+    color fcT = swT ? cSwept : cCyan
+    color fcB = swB ? cSwept : cCyan
+    color fbg = color.new(cLblBg, 50)
+    string ftT = "FUEL sweep target " + fuelTN
+    string ftB = "FUEL sweep target " + fuelBN
+    if armedT and not firedT and not na(fuelT)
+        lFuelT := label.new(bar_index + lblOff + 6, fuelT, ftT, style = label.style_label_left, color = fbg, textcolor = fcT, size = size.tiny)
+    if armedB and not firedB and not na(fuelB)
+        lFuelB := label.new(bar_index + lblOff + 6, fuelB, ftB, style = label.style_label_left, color = fbg, textcolor = fcB, size = size.tiny)
+    if not na(lOpen)
+        label.set_xy(lOpen, dayStart, math.max(pVAH + zoneTol * 3, rthH))

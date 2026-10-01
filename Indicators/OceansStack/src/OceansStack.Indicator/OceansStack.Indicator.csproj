@@ -1,0 +1,74 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Ocean's Stack indicator (started 2026-09-30): the visual companion to
+    Strategies/oceansStackStrategy — full port of `ocean.pine`'s own drawing output (value-area
+    lines, zone boxes with live status text, fuel-target labels, absorption markers, sweep "SF"
+    signals, QQQ comparison lines), so the operator can see the SAME state the strategy trades off
+    of, the way Finch-Lite already does for finchDomScalpStrategy.
+
+    net10.0-windows for the same reason as every other indicator project here: the installed
+    platform binds System.Runtime 10 and System.Drawing.Common 9, and net8.0-windows fails with
+    CS1705.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <AssemblyName>OceansStackIndicator</AssemblyName>
+    <RootNamespace>OceansStack</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Share)' == 'true'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <Deterministic>true</Deterministic>
+    <PathMap>$(MSBuildThisFileDirectory)..\..\=/src/</PathMap>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>$(QuantowerSdkPath)</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Compiled IN, not referenced — same `Assembly.Load(bytes)`/FullName-cache reasoning as every
+      other `<Compile Include>` boundary in this codebase (see finchDomScalpStrategy.csproj's own
+      copy of this comment for the full explanation). REVERSED DIRECTION from that precedent,
+      though: there, the STRATEGY reaches into the (older, foundational) Finch-Lite INDICATOR's
+      folder. Here, oceansStackStrategy is the older, foundational side — it owns these six files
+      and its own five detection engines — so this NEW, narrower indicator reaches into ITS folder
+      instead. The established rule is "newer/narrower reaches into older/foundational," not
+      "indicator always supplies, strategy always consumes" — this is the mirror-image case of
+      that same rule.
+
+      All six files are `internal`/`namespace oceansStackStrategy;` — compiling them into THIS
+      assembly (RootNamespace=OceansStack) is fine, same as finchDomScalpStrategy already does
+      with `FinchLite`-namespaced files today. No edits needed to any of them.
+
+      TRADE-OFF, STATED: this indicator's copy of these files is a frozen snapshot as of its own
+      last build. A later tuning fix to oceansStackStrategy's own copy does not reach this
+      indicator until it is rebuilt. The `EvaluateZone`/per-bar RTH-reset orchestration sequence in
+      OceansStackIndicator.cs is ALSO a deliberate, hand-synced duplicate of
+      oceansStackStrategy.cs's own copy — a future scoring/arming rule change must be applied to
+      both files by hand. Same accepted cost as finchDomScalpStrategy's own copy of PocEngine
+      logic; see that project's own doc comment for why a three-way-shared file was rejected.
+    -->
+    <Compile Include="..\..\..\..\Strategies\oceansStackStrategy\oceansStackStrategy\Bar.cs" />
+    <Compile Include="..\..\..\..\Strategies\oceansStackStrategy\oceansStackStrategy\DeltaTracker.cs" />
+    <Compile Include="..\..\..\..\Strategies\oceansStackStrategy\oceansStackStrategy\ValueAreaEngine.cs" />
+    <Compile Include="..\..\..\..\Strategies\oceansStackStrategy\oceansStackStrategy\SessionPoolTracker.cs" />
+    <Compile Include="..\..\..\..\Strategies\oceansStackStrategy\oceansStackStrategy\AbsorptionTracker.cs" />
+    <Compile Include="..\..\..\..\Strategies\oceansStackStrategy\oceansStackStrategy\FuelPoolSelector.cs" />
+    <Compile Include="..\..\..\..\Strategies\oceansStackStrategy\oceansStackStrategy\SweepZoneTracker.cs" />
+    <Compile Include="..\..\..\..\Indicators\Finch-Lite\src\Finch.Lite.Indicator\TickClassifier.cs" />
+  </ItemGroup>
+
+</Project>

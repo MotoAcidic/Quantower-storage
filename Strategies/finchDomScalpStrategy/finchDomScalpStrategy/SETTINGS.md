@@ -110,11 +110,24 @@ standalone entry trigger and POC's absorption confluence gate use the SAME two t
 | Trailing stop after breakeven: enable | true | A SEPARATE, continuous mechanism that only activates after the one-time breakeven move above has already fired. |
 | Trailing stop: buffer beyond prior candle (ticks) | 4 | Once trailing, the stop rides just beyond the previous closed bar's own low/high (long/short) — a level price has already respected, so an ordinary pullback retesting it doesn't stop the trade out; only a genuine break past it does. |
 
+## Near-level pushback (independent of breakeven/trailing)
+
+A THIRD, separate risk mechanism — runs regardless of whether breakeven/trailing above are on or
+off. Built specifically because a trade that grazed its target and reversed all the way back to its
+original stop had nothing protecting it while breakeven was disabled.
+
+| Setting | Default | Why |
+|---|---|---|
+| Near-level pushback: enable | **true** | If you run with breakeven off, this is your only in-trade protection — think carefully before disabling both. |
+| Near-level pushback: proximity to level (% of entry-to-level distance) | 25 | How close price has to get to the target OR the stop to count as "edged" it — as a PERCENTAGE of that leg's own entry-to-level distance (entry-to-target for the target check, entry-to-stop for the stop check), not a flat tick count. A tight scalp target and a wide swing-based stop on the same trade are each judged against their own length. |
+| Near-level pushback: reversal to trigger close (% of entry-to-level distance) | 25 | How far price has to reverse away from that extreme (back toward entry) before the position closes at market — same per-leg percentage scaling as the proximity setting above. Applies symmetrically: near target then pushed back → protects the gain; near stop then recovered → takes the smaller loss rather than risking a full round-trip back to stop. |
+
 ## Risk management
 
 | Setting | Default | Why |
 |---|---|---|
 | Max daily loss ($, 0=off) | 0 (off) | Your call — no strong evidence pushing this either way yet. |
+| Daily profit target ($, 0=off) | 0 (off) | Once realized + unrealized P&L for the day reaches this, closes any open position and refuses every new entry (both pathways) for the rest of the trading day — reset at the next EST session rollover. Unlike the loss/drawdown limits below, this is also checked while FLAT, so it stays in force after the trade that hit it has already closed. |
 | Max drawdown ($, 0=off) | **2000** | Recommended ON. At one point this was manually disabled on a live instance with no cap of any kind — worth having *some* circuit breaker even if $2,000 isn't the exact right number for your size. |
 | Max trades per session (0=off) | **10** | Same reasoning — a live instance ran with this off (unlimited) at the same time as the drawdown cap being off, which is a combination worth avoiding. |
 | Cooldown between entries (bars) | **5** | A live instance had this at 1 bar, which let it re-fire almost instantly after a close — part of what let a bad repeated-fade pattern run up a real loss in one overnight session. 5 gives a beat before trying again. |
@@ -129,6 +142,17 @@ standalone entry trigger and POC's absorption confluence gate use the SAME two t
 Windows can leave gaps: NY closing at 17:00 and Asia not opening until 19:00 means nothing is
 allowed to trade in that 2-hour stretch if London stays off — check your configured hours don't
 leave a gap you didn't intend, or embrace it if you did.
+
+## NY open blackout
+
+| Setting | Default | Why |
+|---|---|---|
+| NY open blackout: enable | **true** | A live Buy fired right at the 9:30 ET NY open with a swing-based stop 68+ points away — the opening minutes of RTH are exactly when a swing-based stop is most likely to be absurdly wide, since the "recent swing" reference hasn't reset to a genuine intraday range yet. |
+| NY open blackout: start/end hour+minute (ET) | 09:30–09:45 | The operator's own ask: "the first 15mins of the ny open." |
+
+Independent of the session filter above — that's a broad ALLOW-list (which market is open at all);
+this is a narrow EXCLUSION window carved out of an already-allowed session, minute-precision (not
+hour-only), checked as an additional gate at both entry pathways.
 
 ## POC (point of control)
 

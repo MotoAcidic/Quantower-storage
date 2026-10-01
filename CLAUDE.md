@@ -1775,6 +1775,63 @@ history is not allowed for one data vendor") that explains historical-backfill g
 footprint/absorption data on some connections but not others - see that folder's README for
 the full finding and the exact `InputParameter` names to enable each requested display.
 
+### Ocean's Stack Indicator (`Indicators/OceansStack/`) — added 2026-09-30
+
+**Files:** `Indicators/OceansStack/src/OceansStack.Indicator/OceansStack.Indicator.csproj`,
+`OceansStackIndicator.cs`, `ValueAreaLineOverlay.cs`, `ZoneBoxOverlay.cs`, `FuelTargetOverlay.cs`,
+`AbsorptionMarkerOverlay.cs`, `SweepSignalOverlay.cs`, `SETTINGS.md`.
+
+The visual companion to `oceansStackStrategy` (below) — "that oceans strategy we created i want
+this .pine indicator turned into a indicator in quatower," confirmed via `AskUserQuestion` as a
+**full visual port** (every element `ocean.pine` draws, not a stripped-down subset): daily/weekly
+value-area lines, zone boxes with live status text, fuel-target labels, absorption dot markers,
+sweep "SF" signals, and QQQ comparison lines. Same relationship Finch-Lite already has to
+`finchDomScalpStrategy` — the operator can see the SAME state the strategy trades off of.
+
+**Engine sharing, reversed direction from the Finch-Lite precedent**: `finchDomScalpStrategy`
+reaches INTO Finch-Lite's own folder for shared engines (the strategy is the newer, narrower
+consumer there). Here, `oceansStackStrategy` is the OLDER, foundational side — it owns the five
+detection engines (`ValueAreaEngine`/`SessionPoolTracker`/`AbsorptionTracker`/`FuelPoolSelector`/
+`SweepZoneTracker`) plus its own `Bar`/`DeltaTracker` — so this new, narrower INDICATOR reaches
+into the STRATEGY's folder instead, via the same `<Compile Include>`/frozen-snapshot trade-off
+already established everywhere else in this codebase. No edits needed to any of the six files
+reached into.
+
+**Orchestration is a deliberate, hand-synced duplicate**: `ProcessBar`/`EvaluateZone`/`PollQqq`/
+`EvaluateQqq` in `OceansStackIndicator.cs` re-derive the SAME score/armed/fuel/sweep logic
+`oceansStackStrategy.cs` already computes, rather than a new three-way-shared file (same
+precedent as `finchDomScalpStrategy`'s own independent re-derivation from `PocEngine`). A future
+scoring/arming rule change must be applied to BOTH files by hand — verify by running both side by
+side and diffing the indicator's zone status text against the strategy's own `[Heartbeat]`/
+`[Signal skipped]`/`[Signal]` log lines.
+
+**Two deliberate scope trims**, documented in the indicator's own class doc comment: no Pine
+"Dalton open type" classification (never ported into the strategy in the first place — visualizing
+unported Pine logic would mean inventing new, unreviewed detection code); and retained-day history
+(`Keep prior days on chart`) covers only the daily VAH/VAL/POC lines, not multi-day pool/absorption
+history.
+
+**No `Symbol` InputParameter** — unlike the strategy, this indicator uses the CHART's own attached
+symbol (`this.Symbol`, inherited from the platform's `Indicator` base class) and pulls its own
+dedicated 1-minute series from it via `symbol.GetHistory(Period.MIN1, ...)`, same pattern
+Finch-Lite already uses for its own 5m/15m POC series — independent of whatever period the chart
+itself displays. No configurable `Period` either, since every engine here assumes 1-minute bars.
+
+**QQQ comparison lines are the single highest-risk piece**: no indicator anywhere in this codebase
+has ever pulled a SECOND symbol's history before, and it is unconfirmed that Quantower's
+`Indicator` base class resolves an `InputParameter Symbol` to live market data the same way
+`Strategy` does. Defaults OFF here (unlike the strategy, which defaults it on) — see the
+indicator's own `SETTINGS.md` for the isolated-verification steps required before trusting it.
+
+**Verified 2026-09-30**: `dotnet build src/OceansStack.Indicator/OceansStack.Indicator.csproj -c
+Release -p:Share=true -p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.5\bin\
+TradingPlatform.BusinessLayer.dll"` — 0 errors, 18 warnings (all pre-existing nullable-annotation-
+context style, matching every other project in this codebase). **NOT YET deployed or confirmed on
+a live chart** — copy the built DLL to
+`C:\Quantower\Settings\Scripts\Indicators\OceansStack\OceansStackIndicator.dll` (close Quantower
+first), then work through `SETTINGS.md`'s own verification order (value-area lines alone, then
+zone boxes, then absorption markers, then sweep signals, then QQQ in isolation).
+
 ---
 
 ## Strategy Catalog
@@ -3238,6 +3295,199 @@ form (with the trend/R:R filters and resting-liquidity stop extension it never h
 never actually traded; its previous incarnation is what produced most of one bad night's losses, so
 this is a genuine re-test of the same concept with more protection around it, not an assumption it's
 now safe.
+
+#### TWENTY-SIXTH FEATURE, 2026-09-29 (same day) — near-level pushback protection, independent of breakeven
+
+A live trade ran deep into profit, grazed its target, then reversed all the way back toward its
+original stop with nothing protecting it — the operator caught this live and closed it manually:
+"if i didnt just manually close it i would be in the negative right now going to my stop loss." The
+root cause: the operator has `BreakevenEnabled` off ("i found the break even feature losses me
+money in the long run so i have that turned off"), and `CheckTrailingStop` only ever activates
+*after* breakeven fires — so with breakeven disabled, NEITHER mechanism engages, leaving a
+favorably-moving trade with zero dynamic protection all the way from entry to the original stop.
+
+**Built as a THIRD, fully independent risk mechanism** (`CheckNearLevelPushback`), unaffected by
+whether breakeven/trailing are on or off: tracks the best price reached toward target and the worst
+price reached toward stop since entry. If either extreme came within `NearLevelTicks` (default 15)
+of its own level, and price has since reversed away from that extreme by `PushbackCloseTicks`
+(default 15), the position closes immediately at market — protecting the gain on the target side
+("if there is big push back from the take profit line it should just close out instead of running
+all the way back"), and taking the smaller loss/scratch rather than risking a full round-trip back
+to stop on the other side, per the operator's own explicit symmetric follow-up: "if it edges stop
+loss like that with pressure going back in the other direction it should just close it."
+
+Looks up the REAL current stop/target order prices on demand (`FindProtectiveStopOrder`, plus a new
+matching `FindProtectiveTargetOrder`) rather than the signal-time `pendingStopPrice`/
+`pendingTargetPrice`, so this stays correct even if breakeven/trailing has since moved the stop —
+this was a deliberate design choice for forward-compatibility, even though the operator's own
+current setup has both of those off.
+
+**Verified 2026-09-29 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live** — this closes at
+market on trigger, which carries its own slippage risk on a fast reversal; watch the first few
+triggers closely to confirm the exit price is actually better than what letting it run would have
+produced.
+
+#### TWENTY-SEVENTH ISSUE, 2026-09-29 (same day) — near-level pushback rebuilt as per-leg percentages, not flat ticks
+
+Caught immediately, before ever going live: "now will this mess up the smaller scalps being 15
+ticks away and a pull back from what i set to 10 ticks" — the exact same class of bug already found
+and fixed once for `BreakevenTriggerRiskPercent` ("a fixed tick count stopped making sense once
+stops became swing-based and variable"). `NearLevelTicks`/`PushbackCloseTicks` as flat tick counts
+meant "near target" on a wide swing-sized target (80+ ticks away) but triggered almost immediately
+on a tight scalp target (20-30 ticks away), where 10-15 ticks is already most of the move — turning
+completely normal small pullbacks into premature closes.
+
+**Fixed the same way breakeven was fixed**: `NearLevelPercent`/`PushbackClosePercent` (both
+percentages, default 25%) now scale against EACH LEG'S OWN entry-to-level distance — entry-to-target
+for the target-side check, entry-to-stop for the stop-side check — computed fresh each poll from
+`position.OpenPrice` and the real current stop/target order prices. A tight scalp target and a wide
+swing-based stop on the SAME trade are each judged against their own length now, not a one-size-
+fits-all tick count.
+
+**Verified 2026-09-29 (same day)**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj
+-c Release` — 0 errors. Deployed folder still clean. **NOT YET verified live**, same as the feature
+this replaces.
+
+---
+
+#### TWENTY-EIGHTH FEATURE, 2026-09-30 — NY open blackout, a minute-precision exclusion window
+
+A live Buy fired right at the 9:30 ET NY open with a swing-based stop 68+ points/274 ticks away
+(entry 30751.50, stop 30683.00 — screenshot showed net -$33.32, -67 ticks open). The operator: "also
+in my current strategy thats running the finch one i dont want to trade the first 15mins of the ny
+open because it has entered me into a stupid trade with a massive stop loss." The opening minutes of
+RTH are exactly when a swing-based stop (computed off whatever overnight/pre-market range happens to
+exist) is most likely to be absurdly wide, since the "recent swing" reference hasn't reset to a
+genuine intraday range yet.
+
+The existing `SessionFilterEnabled`/`NySessionStartHour`/`NySessionEndHour` + `IsInHourWindow` is
+hour-only and serves a different purpose (a broad session ALLOW-list) — it can't express a precise
+9:30-9:45 EXCLUSION carved out of an already-allowed session without either turning off entirely or
+blocking the whole 9:00-10:00 hour. Added a genuinely separate, minute-precision blackout:
+`NyOpenBlackoutEnabled`/`NyOpenBlackoutStartHour`/`Minute`/`NyOpenBlackoutEndHour`/`Minute` (default
+on, 09:30-09:45 ET) and a new `IsInNyOpenBlackout()` — ported the exact minute-precision window-check
+logic from `oceansStackStrategy`'s own `IsInWindow` helper (which was built for the identical reason:
+`IsInHourWindow` isn't precise enough for a 30-minute boundary there either). Checked as an
+additional gate alongside `IsInAllowedSession()` at both entry pathways (`TryEnter` and
+`CheckPocRejection`), and surfaced in the heartbeat's own `Session=` status line.
+
+**Verified 2026-09-30**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c Release`
+— 0 errors. **NOT YET verified live.** Same "code default doesn't retroactively update an
+already-saved instance" caveat as every other setting change — the operator may need to set this
+explicitly in the currently-running instance's own settings panel.
+
+#### TWENTY-NINTH FEATURE, 2026-09-30 (same day) — daily profit target, the profit-side mirror of the daily loss limit
+
+The operator: "lets add in a feature to set a profit target and once its met on the day it stops
+trading." New `DailyProfitTarget` ($, 0=off, default off) checked in `CheckRiskLimits` against
+realized + unrealized daily P&L — the profit-side counterpart to the existing `MaxDailyLoss`.
+
+**One deliberate structural difference from `MaxDailyLoss`/`MaxDrawdown`**: those two only ever run
+while a position is OPEN (`CheckRiskLimits` returns immediately if `MyPositions()` is empty, since
+there is nothing to close otherwise) — a gap that doesn't matter for a LOSS limit (if you're flat,
+you're not losing more) but would defeat the entire point of a PROFIT target, whose job is to keep
+you flat and refusing new entries for the rest of the day. Restructured `CheckRiskLimits` so
+unrealized P&L is computed once up front (0 while flat), the new profit-target check runs against
+`dailyPnl + unrealizedPnl` BEFORE the "no positions, nothing to do" early return, and only the
+existing loss/drawdown checks stay gated behind it. `profitTargetHit` (mirroring `dailyLimitHit`) is
+checked alongside the existing `dailyLimitHit || drawdownLimitHit || tradesLimitHit` guard at both
+entry pathways (`TryEnter`/`CheckPocRejection`), and reset in both `OnRun` and `CheckSessionReset`
+(new EST day).
+
+**Verified 2026-09-30**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c Release`
+— 0 errors. **NOT YET verified live** — off by default, so no behavior change until the operator sets
+a target explicitly.
+
+---
+
+### 14. Ocean's Stack Strategy (`oceansStackStrategy`) — added 2026-09-29
+
+**Files:** `Strategies/oceansStackStrategy/oceansStackStrategy/oceansStackStrategy.csproj`,
+`oceansStackStrategy.cs`, `ValueAreaEngine.cs`, `SessionPoolTracker.cs`, `AbsorptionTracker.cs`,
+`FuelPoolSelector.cs`, `SweepZoneTracker.cs`, `DeltaTracker.cs`, `Bar.cs`, `SETTINGS.md`.
+
+A live port of `Quantower-storage/TradingView/ocean.pine` ("Ocean's Stack v2") — a session-based
+**liquidity sweep failure** swing system for NQ, handed to the operator as a TradingView indicator
+and turned into a real, order-placing Quantower Strategy. Genuinely different character from
+`finchDomScalpStrategy`: once-per-day zones and a single morning trigger window, swing-sized
+targets, instead of continuous 1-minute scalping.
+
+**The trade**: build the prior day's value area (VAH/VAL/POC) and a prior-week version, score each
+value-area edge on absorption + low-volume-ledge evidence, arm a zone when a nearby liquidity pool
+(overnight/Asia/prior-day/prior-week high-or-low) sits in range, then — only inside a configured
+morning window (default 09:30–10:30 ET) — watch for price to sweep that pool and fail back inside
+the value area on confirming delta. Entry at the failed-sweep bar's close, stop beyond the sweep
+extreme, target at the opposite value-area edge.
+
+**Five decisions confirmed via `AskUserQuestion` before any code was written** (plan file
+`starry-petting-pike.md`, researched via a `Plan` subagent first given the size of this build):
+1. **Real order-flow delta**, not Pine's own candle proxy (`sign(close-open)*volume`) — classified
+   from actual tick prints via a newly-extracted, shared `TickClassifier` (see below).
+2. **No dry-run/sim-account gate** — matches `finchDomScalpStrategy`'s own explicit policy exactly.
+3. **Full port, everything at once** — weekly overlay, QQQ→NQ cross-asset check (informational
+   only), and LVN ledge scoring all included from day one, not a stripped-down v1.
+4. **Instrument: MNQ**, same account as `finchDomScalpStrategy`.
+5. **Exit structure**: Pine names two targets (T1 = prior-day POC, T2 = opposite value-area edge),
+   but nothing in this codebase does partial/scale-out exits. **Single contract, target T2 only**
+   — T1/POC is logged as an informational level on the signal line, never traded.
+
+**Prerequisite refactor**: `TryClassify(Symbol, Last, out bool isBuy)` existed as two independent,
+byte-identical copies (`FinchLiteIndicator.cs`, `finchDomScalpStrategy.cs`). Extracted into a new
+shared `Indicators/Finch-Lite/src/Finch.Lite.Indicator/TickClassifier.cs`
+(`internal static class TickClassifier`), compiled in by source (same `Assembly.Load` cache-
+collision reasoning as `RestingOrderEngine.cs`/`PocEngine.cs`) rather than pasting a third copy. The
+two pre-existing copies were left as-is (out of this task's own scope) — this new strategy is simply
+the first consumer of the shared version.
+
+**One deliberate, load-bearing divergence from decision #1**: `ValueAreaEngine` is fed from
+**historical 1-minute bars**, not live ticks. Quantower has no historical tick/time-and-sales
+backfill (the same limitation `PocEngine.cs` already documents for its own current-move POC) —
+prior-day and prior-week value areas must already be COMPLETE the instant the strategy attaches,
+which only bar history can supply. Volume-*profile* construction is a different need (requires
+history) than delta *confirmation* (wants live-forward accuracy, and gets it via real ticks here).
+
+**New engine classes, all strategy-local** (nothing else in this codebase needs them yet):
+- `ValueAreaEngine` — bins volume by price, finds the max-volume bin as POC, expands outward
+  alternately (whichever neighboring bin holds more volume) until reaching the configured
+  value-area %. Three independent instances: daily NQ, weekly NQ, QQQ's own. Also exposes an
+  `IsLvnLedge` check against its own retained bin map (direct port of Pine's `f_isLVN`).
+- `SessionPoolTracker` — the four "fuel" pools (overnight/Asia/prior-day/prior-week H/L), each
+  fresh-started on window entry and frozen at window exit, ported directly from Pine's own
+  accumulation blocks. Needed a new minute-precision `IsInWindow` helper alongside the existing
+  hour-only `IsInHourWindow` (Ocean's Stack needs 30-minute boundaries; the existing helper was
+  left untouched rather than risking a regression in `finchDomScalpStrategy`).
+- `AbsorptionTracker` — discrete, positioned absorption prints with hold/invalidation state (a bar
+  with volume well above its own 50-bar average and a strongly one-sided delta that closed the
+  OTHER way). Only prints that survive a full session without price closing back through them
+  ("must hold") carry into the next day's scoring snapshot. Reuses a copy of `DeltaTracker`
+  extended with `LastBarBuy`/`LastBarSell`/`LastBarDelta` (per-bar, not rolling-window) accessors.
+- `FuelPoolSelector` — pure function, direct port of Pine's `f_fuel`: nearest qualifying pool
+  within `[poolMin, poolMax]` beyond a value-area edge.
+- `SweepZoneTracker` — the actual trading trigger, one instance per zone (top/short, bottom/long).
+  Owns only the sweep/fire state machine; score/armed are recomputed fresh every bar by the main
+  strategy and passed in. A single bar can both extend/begin a sweep AND fire the reversal in the
+  same close (a spike-and-reject candle) — replicated exactly as Pine allows it.
+
+**QQQ second-symbol subscription** — genuinely new territory for this codebase (every existing
+strategy is single-symbol). Exposed as a second `[InputParameter] Symbol QqqSymbol`, same
+resolution mechanism as `CurrentSymbol`. Entirely informational (never gates the score/armed/fire
+pipeline, matching the source script's own design) and wrapped in its own try/catch per poll so a
+QQQ-side failure can never stall or crash the real NQ-only trading logic — degrades to a persistent
+`[QQQ] unavailable` log line if the second connection/symbol doesn't cooperate. Flagged explicitly
+as unverified: whether Quantower delivers bars smoothly for a symbol on an unrelated connection,
+and whether the "prior RTH close" ratio anchor (which needs NQ's and QQQ's own bar timestamps
+reasonably aligned) holds up in practice — a "use live ratio instead" toggle exists as the simpler
+fallback if the fixed-anchor approach proves noisy.
+
+**Verified 2026-09-29**: `dotnet build oceansStackStrategy/oceansStackStrategy.csproj -c Release` —
+0 errors, 0 warnings (beyond the usual nullable-annotation-context notices). Deployed to
+`C:\Quantower\Settings\Scripts\Strategies\oceansStackStrategy\`. **NOT YET verified live** — this
+is a brand-new strategy with zero track record; per its own plan, the value-area math should be
+cross-checked against the same day's Ocean's Stack Pine chart directly before trusting any live
+signal, and it fires rarely by design (score >= threshold AND fuel AND sweep AND reclaim, all
+inside a 60-minute window) — expect to watch `[Signal skipped]`/heartbeat logs for a while before
+seeing a real trade.
 
 ---
 
