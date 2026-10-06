@@ -1834,6 +1834,78 @@ zone boxes, then absorption markers, then sweep signals, then QQQ in isolation).
 
 ---
 
+### ORB + Session Levels (`Indicators/OrbLevels/`) — added 2026-10-06
+
+**Files:** `Indicators/OrbLevels/src/OrbLevels.Indicator/OrbLevels.Indicator.csproj`,
+`OrbLevelsIndicator.cs`, `OrbBoxOverlay.cs`, `LevelLineOverlay.cs`.
+
+The operator: "can you make me an indicator that works for painting out the orb for mes and mgc
+and marks out the highs and lows like the strategy does" — a visual companion to both
+`mesOrbStrategy` and `goldOrbStrategy`. Paints the ORB box (high/low/midpoint, 8:00-8:15 AM ET
+default — switch to 20:00-20:05 for a gold chart) and the Asia/London/NY untested session
+highs/lows exactly as `mesOrbStrategy`'s own SESSION LEVELS setup tracks them: frozen the moment
+each session ends, solid/bright while untested, dim/dotted with a "(tested)" label suffix once a
+bar touches one. Works unmodified on MES, MGC, or anything else — every session window and the
+ORB window itself are plain InputParameters, and nothing reads a hardcoded tick size or contract
+spec.
+
+**Not a shared-code port of either strategy** — an indicator can't inherit `Strategy`, and the
+strategies' own ORB/session-level logic lives as private methods on their own classes, not
+standalone files `<Compile Include>` could pull in. This is a deliberate, hand-synced DUPLICATE
+of the box-building and session-freeze-and-touch logic, stripped of everything entry/stop/target/
+risk related (an indicator draws, it never places an order or reads the account) — the same
+accepted tradeoff already documented for the `OceansStack` indicator above: a future tuning
+change to either strategy's own ORB/session logic does not reach this indicator until hand-
+applied here too.
+
+**Scaffold and overlay patterns copied from Finch-Lite**, not reinvented: the `OnInit`/
+`TryInitialise`/`OnRetryTimer` lifecycle is identical (minus Finch-Lite's own DepthOfMarket
+precondition — this indicator never touches the DOM, only historical bars, so the only
+precondition is `this.Symbol` being attached). `OrbBoxOverlay` is `StructureBoxOverlay.cs`
+adapted with one real difference: the box itself has a FIXED end time (an ORB window is a
+specific, closed range, not a "still live" zone) — the high/low/midpoint then extend onward as
+separate rays once the window closes, which is the part the strategy actually trades off for the
+rest of the day. `LevelLineOverlay` is `PocOverlay.cs` adapted to carry an `Untested` flag per
+line, driving both line style and the label text.
+
+**Startup reconstruction reuses the live per-bar method directly**, same pattern as
+`mesOrbStrategy`'s own `ReconstructSessionLevels`: `ReplayHistory` replays the whole fetched
+backlog through `ProcessBar` once on attach, so a mid-day attach shows today's (and
+`KeepPriorDays` prior) already-known levels immediately rather than waiting to rebuild them live.
+
+**Verified 2026-10-06**: `dotnet build src/OrbLevels.Indicator/OrbLevels.Indicator.csproj -c
+Release -p:Share=true -p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.5\bin\
+TradingPlatform.BusinessLayer.dll"` — 0 errors, 7 warnings (all pre-existing nullable-annotation-
+context style). Deployed to `C:\Quantower\Settings\Scripts\Indicators\OrbLevels\
+OrbLevelsIndicator.dll`.
+
+#### FIX, same day — no ORB box drawn when attached after the window already closed
+
+The operator, after attaching mid-day: "i had this running why did it not have a orb box drawn it
+should look at historical bars to build it if it started after the time frame." Exact same root
+cause as `mesOrbStrategy`'s own same-day fix (see its own entry above): `TryInitialise` called
+`symbol.GetHistory(...)` then immediately called `ReplayHistory()` synchronously — but
+`GetHistory()` can return a handle that's still populating its own backlog in the background,
+so reading `.Count` right away can see it empty or near-empty well before the real data arrives.
+Replaying an empty backlog reconstructs nothing (no box, no session levels) and, unlike the live
+poll path, nothing ever re-triggers a second replay — so it just sits blank.
+
+**Fixed differently from the strategy's own fix, and more cleanly**: the strategy has no retry
+mechanism (`OnRun` runs once), so it blocks briefly instead. This indicator already has a retry
+timer built for exactly this "dependency not ready yet" shape (`OnRetryTimer`, originally for
+Finch-Lite's own DepthOfMarket precondition). Reused it instead of blocking: if `history.Count <
+100` right after fetch, the attempt is disposed and `TryInitialise` returns `false` — the existing
+retry timer calls it again a second later, which re-fetches and re-checks from scratch, same as
+any other not-ready-yet precondition.
+
+**Verified 2026-10-06**: rebuilt (0 errors) and redeployed to the same path. **Caveat**: per
+`ORB-IX/BUILD.md`'s own documented deploy step, Quantower loads scripts at startup and keeps what
+it loaded — copying a new DLL over a running platform can appear to succeed while changing
+nothing. If the fix doesn't show up, remove and re-attach the indicator (or restart Quantower)
+rather than assuming the fix didn't work.
+
+---
+
 ## Strategy Catalog
 
 ### 0. EMA Cross Strategy (`emaCrossStrategy`)
@@ -4040,6 +4112,125 @@ nullable-annotation-context notices). Deployed to
 `C:\Quantower\Settings\Scripts\Strategies\mesOrbStrategy\`. **NOT YET verified live** — brand new,
 zero automated track record for either setup; watch the `[ORB]`/`[Session]`/`[Signal]`/`[Order]`
 log lines against the real chart for several days before trusting it unattended.
+
+#### FIX, 2026-10-06 — strategy silently stalled for hours with ZERO log trace; added a heartbeat
+
+The operator, after a live move rallied up toward the ORB midpoint and rejected without a short
+firing: "why did it not take this short here it came up and barely missed the midpoint and
+rejected from it." Pulled the instance's own per-instance log (restarted 7:33:41 AM ET) — it
+contained exactly three lines: the account warning, `[Session] reconstructed...`, and `Started
+[MesOrb].`. Nothing else, for hours, across a window that should have produced at minimum an
+`[ORB] range captured` line once 8:15 ET passed. Cross-checked the platform's own Serilog too —
+one `'mesOrbStrategy' state changed to: 'Working'` line and nothing else; no exception anywhere.
+`mes_orb_daily_risk_state.txt` didn't exist at all, which is itself informative: `IsAccountFloorBreached`
+unconditionally writes that file on its very first successful call regardless of whether a floor is
+even configured — its total absence means `RunPoll` had not completed even ONE successful pass
+since the restart, not just that the ORB logic specifically had nothing to report.
+
+**Root cause confirmed minutes later**, once the `[Heartbeat]` fix below was deployed and the
+operator restarted: the heartbeat fired immediately (`13:28:55` and again `13:29:04`, nine seconds
+apart after a second restart) showing `ORB phase=DoneForDay high=-1797693...` — `orbHigh` was
+still sitting at the raw `double.MinValue` sentinel, never actually assigned. The per-instance log
+confirmed why: `"[ORB] could not reconstruct today's ORB range from history after a restart —
+skipping today."` fired on BOTH restarts, instantly, even though both happened a full hour-plus
+after the 8:00-8:15 ET window closed, with that window's own 5-minute bars unquestionably real and
+settled by then. Session levels came back empty for the identical reason (`Untested session
+levels: none`). `ReconstructTodayState`/`ReconstructSessionLevels` both read `this.history5m.Count`
+synchronously, immediately after `GetHistory()` returns — but `GetHistory()` can hand back a
+`HistoricalData` object that is still populating its own backlog in the background; reading
+`.Count` at that exact instant saw it empty or near-empty on every observed restart, not just an
+occasional one. Once reconstruction found nothing, it permanently set `phase = DoneForDay` — and
+`ProcessClosed5mBar`'s own switch has NO `DoneForDay` case, so no live bar arriving moments later
+(once the real history actually finished loading) could ever recover it. This also explains the
+EARLIER 7:33 AM silent-stall incident this same morning: that restart happened before the window
+even opened, so reconstruction correctly (if silently) set `AwaitingWindow` — but the same
+underlying empty-history snapshot meant `barsSeen5m` got seeded past bars that hadn't loaded yet
+either, so the live 8:00 AM transition never fired, with nothing left in the log to explain why.
+
+**Fixed, two parts**:
+1. Added a `[Heartbeat]` log (every 5 minutes, reporting ORB phase and which session levels are
+   still untested) — same diagnostic shape `finchDomScalpStrategy` already has. This is what
+   actually surfaced the bug: without it, "ORB phase=DoneForDay, high/low still at their sentinel
+   defaults" would have stayed invisible indefinitely.
+2. `OnRun` now waits (polling `history5m.Count` every 100ms, up to a 5s deadline) for at least 100
+   bars to actually be present before calling either reconstruction method — directly targeting
+   the confirmed race rather than guessing at a timeout. Logs an error if the wait times out
+   without reaching that bar count, so a genuinely slow/failed history fetch is now visible too
+   instead of silently producing an empty reconstruction.
+
+**Verified 2026-10-06**: `dotnet build mesOrbStrategy/mesOrbStrategy.csproj -c Release` — 0 errors.
+Deployed.
+
+#### FOLLOW-UP FIX, same day — the 5s wait wasn't the real fix; missing Fake-symbol resolution was
+
+The operator restarted again to test the fix above and stopped it almost immediately: "i stopped
+the strategy because look at this clean break to the upside that is fully missed on because it
+wasnt able to draw the box even though i had this turned on before the market opened to draw the
+box." The new error log (added by fix #2 above) proved the 5-second wait theory wrong on its own:
+`"[ORB] history5m only has 0 bars after a 5s wait"` — not near-empty, ZERO, even after the full
+wait. No amount of waiting was ever going to fix that; it wasn't a brief population race.
+
+**Real root cause**: every other strategy in this codebase — `finchDomScalpStrategy` included —
+re-resolves `CurrentSymbol`/`CurrentAccount` at the top of `OnRun` if either comes back in a
+`BusinessObjectState.Fake` state (`this.CurrentSymbol = Core.Instance.GetSymbol(this.CurrentSymbol
+.CreateInfo())`, same for Account). A saved `[InputParameter] Symbol` can come back as a
+serialized PLACEHOLDER on reload/restart, not yet resolved to a live, connected symbol —
+`GetHistory()` called on a Fake symbol returns a handle that never populates, no matter how long
+you wait. `mesOrbStrategy` was built fresh this week rather than copied from an existing
+strategy's `OnRun`, and this one established, repo-wide step got missed. This also fully explains
+the ORIGINAL 7:33 AM silent-stall incident (the one that started this whole investigation): if the
+symbol was Fake from the start, `Drain5m`/`Drain1m`'s own `h.Count <= 1` guard would skip
+processing FOREVER, completely silently, exactly matching "zero ORB logs ever" — no race, no
+partial failure, just a dead data source nothing downstream could ever recover from.
+
+**Fixed**: added the exact same two-line re-resolution step `finchDomScalpStrategy` already uses,
+at the very top of `OnRun`, before the existing null-check. The earlier 5-second-wait fix is kept
+(harmless, and still useful for a genuine brief population race on an already-resolved symbol) but
+is no longer the primary defense.
+
+**Verified 2026-10-06**: `dotnet build mesOrbStrategy/mesOrbStrategy.csproj -c Release` — 0 errors.
+Deployed. **NOT YET re-verified live** — next restart should show `[ORB] range captured: ...`
+promptly, including on a restart taken well after the window closed, and the `"[ORB] history5m
+only has 0 bars"` error should not recur.
+
+#### FEATURE/FIX, same day — the Fake-symbol fix worked live; three more changes from watching it trade
+
+The fix above held: the heartbeat showed a real `ORB phase=AwaitingRetest` with real high/low/mid
+values, a session-level rejection short fired and was protected correctly (`[Order] protective
+stop=7891.25 target=7871.25`), and the operator confirmed the structural bug was gone. Three
+follow-on changes came from watching that live trade and the ORB play afterward:
+
+1. **EMA confluence** — the short above got stopped out into a rally despite a clean-looking
+   rejection: "there wasnt enough confluence to determine the actual short lets add in the closure
+   below the 9ema as a confluence to show the direction is actually changing." Added a running EMA
+   (`EmaPeriod`, default 9, computed on 1-minute closes, fed unconditionally in `Drain1m` so it's
+   always current) gating every rejection-style entry in BOTH playbooks — ORB rejection,
+   session-level reject, session-level pullback-reject. A long needs its trigger candle to close
+   above the EMA; a short needs it below. Deliberately NOT applied to the ORB reversal-breakout
+   play, which already requires a full 5-min close beyond the whole box on its own.
+2. **Retest zone widened to the whole box** — separately, a clean ORB retest-and-rejection never
+   triggered an entry: "it played out perfect on the retest of the orb but this was never actually
+   placed an order for the long... we need to show a retest of the orb not just at the 50% mark."
+   `RetestZone()` previously returned a tight band around the midpoint only; a pullback that
+   touched well into the box without reaching that band never armed `AwaitingRejection` at all.
+   Widened to the full `orbLow..orbHigh` range, with `RetestZoneTolerancePercent` repurposed as a
+   buffer BEYOND the box's edges instead of a band around its center. The rejection confirmation
+   itself is unchanged (still requires closing back through the midpoint specifically).
+3. **One retest shot per breakout** — immediately flagged as a necessary companion to #2: "since
+   the retest already played out it should not enter again if it comes back down and touches it
+   again — that break and retest already played out for today." Widening the zone alone would let
+   `AwaitingRejection` sit armed indefinitely, potentially firing off a completely separate, much
+   later touch of the box. `ProcessClosed1mBar` now resolves the attempt the moment a bar's CLOSE
+   fully leaves the (now box-wide) zone without confirming — `phase = DoneForDay` either way, no
+   re-arming on a later touch. (The equivalent latent risk exists in `ProcessLevelReaction`'s own
+   `AwaitingReaction`/`AwaitingPullback` states too — not fixed here since the operator didn't flag
+   it there and each session level can in any case only be touched once per cycle; worth applying
+   the same resolution rule there if it ever shows the same symptom.)
+
+**Verified 2026-10-06**: `dotnet build mesOrbStrategy/mesOrbStrategy.csproj -c Release` — 0 errors.
+Deployed. **NOT YET re-verified live** — watch for `[ORB] 1-min rejection confirmed ... (above/
+below the 9-EMA)` on the next entry, and `[ORB] retest attempt resolved without a confirmed
+rejection ... done watching for today` on a retest that fails to confirm.
 
 ---
 

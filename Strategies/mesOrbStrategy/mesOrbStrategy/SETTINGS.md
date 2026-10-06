@@ -19,14 +19,34 @@ original play — it never stacks on top of it):
 1. Mark the high/low of the `ORB window` (default 8:00–8:15 ET) on the 5-minute chart.
 2. Wait for a 5-minute bar to **close** beyond either side of that range — this is the breakout,
    and it fixes the trade's direction for the rest of the day.
-3. Wait for price to pull back into the **retest zone** — within `Retest zone tolerance` percent of
-   the ORB range on either side of the midpoint (a band, not an exact price — "50% or close to it,"
-   the operator's own words).
+3. Wait for price to pull back into the **retest zone** — CHANGED 2026-10-06: the whole ORB box
+   (orbLow to orbHigh), not just a tight band around the midpoint. `Retest zone tolerance` percent
+   now buffers a little BEYOND the box's own edges rather than around its center — "a retest of
+   the ORB" means anywhere in the original range, per a live miss where price retested well into
+   the box (not near the midpoint specifically) with a clean rejection that never got evaluated.
 4. Once price is in that zone, drop to the 1-minute chart and watch for a **rejection**: a 1-min bar
    that wicks into/through the zone but **closes back through the midpoint** in the original
-   breakout direction. That candle close is the entry trigger (market order).
+   breakout direction, AND closes on the confirming side of the `EMA confluence` (see below). That
+   candle close is the entry trigger (market order).
 5. Stop = entry ∓ `Stop loss (points, fixed)` (always a fixed distance, never box-relative — see
    the note below). Target = entry ± `Profit target (points)`.
+
+**One retest shot per breakout** (added 2026-10-06, the operator's own words: "since the retest
+already played out it should not enter again if it comes back down and touches it again"). Once a
+1-min bar's CLOSE fully leaves the retest zone without having confirmed a rejection, the attempt is
+considered resolved and the strategy stops watching for the rest of the day — it will NOT re-arm on
+a later, separate touch of the same box.
+
+## EMA confluence (added 2026-10-06)
+
+The operator, after a session-level short got stopped out into a rally despite a clean-looking
+rejection: "there wasnt enough confluence to determine the actual short lets add in the closure
+below the 9ema as a confluence." A running EMA (`EMA confluence: period`, default 9, computed on
+1-minute closes) now gates EVERY rejection-style entry in both playbooks (ORB rejection,
+session-level reject, session-level pullback-reject — NOT the ORB reversal-breakout play, which
+already requires a full 5-min close beyond the whole box on its own): a long needs its trigger
+candle to close ABOVE the EMA, a short needs it to close BELOW. Disable via `EMA confluence:
+enabled` to go back to price-action-only confirmation.
 
 **Reversal case** (the operator's own second-chance description): if, instead of holding, price
 pushes all the way through the midpoint and a 5-minute bar **closes beyond the OPPOSITE side of the

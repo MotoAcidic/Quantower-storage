@@ -182,6 +182,15 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     [InputParameter("Pullback tolerance beyond level (points)", 85, 0, 20, 0.25, 2)]
     public double PullbackTolerancePoints { get; set; }
 
+    // ---- 9 EMA confluence (operator's own ask, 2026-10-06) — see UpdateEma1m/EmaConfirms' own
+    // doc comment for the incident this closes.
+
+    [InputParameter("EMA confluence: enabled", 90)]
+    public bool EmaConfluenceEnabled { get; set; }
+
+    [InputParameter("EMA confluence: period (1-min bars)", 91, 2, 200, 1, 0)]
+    public int EmaPeriod { get; set; }
+
     public override string[] MonitoringConnectionsIds => new[] { this.CurrentSymbol?.ConnectionId, this.CurrentAccount?.ConnectionId };
 
     private enum OrbPhase
@@ -298,12 +307,31 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.LevelTouchTolerancePoints = 0.5;
         this.MinBreakDistancePoints = 1.0;
         this.PullbackTolerancePoints = 3.0;
+
+        this.EmaConfluenceEnabled = true;
+        this.EmaPeriod = 9;
     }
 
     // ---- lifecycle ------------------------------------------------------------------------------
 
     protected override void OnRun()
     {
+        // FOUND 2026-10-06 ("why did it not have a orb box drawn... even though i had this
+        // turned on before the market opened") — root-caused to a missing re-resolution step,
+        // not just the history-population race fixed above. A saved [InputParameter] Symbol/
+        // Account can come back in a Fake (serialized placeholder) state on reload/restart —
+        // GetHistory() on a Fake symbol returns a handle that NEVER populates, no matter how
+        // long you wait (confirmed live: "[ORB] history5m only has 0 bars after a 5s wait" on a
+        // restart where the earlier, now-also-fixed race wasn't even the issue). Every other
+        // strategy in this codebase (finchDomScalpStrategy included) already carries this exact
+        // re-resolution step — missed here only because mesOrbStrategy was built fresh rather
+        // than copied from an existing OnRun.
+        if (this.CurrentSymbol != null && this.CurrentSymbol.State == BusinessObjectState.Fake)
+            this.CurrentSymbol = Core.Instance.GetSymbol(this.CurrentSymbol.CreateInfo());
+
+        if (this.CurrentAccount != null && this.CurrentAccount.State == BusinessObjectState.Fake)
+            this.CurrentAccount = Core.Instance.GetAccount(this.CurrentAccount.CreateInfo());
+
         if (this.CurrentSymbol is null || this.CurrentAccount is null)
         {
             this.Log("Symbol/Account not set — cannot start.", StrategyLoggingLevel.Error);
@@ -353,6 +381,23 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         {
             this.history5m = this.CurrentSymbol.GetHistory(Period.MIN5, this.CurrentSymbol.HistoryType, Core.TimeUtils.DateTimeUtcNow.AddDays(-3));
             this.history1m = this.CurrentSymbol.GetHistory(Period.MIN1, this.CurrentSymbol.HistoryType, Core.TimeUtils.DateTimeUtcNow.AddDays(-1));
+
+            // FOUND 2026-10-06 ("why did it not take this short" -> traced to "[ORB] could not
+            // reconstruct today's ORB range from history after a restart" firing on EVERY
+            // restart, including one taken a full hour after the ORB window closed, with that
+            // window's own bars unquestionably real and settled by then). GetHistory() can return
+            // a handle that's still populating its own backlog in the background; reading .Count
+            // synchronously the instant it returns saw it empty or near-empty on every observed
+            // restart. Reconstruction then found nothing, and — because ProcessClosed5mBar's own
+            // switch has no DoneForDay case to recover from — locked the ORB phase into
+            // DoneForDay for the rest of the day, with no live bar ever able to undo it. Waits
+            // here, briefly, for the data to actually arrive before trusting it for anything.
+            var deadline = Core.TimeUtils.DateTimeUtcNow.AddSeconds(5);
+            while (this.history5m.Count < 100 && Core.TimeUtils.DateTimeUtcNow < deadline)
+                Thread.Sleep(100);
+
+            if (this.history5m.Count < 100)
+                this.Log($"[ORB] history5m only has {this.history5m.Count} bars after a 5s wait — reconstruction may be incomplete.", StrategyLoggingLevel.Error);
         }
         catch (Exception ex)
         {
@@ -426,8 +471,34 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             return;
         }
 
+        this.MaybeLogHeartbeat();
         this.Drain5m();
         this.Drain1m();
+    }
+
+    private DateTime lastHeartbeatUtc = DateTime.MinValue;
+    private const int HeartbeatIntervalMinutes = 5;
+
+    /// <summary>FOUND 2026-10-06 ("why did it not take this short here") — the operator's own
+    /// per-instance log showed literally nothing past the three startup lines for hours, across a
+    /// move that should have produced at least "[ORB] range captured" and almost certainly a
+    /// "[Signal skipped]"/"[Session]" line too. No exception anywhere (per-instance log OR the
+    /// platform's own Serilog) — the poll loop appears to have simply gone silent with zero trace,
+    /// which made "is this strategy even alive" unanswerable from the log alone. This guarantees
+    /// SOME line appears every few minutes whenever RunPoll is genuinely still executing — if this
+    /// line itself goes missing after a restart, that's now unambiguous proof the poll Timer died,
+    /// rather than "it's alive but had nothing worth logging."</summary>
+    private void MaybeLogHeartbeat()
+    {
+        var now = Core.TimeUtils.DateTimeUtcNow;
+        if (now - this.lastHeartbeatUtc < TimeSpan.FromMinutes(HeartbeatIntervalMinutes)) return;
+        this.lastHeartbeatUtc = now;
+
+        var untested = string.Join(", ", this.AllSessionLevels().Where(l => l.Untested).Select(l => l.Name));
+        this.Log(
+            $"[Heartbeat] still polling. ORB phase={this.phase} high={this.orbHigh:0.##} low={this.orbLow:0.##} "
+            + $"mid={this.orbMidpoint:0.##}. Untested session levels: {(untested.Length > 0 ? untested : "none")}.",
+            StrategyLoggingLevel.Trading);
     }
 
     // ---- startup reconstruction ------------------------------------------------------------------
@@ -551,6 +622,10 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         {
             if (!TryReadBar(h, i, out var bar)) continue;
 
+            // Unconditional, every closed 1-min bar, regardless of phase — the EMA has to already
+            // be current whenever a rejection signal fires, not computed on demand from that point.
+            this.UpdateEma1m(bar.Close);
+
             if (this.phase == OrbPhase.AwaitingRejection)
                 this.ProcessClosed1mBar(bar);
 
@@ -559,6 +634,37 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         }
 
         this.barsSeen1m = closedUpTo;
+    }
+
+    // ---- 9 EMA confluence (operator's own ask, 2026-10-06, after a session-level rejection short
+    // got stopped out going into a rally): "there wasnt enough confluence to determine the actual
+    // short lets add in the closure below the 9ema as a confluence to show the direction is
+    // actually changing." Applied to every "wick-into-the-level, close-back-through" rejection
+    // entry (ORB midpoint rejection, session-level reject, session-level pullback-reject) — NOT
+    // to the ORB reversal-breakout play, which already requires a full 5-min close beyond the
+    // entire opposite side of the box, a materially stronger confirmation on its own.
+
+    private double? ema9;
+
+    private void UpdateEma1m(double close)
+    {
+        if (this.EmaPeriod <= 0) return;
+
+        var multiplier = 2.0 / (this.EmaPeriod + 1);
+        this.ema9 = this.ema9 is { } prev ? ((close - prev) * multiplier) + prev : close;
+    }
+
+    /// <summary>True when the EMA confluence isn't required, or the given side's own direction is
+    /// actually confirmed by it (a Buy needs the close above the EMA; a Sell needs it below).
+    /// Degrades to "not yet confirmed" (false) rather than "skip the check" if no EMA value exists
+    /// yet (e.g. right after attach, before enough 1-min bars have closed) — a missing confluence
+    /// reading should never be treated as a passing one.</summary>
+    private bool EmaConfirms(Side side, double closePrice)
+    {
+        if (!this.EmaConfluenceEnabled) return true;
+        if (this.ema9 is not { } ema) return false;
+
+        return side == Side.Buy ? closePrice > ema : closePrice < ema;
     }
 
     private static bool TryReadBar(HistoricalData data, int index, out Ohlc bar)
@@ -676,22 +782,42 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         {
             var wickedIn = bar.Low <= zoneTop;
             var closedBackThrough = bar.Close > this.orbMidpoint;
-            if (wickedIn && closedBackThrough)
+            if (wickedIn && closedBackThrough && this.EmaConfirms(Side.Buy, bar.Close))
             {
-                this.Log($"[ORB] 1-min rejection confirmed — wicked to {bar.Low:0.##}, closed back above the midpoint at {bar.Close:0.##}. Entering long.", StrategyLoggingLevel.Trading);
+                this.Log($"[ORB] 1-min rejection confirmed — wicked to {bar.Low:0.##}, closed back above the midpoint at {bar.Close:0.##} (above the {this.EmaPeriod}-EMA). Entering long.", StrategyLoggingLevel.Trading);
                 this.EnterTrade(Side.Buy, bar.Close);
                 this.phase = OrbPhase.DoneForDay; // one trade per day, regardless of outcome
+                return;
+            }
+
+            // FOUND 2026-10-06 ("since the retest already played out it should not enter again
+            // if it comes back down and touches it again — that break and retest already played
+            // out for today") — ONE retest opportunity per breakout. Once a bar's CLOSE has
+            // fully left the (now box-wide) zone without having confirmed a rejection, this
+            // attempt is resolved — stop watching rather than stay armed for an unrelated, later
+            // touch of the same box.
+            if (bar.Close < zoneBottom || bar.Close > zoneTop)
+            {
+                this.Log($"[ORB] retest attempt resolved without a confirmed rejection (close {bar.Close:0.##} left the zone {zoneBottom:0.##}-{zoneTop:0.##}) — done watching for today.", StrategyLoggingLevel.Trading);
+                this.phase = OrbPhase.DoneForDay;
             }
         }
         else
         {
             var wickedIn = bar.High >= zoneBottom;
             var closedBackThrough = bar.Close < this.orbMidpoint;
-            if (wickedIn && closedBackThrough)
+            if (wickedIn && closedBackThrough && this.EmaConfirms(Side.Sell, bar.Close))
             {
-                this.Log($"[ORB] 1-min rejection confirmed — wicked to {bar.High:0.##}, closed back below the midpoint at {bar.Close:0.##}. Entering short.", StrategyLoggingLevel.Trading);
+                this.Log($"[ORB] 1-min rejection confirmed — wicked to {bar.High:0.##}, closed back below the midpoint at {bar.Close:0.##} (below the {this.EmaPeriod}-EMA). Entering short.", StrategyLoggingLevel.Trading);
                 this.EnterTrade(Side.Sell, bar.Close);
                 this.phase = OrbPhase.DoneForDay; // one trade per day, regardless of outcome
+                return;
+            }
+
+            if (bar.Close < zoneBottom || bar.Close > zoneTop)
+            {
+                this.Log($"[ORB] retest attempt resolved without a confirmed rejection (close {bar.Close:0.##} left the zone {zoneBottom:0.##}-{zoneTop:0.##}) — done watching for today.", StrategyLoggingLevel.Trading);
+                this.phase = OrbPhase.DoneForDay;
             }
         }
     }
@@ -719,11 +845,22 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.Log($"[ORB] range captured: high={this.orbHigh:0.##} low={this.orbLow:0.##} mid={this.orbMidpoint:0.##} range={range:0.##} pts. Watching for a breakout.", StrategyLoggingLevel.Trading);
     }
 
+    /// <summary>FOUND 2026-10-06 ("it played out perfect on the retest of the orb but this was
+    /// never actually placed an order for the long... we need to show a retest of the orb not
+    /// just at the 50% mark") — a live pullback touched well into the box (not just the tight
+    /// midpoint+/-tolerance band this used to return) with a clear 1-min rejection, but
+    /// `CheckRetestTouch` never armed because the touch never reached the narrow zone. Widened to
+    /// the WHOLE box (orbLow..orbHigh), with `RetestZoneTolerancePercent` repurposed as a small
+    /// buffer BEYOND the box's own edges rather than a band around the midpoint — "a retest of
+    /// the ORB" now means anywhere in the original range, not specifically its center. The
+    /// rejection confirmation itself still references the midpoint as the directional reclaim
+    /// line (see ProcessClosed1mBar) — only how FAR price has to come back now follows the
+    /// operator's own broader definition.</summary>
     private (double Bottom, double Top) RetestZone()
     {
         var range = this.orbHigh - this.orbLow;
         var tolerance = range * (this.RetestZoneTolerancePercent / 100.0);
-        return (this.orbMidpoint - tolerance, this.orbMidpoint + tolerance);
+        return (this.orbLow - tolerance, this.orbHigh + tolerance);
     }
 
     private void CheckRetestTouch(Ohlc bar)
@@ -867,9 +1004,9 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             case LevelPhase.AwaitingReaction:
                 if (level.IsHighLevel)
                 {
-                    if (bar.High >= level.Price - this.LevelTouchTolerancePoints && bar.Close < level.Price)
+                    if (bar.High >= level.Price - this.LevelTouchTolerancePoints && bar.Close < level.Price && this.EmaConfirms(Side.Sell, bar.Close))
                     {
-                        this.Log($"[Session] {level.Name} rejection confirmed — wicked to {bar.High:0.##}, closed back below {level.Price:0.##}. Entering short.", StrategyLoggingLevel.Trading);
+                        this.Log($"[Session] {level.Name} rejection confirmed — wicked to {bar.High:0.##}, closed back below {level.Price:0.##} (below the {this.EmaPeriod}-EMA). Entering short.", StrategyLoggingLevel.Trading);
                         this.EnterTrade(Side.Sell, bar.Close);
                         level.Phase = LevelPhase.Idle;
                     }
@@ -881,9 +1018,9 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
                 }
                 else
                 {
-                    if (bar.Low <= level.Price + this.LevelTouchTolerancePoints && bar.Close > level.Price)
+                    if (bar.Low <= level.Price + this.LevelTouchTolerancePoints && bar.Close > level.Price && this.EmaConfirms(Side.Buy, bar.Close))
                     {
-                        this.Log($"[Session] {level.Name} rejection confirmed — wicked to {bar.Low:0.##}, closed back above {level.Price:0.##}. Entering long.", StrategyLoggingLevel.Trading);
+                        this.Log($"[Session] {level.Name} rejection confirmed — wicked to {bar.Low:0.##}, closed back above {level.Price:0.##} (above the {this.EmaPeriod}-EMA). Entering long.", StrategyLoggingLevel.Trading);
                         this.EnterTrade(Side.Buy, bar.Close);
                         level.Phase = LevelPhase.Idle;
                     }
@@ -898,18 +1035,18 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             case LevelPhase.AwaitingPullback:
                 if (level.IsHighLevel)
                 {
-                    if (bar.Low <= level.Price + this.PullbackTolerancePoints && bar.Close > level.Price)
+                    if (bar.Low <= level.Price + this.PullbackTolerancePoints && bar.Close > level.Price && this.EmaConfirms(Side.Buy, bar.Close))
                     {
-                        this.Log($"[Session] {level.Name} pullback rejection confirmed — wicked to {bar.Low:0.##}, closed back above {level.Price:0.##}. Following the breakout long.", StrategyLoggingLevel.Trading);
+                        this.Log($"[Session] {level.Name} pullback rejection confirmed — wicked to {bar.Low:0.##}, closed back above {level.Price:0.##} (above the {this.EmaPeriod}-EMA). Following the breakout long.", StrategyLoggingLevel.Trading);
                         this.EnterTrade(Side.Buy, bar.Close);
                         level.Phase = LevelPhase.Idle;
                     }
                 }
                 else
                 {
-                    if (bar.High >= level.Price - this.PullbackTolerancePoints && bar.Close < level.Price)
+                    if (bar.High >= level.Price - this.PullbackTolerancePoints && bar.Close < level.Price && this.EmaConfirms(Side.Sell, bar.Close))
                     {
-                        this.Log($"[Session] {level.Name} pullback rejection confirmed — wicked to {bar.High:0.##}, closed back below {level.Price:0.##}. Following the breakout short.", StrategyLoggingLevel.Trading);
+                        this.Log($"[Session] {level.Name} pullback rejection confirmed — wicked to {bar.High:0.##}, closed back below {level.Price:0.##} (below the {this.EmaPeriod}-EMA). Following the breakout short.", StrategyLoggingLevel.Trading);
                         this.EnterTrade(Side.Sell, bar.Close);
                         level.Phase = LevelPhase.Idle;
                     }
