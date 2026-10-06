@@ -1,14 +1,19 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Globalization;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using FinchLite;
 using TradingPlatform.BusinessLayer;
 
-namespace finchDomScalpStrategy;
+namespace FinchDomScalpStrategyBackup;
+
+// FROZEN BACKUP, created 2026-10-04 — a snapshot of the live `finchDomScalpStrategy` taken right
+// before adding the market-structure entry gate (the "already broken structure" filter using
+// SwingTracker's LastSwingHigh/LastSwingLow). Exists purely so the operator can load this one back
+// up if the structure-filter experiment doesn't work out — not intended to be run side by side with
+// the live strategy. Renamed (class/namespace/StrategyTag/display Name) so Quantower treats it as a
+// genuinely separate script, not a second copy of the same one.
 
 /// <summary>
 /// "i wanna make this into a strategy now that i can run in quantower were it plays off the
@@ -366,9 +371,9 @@ namespace finchDomScalpStrategy;
 /// count is "near" on a wide swing target but triggers almost immediately on a tight scalp one. See
 /// `CheckNearLevelPushback`.
 /// </summary>
-public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentSymbol
+public sealed class FinchDomScalpStrategyBackup : Strategy, ICurrentAccount, ICurrentSymbol
 {
-    private const string StrategyTag = "FinchDomScalp";
+    private const string StrategyTag = "FinchDomScalpBackup";
 
     // ---- instrument/account ---------------------------------------------------------------
 
@@ -452,30 +457,13 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("Fallback target if nothing qualifies ahead (ticks)", 22, 1, 100000, 1, 0)]
     public int FallbackTargetTicks { get; set; }
 
-    /// <summary>FOUND 2026-10-05 ("even if we scalp for like 15 - 20$ wins makes the strategy a true
-    /// scalping strategy and more profitable than what we have going right now") — see
-    /// `TryComputeTarget`'s own doc comment for the clamp mechanics. 0 = uncapped (the original,
-    /// go-wherever-the-level-is behavior). Default 40 ticks = $20 on MNQ, matching the operator's own
-    /// number. Interacts with <see cref="MinRewardRiskPercent"/>: capping reward this low also
-    /// forces stop distance to stay proportionate for a trade to still clear the R:R floor, without
-    /// a second explicit stop cap.</summary>
-    [InputParameter("Maximum target distance (ticks, 0=uncapped)", 87, 0, 100000, 1, 0)]
-    public int MaxTargetDistanceTicks { get; set; }
-
     /// <summary>FOUND 2026-09-28 ("what is this risk to reward here this is crazy") — a live trade
     /// risked 84 points to make 15.25 (~1:5.5 AGAINST the trade) after a stale swing-low reference
     /// survived `ComputeSwingStop`'s own "correct side" check by being technically valid but
     /// absurdly far away. Checked as the LAST gate before any entry, in both pathways, via
     /// `PassesRiskRewardFilter`: the reward must be worth at least this percentage of the risk
     /// being taken, regardless of what produced either number. 100 = require at least 1:1. 0
-    /// disables the check entirely.
-    ///
-    /// RAISED 2026-10-05, 100 → 120 — an overnight review found the two biggest losses of the
-    /// session both cleared the bare 1:1 floor with almost no margin (1.06:1 and exactly 1.0:1) and
-    /// went straight to a full stop; a modest floor increase adds real margin against exactly that
-    /// "technically passes, no real edge" case. Not raised further than 120, since
-    /// <see cref="MaxTargetDistanceTicks"/>'s own new cap already does most of the work forcing
-    /// stops to stay proportionate.</summary>
+    /// disables the check entirely.</summary>
     [InputParameter("Minimum reward:risk (%, 0=off)", 25, 0, 100000, 1, 0)]
     public int MinRewardRiskPercent { get; set; }
 
@@ -541,32 +529,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
     // ---- risk management — same shape as directionAbsorptionScalpStrategy's own -------------
 
-    /// <summary>CHANGED 2026-10-05, 0 (off) → 450 — "i want this strategy to pass evaluations for
-    /// me," then the operator gave the real numbers: a $25k eval account, $600 real daily drawdown
-    /// limit, $1,000 real (trailing) max loss limit. $450 is 75% of the real $600 — real safety
-    /// margin below the actual rule, not a guess. IMPORTANT, 2026-10-05: this is now checked against
-    /// the REAL, LIVE account balance (<see cref="IsDailyLossLimitBreached"/>), not the strategy's
-    /// own internal `dailyPnl` counter — that counter resets to ZERO on every strategy RESTART, not
-    /// just at the start of a new trading day, which is a real gap given how often this strategy
-    /// gets redeployed mid-session. The balance-based check is immune to that.</summary>
     [InputParameter("Max daily loss ($, 0=off)", 30, 0, 100000, 50, 0)]
     public int MaxDailyLoss { get; set; }
-
-    /// <summary>ADDED 2026-10-05 — "i have currently a 25k account with a 600 daily draw down and a
-    /// 1k max loss limit and the current max loss limit is set to 24,108.04." That figure is a
-    /// TRAILING floor (it ratchets up with new account highs — the operator's own numbers imply a
-    /// peak balance around $25,108.04 so far), and this codebase has no confirmed, documented way to
-    /// reconstruct a prop firm's own exact ratchet formula (does it use intraday or EOD peaks? does
-    /// it cap at the starting balance? neither is knowable from here). Rather than guess at
-    /// something this consequential, this is a DIRECTLY-SET hard floor on the REAL, LIVE
-    /// `Account.Balance` — the operator updates it themselves whenever their own firm dashboard
-    /// shows the real floor has moved, with their own safety margin built in. 0 = off. STICKY once
-    /// breached (<see cref="IsAccountFloorBreached"/>) — does NOT auto-reset at the next day
-    /// boundary, and survives a strategy restart (persisted to disk), because breaching a real
-    /// trailing-drawdown floor generally means the evaluation itself is over, not just "pause for
-    /// today."</summary>
-    [InputParameter("Account balance floor ($, 0=off, STICKY once breached)", 92, 0, 1000000, 1, 2)]
-    public double AccountBalanceFloor { get; set; }
 
     /// <summary>FOUND 2026-09-30 ("lets add in a feature to set a profit target and once its met on
     /// the day it stops trading") — the profit-side mirror of <see cref="MaxDailyLoss"/>. Checked in
@@ -585,32 +549,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
     [InputParameter("Cooldown between entries (bars)", 33, 0, 500, 1, 0)]
     public int MinBarsBetweenEntries { get; set; }
-
-    /// <summary>FOUND 2026-10-05, overnight review ("down 300") — the SAME resting order at 31200
-    /// triggered 7 separate absorption-pathway entries over ~3 hours as it kept absorbing more size
-    /// without ever actually holding, net -$87 from that one level alone. The EXACT repeated-
-    /// re-shorting failure mode already documented once before in this file's own history
-    /// (2026-09-29, a different level). Tracked per EXACT resting-level price
-    /// (<see cref="lossesPerLevel"/>), reset daily — once a specific level has produced this many
-    /// LOSING entries this session, <see cref="TryEnter"/> stops trading that exact level for the
-    /// rest of the day (other levels are unaffected). 0 disables the check.</summary>
-    [InputParameter("Max losses per resting level (0=off)", 88, 0, 100, 1, 0)]
-    public int MaxLossesPerLevel { get; set; }
-
-    /// <summary>FOUND 2026-10-05, same overnight review — a classic risk-of-ruin control: once this
-    /// many trades in a row have lost (tracked across BOTH pathways, reset on any win or a new EST
-    /// session), new entries pause for <see cref="ConsecutiveLossCooldownMinutes"/> rather than
-    /// continuing to feed a bad stretch. Time-based, not trade-count-based, so it doesn't matter how
-    /// many (or few) qualifying setups appear during the pause — it's a genuine cooldown, not just a
-    /// skip-the-next-N-signals counter.</summary>
-    [InputParameter("Consecutive-loss cooldown: enable", 89)]
-    public bool ConsecutiveLossCooldownEnabled { get; set; }
-
-    [InputParameter("Consecutive-loss cooldown: losses to trigger", 90, 1, 100, 1, 0)]
-    public int ConsecutiveLossThreshold { get; set; }
-
-    [InputParameter("Consecutive-loss cooldown: pause duration (minutes)", 91, 1, 1440, 1, 0)]
-    public int ConsecutiveLossCooldownMinutes { get; set; }
 
     /// <summary>FOUND 2026-09-28 ("i also need the ability to choose to trade in asia and london
     /// and ny sessions so i need to be able to turn on and off sessions") — replaces the old single
@@ -828,37 +766,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("Trend filter: rolling window (bars)", 65, 1, 200, 1, 0)]
     public int TrendDeltaLookbackBars { get; set; }
 
-    /// <summary>FOUND 2026-10-04 ("i feel like purely trading off the poc can be dangourus without
-    /// really looking at the market structure of the chart at that given time i have seen us try to
-    /// reverse a trade a few time just for the price to keep going in the direction so we are not
-    /// following the momentum of the price") — a GENUINELY DIFFERENT question from
-    /// <see cref="TrendFilterEnabled"/>'s own: that one sums buy/sell VOLUME over a rolling window,
-    /// which can sit flat or even disagree while price is quietly grinding to new highs/lows on an
-    /// absorption-driven move with no single aggressive push. This checks actual PRICE STRUCTURE
-    /// instead: a SELL is blocked if current price has already traded ABOVE the last CONFIRMED swing
-    /// high — real evidence the market already broke to new ground in the opposite direction, not
-    /// just chop. A BUY is blocked the mirror way, against the last confirmed swing low. No swing
-    /// confirmed yet this run passes through (same "insufficient data doesn't block" convention
-    /// <see cref="PassesTrendFilter"/> already uses), as does the fully-off toggle.
-    ///
-    /// REVISED same day, same conversation — the FIRST version reused the chart's own 1-minute
-    /// `SwingTracker` (the one built for stop placement), fed by `PocSwingPivotLookback` (default 3)
-    /// on 1-minute bars: a pivot that only needs ~7 minutes to confirm, which is noise-level, not
-    /// genuine structure — live evidence caught it blocking BUY signals on a noisy local dip RIGHT
-    /// BEFORE a real rally. Structure now runs its OWN dedicated higher-timeframe series and its OWN
-    /// `SwingTracker` instance (<see cref="structureSwingTracker"/>), completely independent of the
-    /// stop-placement one — <see cref="StructureFilterPeriod"/> picks the timeframe.</summary>
-    [InputParameter("Structure filter: enable (blocks fading an already-broken swing)", 81)]
-    public bool StructureFilterEnabled { get; set; }
-
-    /// <summary>The higher timeframe structure swings are read from — deliberately NOT the chart's
-    /// own <see cref="Period"/> (see <see cref="StructureFilterEnabled"/>'s own "REVISED" note for
-    /// why 1-minute swings turned out to be noise, not structure). Own dedicated `HistoricalData`
-    /// series and own `SwingTracker`, same pattern as the 5m/15m POC engines' own dedicated series —
-    /// configurable rather than hard-coded so this can be tuned live without a rebuild.</summary>
-    [InputParameter("Structure filter: timeframe", 82)]
-    public Period StructureFilterPeriod { get; set; }
-
     // ---- diagnostics — see the class doc comment's "OBSERVABILITY" section ------------------
 
     /// <summary>FOUND 2026-09-29 ("is there a way to show logs on if some of the conditions are
@@ -949,37 +856,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     [InputParameter("Near-level pushback: also apply to stop side (edges-then-recovers)", 80)]
     public bool NearStopPushbackEnabled { get; set; }
 
-    /// <summary>FOUND 2026-10-04 ("it should be looking at the dom for the levels its rejecting off
-    /// of and know when a trade that is in profit is dying out" — confirmed live against a real
-    /// trade: "i saw there was a larger resting order at the level it topped at and reversed") — a
-    /// FOURTH, independent risk mechanism. Genuinely different trigger from
-    /// <see cref="NearLevelPushbackEnabled"/>'s own target-side check: that one only engages in the
-    /// final <see cref="NearLevelPercent"/>% stretch toward the target, so a trade that peaks well
-    /// short of the target (the live example: +$50, nowhere near a 25%-from-target band on a wide
-    /// swing-based target) gets no protection at all. This instead reads the SAME
-    /// `RestingOrderEngine` levels <see cref="TryEnter"/> already scans for entries, now pointed at
-    /// managing an OPEN position: once in profit beyond <see cref="ProfitDecayMinProfitTicks"/>, if a
-    /// large opposing resting order (ask wall for a long, bid wall for a short — size at or above
-    /// <see cref="AbsorptionStrongContracts"/>, the same "what counts as real" threshold absorption
-    /// confluence already uses) sits within <see cref="ProfitDecayLevelProximityTicks"/> of the best
-    /// price this trade has reached so far, AND price has since pulled back off that peak by at
-    /// least <see cref="ProfitDecayPullbackTicks"/>, the DOM is telling you that level capped the
-    /// move — close now rather than wait for a fixed percentage-of-distance threshold that might
-    /// never trigger in time. Shares <see cref="bestPriceSinceEntry"/> with the near-level-pushback
-    /// feature, now tracked by its own always-on <see cref="UpdatePriceExtremesSinceEntry"/> instead
-    /// of only while that OTHER feature happened to be enabled.</summary>
-    [InputParameter("Profit momentum dying: enable", 83)]
-    public bool ProfitDecayEnabled { get; set; }
-
-    [InputParameter("Profit momentum dying: minimum profit to arm (ticks)", 84, 1, 100000, 1, 0)]
-    public int ProfitDecayMinProfitTicks { get; set; }
-
-    [InputParameter("Profit momentum dying: opposing level proximity to peak (ticks)", 85, 1, 100000, 1, 0)]
-    public int ProfitDecayLevelProximityTicks { get; set; }
-
-    [InputParameter("Profit momentum dying: pullback off peak to trigger close (ticks)", 86, 1, 100000, 1, 0)]
-    public int ProfitDecayPullbackTicks { get; set; }
-
     // ---- lifecycle state --------------------------------------------------------------------
 
     private Timer? pollTimer;
@@ -997,14 +873,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// <summary>Runs UNCONDITIONALLY, independent of whether either POC feature is enabled — see
     /// its own class doc comment for why stop placement can't depend on a feature toggle.</summary>
     private SwingTracker? swingTracker;
-
-    /// <summary>The structure filter's OWN dedicated series/tracker — see
-    /// <see cref="StructureFilterPeriod"/>'s own doc comment for why this is deliberately separate
-    /// from <see cref="swingTracker"/> above (that one stays 1-minute, for stops; this one runs
-    /// whatever higher timeframe the operator configures, for the structure filter only).</summary>
-    private SwingTracker? structureSwingTracker;
-    private HistoricalData? structureHistory;
-    private int structureBarsSeen;
     private readonly ConcurrentQueue<(double Price, double Size)> pocTickQueue = new();
 
     /// <summary>Runs only when <see cref="DeltaFilterEnabled"/> is on — unlike the swing tracker,
@@ -1038,21 +906,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
     private double pendingStopPrice;
     private double pendingTargetPrice;
-
-    /// <summary>The resting-order PRICE this trade was entered against, if it came from the
-    /// absorption pathway — null for a POC-rejection entry (no "level" to blame). Read once, at
-    /// trade close, by <see cref="Core_TradeAdded"/> to credit/blame <see cref="lossesPerLevel"/>.
-    /// </summary>
-    private double? pendingEntryLevelPrice;
-
-    /// <summary>See <see cref="MaxLossesPerLevel"/>'s own doc comment. Keyed by the EXACT resting-
-    /// level price (DOM prices are tick-quantized, so exact `double` equality is safe here — the
-    /// same physical order sits at the same price every poll it's observed). Reset daily.</summary>
-    private readonly Dictionary<double, int> lossesPerLevel = new();
-
-    /// <summary>See <see cref="ConsecutiveLossCooldownEnabled"/>'s own doc comment.</summary>
-    private int consecutiveLosses;
-    private DateTime? cooldownUntilUtc;
 
     /// <summary>FOUND 2026-09-27 (a runaway duplicate-order storm — roughly ten protective
     /// stop/target pairs placed and cancelled within ~100ms on a live account, several rejected
@@ -1097,23 +950,15 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     private int lastResetDay;
     private int lastTradeSessionDay;
 
-    /// <summary>See <see cref="AccountBalanceFloor"/>'s own doc comment. `balanceDayKey`/
-    /// `dayStartBalance` are the in-memory cache of what's on disk — reloaded (or re-initialized for
-    /// a new day) by <see cref="EnsureDailyBalanceState"/> at most once per EST day per restart, not
-    /// every poll. `accountFloorBreached` is sticky — carried forward across day boundaries AND
-    /// restarts, never cleared automatically.</summary>
-    private int balanceDayKey = -1;
-    private double dayStartBalance;
-    private bool accountFloorBreached;
-
-    public finchDomScalpStrategy() : base()
+    public FinchDomScalpStrategyBackup() : base()
     {
-        this.Name = "finchDomScalpStrategy";
+        this.Name = "FinchDomScalpStrategy-Backup";
         this.Description =
-            "Trades Finch-Lite's own DOM/absorption/unfinished-auction levels, confirmed by an "
-            + "aligned inverse fair value gap. NO dry-run, NO sim/eval confirmation gate -- "
-            + "places real orders immediately once attached and enabled. Attach to a sim/eval "
-            + "account yourself; nothing in this code checks that for you.";
+            "FROZEN BACKUP (2026-10-04) of finchDomScalpStrategy, taken before the market-structure "
+            + "entry gate was added. Trades Finch-Lite's own DOM/absorption/unfinished-auction "
+            + "levels, confirmed by an aligned inverse fair value gap. NO dry-run, NO sim/eval "
+            + "confirmation gate -- places real orders immediately once attached and enabled. "
+            + "Attach to a sim/eval account yourself; nothing in this code checks that for you.";
 
         this.Period = Period.MIN1;
         this.StartPoint = Core.TimeUtils.DateTimeUtcNow.AddDays(-5);
@@ -1130,8 +975,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.StopBufferTicks = 8;
         this.MinTargetDistanceTicks = 10;
         this.FallbackTargetTicks = 40;
-        this.MaxTargetDistanceTicks = 40;
-        this.MinRewardRiskPercent = 120;
+        this.MinRewardRiskPercent = 100;
 
         this.BreakevenEnabled = true;
         this.BreakevenTriggerRiskPercent = 50;
@@ -1155,8 +999,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         this.TrendFilterEnabled = true;
         this.TrendDeltaLookbackBars = 60;
-        this.StructureFilterEnabled = true;
-        this.StructureFilterPeriod = Period.MIN5;
 
         this.HeartbeatIntervalMinutes = 15;
 
@@ -1167,21 +1009,12 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.NearLevelPercent = 25;
         this.PushbackClosePercent = 25;
         this.NearStopPushbackEnabled = false;
-        this.ProfitDecayEnabled = true;
-        this.ProfitDecayMinProfitTicks = 20;
-        this.ProfitDecayLevelProximityTicks = 10;
-        this.ProfitDecayPullbackTicks = 10;
 
-        this.MaxDailyLoss = 450;
-        this.AccountBalanceFloor = 24200.00;
+        this.MaxDailyLoss = 0;
         this.DailyProfitTarget = 0;
         this.MaxDrawdown = 2000;
         this.MaxTradesPerSession = 10;
         this.MinBarsBetweenEntries = 5;
-        this.MaxLossesPerLevel = 2;
-        this.ConsecutiveLossCooldownEnabled = true;
-        this.ConsecutiveLossThreshold = 4;
-        this.ConsecutiveLossCooldownMinutes = 30;
 
         this.SessionFilterEnabled = false;
         this.AsiaSessionEnabled = true;
@@ -1236,10 +1069,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.pendingStopPrice = 0;
         this.pendingTargetPrice = 0;
         this.pendingRiskDistance = 0;
-        this.pendingEntryLevelPrice = null;
-        this.lossesPerLevel.Clear();
-        this.consecutiveLosses = 0;
-        this.cooldownUntilUtc = null;
         this.protectiveOrdersPlaced = false;
         this.breakevenMoved = false;
         this.bestPriceSinceEntry = null;
@@ -1346,25 +1175,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         // POC feature is enabled (see SwingTracker's own class doc comment).
         this.swingTracker = new SwingTracker(this.PocSwingPivotLookback);
 
-        // The structure filter's own, separate, higher-timeframe swing reference — see
-        // StructureFilterPeriod's own doc comment for why this isn't the same tracker as above.
-        // Best-effort, same non-fatal try/catch shape as the 5m/15m POC series: a connector unable
-        // to supply this timeframe shouldn't take the rest of the strategy down with it.
-        if (this.StructureFilterEnabled)
-        {
-            try
-            {
-                var lookback = Core.TimeUtils.DateTimeUtcNow.AddDays(-Math.Max(1, this.PocLookbackDays));
-                this.structureHistory = this.CurrentSymbol.GetHistory(this.StructureFilterPeriod, this.CurrentSymbol.HistoryType, lookback);
-                this.structureSwingTracker = new SwingTracker(this.PocSwingPivotLookback);
-                this.structureBarsSeen = 0;
-            }
-            catch (Exception ex)
-            {
-                this.Log($"Structure filter's own timeframe unavailable: {ex.GetType().Name}: {ex.Message}", StrategyLoggingLevel.Error);
-            }
-        }
-
         if (this.DeltaFilterEnabled || this.TrendFilterEnabled)
             this.deltaTracker = new DeltaTracker(this.Period.Duration);
 
@@ -1438,10 +1248,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.poc5mEngine = null;
         this.pocTickQueue.Clear();
         this.swingTracker = null;
-        this.structureHistory?.Dispose();
-        this.structureHistory = null;
-        this.structureSwingTracker = null;
-        this.structureBarsSeen = 0;
         this.deltaTracker = null;
         this.deltaTickQueue.Clear();
     }
@@ -1533,7 +1339,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         this.CheckSessionReset();
         this.CheckRiskLimits();
         this.CheckBreakeven();
-        this.UpdatePriceExtremesSinceEntry();
         this.CheckNearLevelPushback();
         this.CheckHeartbeat();
 
@@ -1653,7 +1458,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         // ---- 3. drain the dedicated 15m POC series and every queued trade print ----
         this.DrainPoc();
-        this.DrainStructureSwings();
 
         // ---- 4. evaluate entries — TWO independent pathways since 2026-09-29 (see the class doc
         // comment's "TWO INDEPENDENT PATHWAYS" section): the standalone DOM/absorption pathway
@@ -1664,7 +1468,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         if (double.IsNaN(midPrice) || tickSize <= 0)
             return;
 
-        this.CheckProfitMomentumDying(levels, tickSize);
         this.TryEnter(levels, fvg.Active, midPrice, tickSize);
 
         if (latestClosedBar is { } rejectionBar)
@@ -1718,25 +1521,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         }
     }
 
-    /// <summary>Feeds the structure filter's own dedicated higher-timeframe series into its own
-    /// `SwingTracker` — same own-cursor/own-history shape as <see cref="DrainPoc"/>'s 15m/5m blocks,
-    /// deliberately kept separate from that method since this isn't a POC concern at all.</summary>
-    private void DrainStructureSwings()
-    {
-        if (!this.StructureFilterEnabled || this.structureHistory is not { } sh || this.structureSwingTracker is not { } tracker || sh.Count <= 1)
-            return;
-
-        var closedUpTo = sh.Count - 1;
-
-        for (var i = this.structureBarsSeen; i < closedUpTo; i++)
-        {
-            if (TryReadBar(sh, i, out var bar))
-                tracker.FeedBar(bar);
-        }
-
-        this.structureBarsSeen = closedUpTo;
-    }
-
     private void ReportPollFault(string reason)
     {
         if (string.Equals(this.lastPollFault, reason, StringComparison.Ordinal))
@@ -1787,11 +1571,9 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         if (!this.AbsorptionEntryEnabled) return;
         if (this.waitOpenPosition || this.waitClosePositions) return;
         if (this.dailyLimitHit || this.profitTargetHit || this.drawdownLimitHit || this.tradesLimitHit) return;
-        if (this.accountFloorBreached) return; // sticky, real-account-balance based — see AccountBalanceFloor's own doc comment
         if (this.MyPositions().Any()) return;
         if (!this.IsInAllowedSession()) return;
         if (this.IsInNyOpenBlackout()) return;
-        if (this.cooldownUntilUtc is { } cooldownUntil && Core.TimeUtils.DateTimeUtcNow < cooldownUntil) return;
         if (this.barCounter - this.lastEntryBarIndex < this.MinBarsBetweenEntries) return;
 
         var proximity = this.IfvgProximityTicks * tickSize;
@@ -1800,13 +1582,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         {
             if (level.Current < this.MinLevelSize) continue;
             if (level.Absorbed < this.AbsorptionStrongContracts) continue;
-
-            // See MaxLossesPerLevel's own doc comment — the exact 2026-10-05 overnight pattern this
-            // closes off: the same resting order triggering entry after entry without ever holding.
-            if (this.MaxLossesPerLevel > 0
-                && this.lossesPerLevel.TryGetValue(level.Price, out var levelLosses)
-                && levelLosses >= this.MaxLossesPerLevel)
-                continue;
 
             var hasAlignedIfvg = ifvgZones.Any(z =>
                 z.IsBullish == level.IsBid
@@ -1831,12 +1606,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             {
                 var trendDelta = this.deltaTracker?.RollingDelta(this.TrendDeltaLookbackBars);
                 this.LogAbsorptionSignalSkipped(anchorLabel, side, $"trend filter ({this.TrendDeltaLookbackBars}-bar delta={trendDelta:F0} against this side)");
-                continue;
-            }
-
-            if (!this.PassesStructureFilter(side))
-            {
-                this.LogAbsorptionSignalSkipped(anchorLabel, side, "structure filter (price already broke the opposing swing)");
                 continue;
             }
 
@@ -1873,7 +1642,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
             var anchorDescription = $"{anchorLabel} unfinished={level.IsUnfinished}";
 
-            this.PlaceEntry(side, stopPrice, targetPrice, anchorDescription, targetSource, level.Price);
+            this.PlaceEntry(side, stopPrice, targetPrice, anchorDescription, targetSource);
             return; // one qualifying setup per poll — never stack multiple entries from one pass
         }
     }
@@ -1882,21 +1651,9 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// <see cref="LogPocSignalSkipped"/> — only called once a level has already cleared the
     /// absorption-size and aligned-IFVG bars, so a log here means something genuinely close to a
     /// trade got blocked by delta/trend/R:R, not that a level merely existed somewhere.</summary>
-    private string? lastAbsorptionSkipReason;
-
-    /// <summary>FOUND 2026-10-05, overnight log review — unlike the POC pathway's own skip logging
-    /// (only ever evaluated once per newly-closed bar), this is reachable every poll, and a
-    /// persistent resting level blocked by the SAME reason for minutes at a time was re-logging the
-    /// identical line 4x/second — 26,703 lines in one session. De-duplicated the same way
-    /// `ReportPollFault` already avoids repeat noise: only logs when the message actually
-    /// changes.</summary>
     private void LogAbsorptionSignalSkipped(string anchorLabel, Side side, string reason)
     {
-        var message = $"[Signal skipped] {side} absorption setup off {anchorLabel} blocked: {reason}.";
-        if (string.Equals(this.lastAbsorptionSkipReason, message, StringComparison.Ordinal)) return;
-
-        this.lastAbsorptionSkipReason = message;
-        this.Log(message, StrategyLoggingLevel.Trading);
+        this.Log($"[Signal skipped] {side} absorption setup off {anchorLabel} blocked: {reason}.", StrategyLoggingLevel.Trading);
     }
 
     /// <summary>Nearest OPPOSING resting level or IFVG zone ahead of price in the trade's own
@@ -1944,35 +1701,12 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             primaryCandidates.Add((edge, "opposing IFVG zone"));
         }
 
-        // FOUND 2026-10-05 ("even if we scalp for like 15 - 20$ wins makes the strategy a true
-        // scalping strategy and more profitable than what we have going right now") — a real DOM/
-        // IFVG/POC level still has to exist and qualify (this function never invents a target), but
-        // the PRICE used is now capped at MaxTargetDistanceTicks from entry even when the level
-        // itself sits farther out. Deliberately a clamp, not a disqualification: the level's own
-        // direction/existence is still real evidence a move that way is plausible, it just doesn't
-        // need the FULL distance to a scalp. Pairs naturally with the existing R:R filter: capping
-        // reward this way also caps how wide a stop can be and still pass, without a second explicit
-        // stop cap.
-        // Returns the clamped price; the caller checks whether it actually changed anything to
-        // decide whether to append ", capped" to `source` (an out-param, which can't be touched
-        // from inside a local function).
-        double ClampToMaxDistance(double candidatePrice)
-        {
-            if (this.MaxTargetDistanceTicks <= 0) return candidatePrice; // 0 = uncapped
-
-            var maxDistance = this.MaxTargetDistanceTicks * tickSize;
-            var distance = Math.Abs(candidatePrice - price);
-            if (distance <= maxDistance) return candidatePrice;
-
-            return isLong ? price + maxDistance : price - maxDistance;
-        }
-
         var qualifiedPrimary = primaryCandidates.Where(c => Math.Abs(c.Price - price) >= minDistance).ToList();
         if (qualifiedPrimary.Count > 0)
         {
             var nearestPrimary = qualifiedPrimary.OrderBy(c => Math.Abs(c.Price - price)).First();
-            targetPrice = ClampToMaxDistance(nearestPrimary.Price);
-            source = targetPrice != nearestPrimary.Price ? $"{nearestPrimary.Source}, capped" : nearestPrimary.Source;
+            targetPrice = nearestPrimary.Price;
+            source = nearestPrimary.Source;
             return true;
         }
 
@@ -1994,8 +1728,8 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             return false;
 
         var nearestPoc = qualifiedPoc.OrderBy(c => Math.Abs(c.Price - price)).First();
-        targetPrice = ClampToMaxDistance(nearestPoc.Price);
-        source = targetPrice != nearestPoc.Price ? $"{nearestPoc.Source}, capped" : nearestPoc.Source;
+        targetPrice = nearestPoc.Price;
+        source = nearestPoc.Source;
         return true;
     }
 
@@ -2016,11 +1750,9 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         if (!this.PocCurrentMoveEnabled && !this.Poc5mEnabled && !this.Poc15mEnabled) return;
         if (this.waitOpenPosition || this.waitClosePositions) return;
         if (this.dailyLimitHit || this.profitTargetHit || this.drawdownLimitHit || this.tradesLimitHit) return;
-        if (this.accountFloorBreached) return; // sticky, real-account-balance based — see AccountBalanceFloor's own doc comment
         if (this.MyPositions().Any()) return;
         if (!this.IsInAllowedSession()) return;
         if (this.IsInNyOpenBlackout()) return;
-        if (this.cooldownUntilUtc is { } cooldownUntil && Core.TimeUtils.DateTimeUtcNow < cooldownUntil) return;
         if (this.barCounter - this.lastEntryBarIndex < this.MinBarsBetweenEntries) return;
 
         var buffer = this.PocRejectionBufferTicks * tickSize;
@@ -2086,12 +1818,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         {
             var trendDelta = this.deltaTracker?.RollingDelta(this.TrendDeltaLookbackBars);
             this.LogPocSignalSkipped(pocLabel, side, poc, $"trend filter ({this.TrendDeltaLookbackBars}-bar delta={trendDelta:F0} against this side)");
-            return false;
-        }
-
-        if (!this.PassesStructureFilter(side))
-        {
-            this.LogPocSignalSkipped(pocLabel, side, poc, "structure filter (price already broke the opposing swing)");
             return false;
         }
 
@@ -2206,26 +1932,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         if (side == Side.Buy && trendDelta < 0) return false;
         if (side == Side.Sell && trendDelta > 0) return false;
-
-        return true;
-    }
-
-    /// <summary>See <see cref="StructureFilterEnabled"/>'s own doc comment — a PRICE-STRUCTURE
-    /// hard block, independent of <see cref="PassesDeltaFilter"/>/<see cref="PassesTrendFilter"/>'s
-    /// own volume-based checks. Reads <see cref="swingTracker"/>'s own fractal pivots, already fed
-    /// every poll for stop placement — no new state to maintain.</summary>
-    private bool PassesStructureFilter(Side side)
-    {
-        if (!this.StructureFilterEnabled || this.structureSwingTracker is null) return true;
-
-        var currentPrice = this.CurrentSymbol?.Last ?? 0;
-        if (currentPrice <= 0) return true;
-
-        if (side == Side.Sell && this.structureSwingTracker.LastSwingHigh is { } swingHigh && currentPrice > swingHigh)
-            return false;
-
-        if (side == Side.Buy && this.structureSwingTracker.LastSwingLow is { } swingLow && currentPrice < swingLow)
-            return false;
 
         return true;
     }
@@ -2494,13 +2200,11 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// separate orders once <see cref="Core_PositionAdded"/> confirms the position is actually
     /// open (see the class doc comment's "SEPARATE STOP/TARGET ORDERS" section for why).</summary>
     private void PlaceEntry(
-        Side side, double stopPrice, double targetPrice, string anchorDescription, string targetSource,
-        double? entryLevelPrice = null)
+        Side side, double stopPrice, double targetPrice, string anchorDescription, string targetSource)
     {
         this.waitOpenPosition = true;
         this.pendingStopPrice = stopPrice;
         this.pendingTargetPrice = targetPrice;
-        this.pendingEntryLevelPrice = entryLevelPrice;
 
         this.Log(
             $"[Signal] {side} anchor={anchorDescription} "
@@ -2565,56 +2269,12 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         // pre-fill) closes that gap rather than trusting a price that's since moved on.
         var isLong = position.Side == Side.Buy;
         var tickSize = this.CurrentSymbol.TickSize;
-
-        // ADDED 2026-10-05 — an ADOPTED position (one this instance never itself signaled; see
-        // IsMyPosition's own "RELAXED FURTHER" doc comment for the incident this closes) leaves
-        // pendingStopPrice/pendingTargetPrice at their OnRun-reset default of 0. Left alone,
-        // EnforceMinStopDistance/EnforceMinTargetDistance would pass 0 straight through — it's
-        // "far enough" from the real fill to look like a valid, already-qualifying price — producing
-        // an absurd protective order at price ZERO. Given a sane fallback instead, straight from the
-        // real fill: the same MinStopDistanceTicks/FallbackTargetTicks shape TryEnter's own
-        // no-real-level-qualified fallback already uses.
-        if (this.pendingStopPrice == 0 && this.pendingTargetPrice == 0 && tickSize > 0)
-        {
-            this.pendingStopPrice = isLong
-                ? position.OpenPrice - (this.MinStopDistanceTicks * tickSize)
-                : position.OpenPrice + (this.MinStopDistanceTicks * tickSize);
-            this.pendingTargetPrice = isLong
-                ? position.OpenPrice + (this.FallbackTargetTicks * tickSize)
-                : position.OpenPrice - (this.FallbackTargetTicks * tickSize);
-            this.Log(
-                $"[Risk] ADOPTED a position this instance didn't itself open (comment mismatch, "
-                + $"matched by exact contract after a restart) — no real signal data to protect it "
-                + $"with, so placed a fallback stop ({this.MinStopDistanceTicks} ticks) and target "
-                + $"({this.FallbackTargetTicks} ticks) from its real fill instead.",
-                StrategyLoggingLevel.Trading);
-        }
-
         var stopPrice = tickSize > 0
             ? this.EnforceMinStopDistance(this.pendingStopPrice, position.OpenPrice, isLong, tickSize)
             : this.pendingStopPrice;
         var targetPrice = tickSize > 0
             ? this.EnforceMinTargetDistance(this.pendingTargetPrice, position.OpenPrice, isLong, tickSize)
             : this.pendingTargetPrice;
-
-        // FOUND 2026-10-05 ("this position never put a take profit") — root-caused via Serilog:
-        // the broker returned "Trading operation result: Success" for the limit order and even
-        // briefly flipped it to "Opened", then refused it ~2ms later with "Description: bad
-        // price". The entry/target pipeline anchors off `midPrice` (bid+ask midpoint, see
-        // TryEnter's own call site) which is off the 0.25 tick grid whenever the spread is an odd
-        // number of ticks — MaxTargetDistanceTicks's own clamp (`price + maxDistance`) then
-        // inherits that same fractional offset straight into the final order price (e.g.
-        // 31224.375, not a legal MNQ price). The strategy's own success log fired on the
-        // SYNCHRONOUS PlaceOrder result, well before the ASYNCHRONOUS broker refusal arrived, so
-        // it looked placed right up until it silently wasn't. Rounding to the tick grid HERE,
-        // right before either price reaches the broker, closes every upstream path at once
-        // (signal-computed, POC-computed, adopted-position fallback) rather than patching each
-        // one individually.
-        if (tickSize > 0)
-        {
-            stopPrice = Math.Round(stopPrice / tickSize, MidpointRounding.AwayFromZero) * tickSize;
-            targetPrice = Math.Round(targetPrice / tickSize, MidpointRounding.AwayFromZero) * tickSize;
-        }
 
         // Captured here, not at signal time — this is the trade's own REAL risk, used by
         // CheckBreakeven to scale its trigger instead of a fixed tick count (see
@@ -2812,41 +2472,16 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             StrategyLoggingLevel.Trading);
     }
 
-    /// <summary>Tracks the best price toward target and worst price toward stop reached since
-    /// entry. EXTRACTED 2026-10-04 out of <see cref="CheckNearLevelPushback"/> so it runs
-    /// UNCONDITIONALLY — previously this only updated when <see cref="NearLevelPushbackEnabled"/>
-    /// happened to be on, silently starving any OTHER feature that also needs these extremes (see
-    /// <see cref="CheckProfitMomentumDying"/>, which needs <see cref="bestPriceSinceEntry"/>
-    /// regardless of that unrelated toggle).</summary>
-    private void UpdatePriceExtremesSinceEntry()
-    {
-        var positions = this.MyPositions();
-        if (positions.Length == 0) return;
-
-        var position = positions[0]; // one position at a time, by design
-        var currentPrice = this.CurrentSymbol.Last;
-        if (currentPrice <= 0) return;
-
-        var isLong = position.Side == Side.Buy;
-
-        this.bestPriceSinceEntry = this.bestPriceSinceEntry is { } best
-            ? (isLong ? Math.Max(best, currentPrice) : Math.Min(best, currentPrice))
-            : currentPrice;
-        this.worstPriceSinceEntry = this.worstPriceSinceEntry is { } worst
-            ? (isLong ? Math.Min(worst, currentPrice) : Math.Max(worst, currentPrice))
-            : currentPrice;
-    }
-
     /// <summary>See <see cref="NearLevelPushbackEnabled"/>'s own doc comment — completely
     /// independent of breakeven/trailing, runs every poll regardless of whether either is enabled.
-    /// Once either extreme (tracked by <see cref="UpdatePriceExtremesSinceEntry"/>, called
-    /// unconditionally before this) has come within <see cref="NearLevelPercent"/> of THAT LEG'S OWN
-    /// entry-to-level distance, a reversal of at least <see cref="PushbackClosePercent"/> of that
-    /// same distance closes the position immediately — protecting the gain on the target side,
-    /// taking the smaller loss rather than a full round-trip back to stop on the other. Each leg is
-    /// scaled by its OWN distance (entry-to-target for the target check, entry-to-stop for the stop
-    /// check) rather than a shared unit, so a tight scalp target and a wide swing-based stop on the
-    /// SAME trade are each judged against their own length, not a one-size-fits-all number.</summary>
+    /// Tracks the best price toward target and worst price toward stop reached since entry; once
+    /// either extreme has come within <see cref="NearLevelPercent"/> of THAT LEG'S OWN entry-to-
+    /// level distance, a reversal of at least <see cref="PushbackClosePercent"/> of that same
+    /// distance closes the position immediately — protecting the gain on the target side, taking
+    /// the smaller loss rather than a full round-trip back to stop on the other. Each leg is scaled
+    /// by its OWN distance (entry-to-target for the target check, entry-to-stop for the stop check)
+    /// rather than a shared unit, so a tight scalp target and a wide swing-based stop on the SAME
+    /// trade are each judged against their own length, not a one-size-fits-all number.</summary>
     private void CheckNearLevelPushback()
     {
         if (!this.NearLevelPushbackEnabled) return;
@@ -2860,7 +2495,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         var tickSize = this.CurrentSymbol.TickSize;
         var currentPrice = this.CurrentSymbol.Last;
         if (tickSize <= 0 || currentPrice <= 0) return;
-        if (this.bestPriceSinceEntry is null || this.worstPriceSinceEntry is null) return;
 
         var stopOrder = this.FindProtectiveStopOrder();
         var targetOrder = this.FindProtectiveTargetOrder();
@@ -2868,6 +2502,13 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         var isLong = position.Side == Side.Buy;
         var entryPrice = position.OpenPrice;
+
+        this.bestPriceSinceEntry = this.bestPriceSinceEntry is { } best
+            ? (isLong ? Math.Max(best, currentPrice) : Math.Min(best, currentPrice))
+            : currentPrice;
+        this.worstPriceSinceEntry = this.worstPriceSinceEntry is { } worst
+            ? (isLong ? Math.Min(worst, currentPrice) : Math.Max(worst, currentPrice))
+            : currentPrice;
 
         // Near target, then pushed back away from it — protect the gain rather than risk it
         // running all the way back toward the stop. Scaled by THIS trade's own entry-to-target
@@ -2925,62 +2566,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         var result = position.Close();
         if (result.Status != TradingOperationResultStatus.Success)
             this.Log($"[Order] failed to close on near-level pushback: {result.Message}", StrategyLoggingLevel.Error);
-    }
-
-    /// <summary>See <see cref="ProfitDecayEnabled"/>'s own doc comment. Needs the DOM's own
-    /// resting-order levels (same ones <see cref="TryEnter"/> scans for entries), so — unlike
-    /// <see cref="CheckNearLevelPushback"/> — this can't run until AFTER the DOM has been pulled and
-    /// reconciled for this poll; called from <see cref="RunPoll"/> alongside <see cref="TryEnter"/>,
-    /// not in the earlier no-DOM-needed block.</summary>
-    private void CheckProfitMomentumDying(IReadOnlyList<RestingOrderEngine.RestingLevel> levels, double tickSize)
-    {
-        if (!this.ProfitDecayEnabled) return;
-        if (!this.protectiveOrdersPlaced) return;
-
-        var positions = this.MyPositions();
-        if (positions.Length == 0) return;
-
-        var position = positions[0]; // one position at a time, by design
-        var currentPrice = this.CurrentSymbol.Last;
-        if (tickSize <= 0 || currentPrice <= 0) return;
-        if (this.bestPriceSinceEntry is not { } best) return;
-
-        var isLong = position.Side == Side.Buy;
-        var entryPrice = position.OpenPrice;
-
-        var profitTicks = (isLong ? currentPrice - entryPrice : entryPrice - currentPrice) / tickSize;
-        if (profitTicks < this.ProfitDecayMinProfitTicks) return;
-
-        var pullbackTicks = (isLong ? best - currentPrice : currentPrice - best) / tickSize;
-        if (pullbackTicks < this.ProfitDecayPullbackTicks) return;
-
-        var proximity = this.ProfitDecayLevelProximityTicks * tickSize;
-
-        // Opposing side relative to the trade: a long needs an ASK wall capping it (IsBid==false);
-        // a short needs a BID wall (IsBid==true) — same "opposing" sense TryComputeTarget's own DOM
-        // candidate scan already uses.
-        RestingOrderEngine.RestingLevel? cappingLevel = null;
-
-        foreach (var level in levels)
-        {
-            if (level.IsBid == isLong) continue;
-            if (level.Current < this.AbsorptionStrongContracts) continue;
-            if (Math.Abs(level.Price - best) > proximity) continue;
-            cappingLevel = level;
-            break;
-        }
-
-        if (cappingLevel is not { } capping) return;
-
-        this.Log(
-            $"[Risk] profit momentum dying — {(capping.IsBid ? "BID" : "ASK")} {capping.Price:0.####} "
-            + $"({capping.Current:N0} contracts) capped the move at {best:0.####}, now {pullbackTicks:F0} "
-            + $"ticks off that peak with {profitTicks:F0} ticks profit. Closing to lock in what's left.",
-            StrategyLoggingLevel.Trading);
-
-        var result = position.Close();
-        if (result.Status != TradingOperationResultStatus.Success)
-            this.Log($"[Order] failed to close on profit momentum dying: {result.Message}", StrategyLoggingLevel.Error);
     }
 
     /// <summary>See <see cref="HeartbeatIntervalMinutes"/>'s own doc comment — a periodic "still
@@ -3047,12 +2632,9 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// </summary>
     private string? resolvedSymbolId;
 
-    /// <summary>RELAXED 2026-10-05 — see <see cref="IsMyPosition"/>'s own doc comment for the full
-    /// incident (two orphaned, zero-protection positions in one session, one costing -$138.50)
-    /// and why this is the SAME "ACCEPTED RISK" tradeoff that method's own doc comment already
-    /// documents for the post-bootstrap case, just extended to the bootstrap case too.</summary>
     private bool IsMine(Symbol? symbol, Account? account, string? comment)
     {
+        if (comment != StrategyTag) return false;
         if (account is null || this.CurrentAccount is null) return false;
         if (!string.Equals(account.Id, this.CurrentAccount.Id, StringComparison.Ordinal)) return false;
         if (symbol is null || this.CurrentSymbol is null) return false;
@@ -3060,10 +2642,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         if (this.resolvedSymbolId is null)
         {
-            var commentMatches = comment == StrategyTag;
-            var sameExactContract = string.Equals(symbol.Id, this.CurrentSymbol.Id, StringComparison.Ordinal);
-            if (!commentMatches && !sameExactContract) return false;
-
             this.resolvedSymbolId = symbol.Id;
             return true;
         }
@@ -3090,20 +2668,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
     /// is treated as this strategy's own, regardless of Comment — including one the operator
     /// opened manually. Narrower than ideal, but strictly better than the alternative this
     /// replaces, which — per three consecutive live tests — appears to never match at all.
-    ///
-    /// RELAXED FURTHER 2026-10-05 ("i just manually closed out an order that was up $71.50 because
-    /// the take profit was so far away") — investigation found the REAL cause wasn't the target cap
-    /// (it was correctly capped at 40 ticks); the position's own CLOSING fill carried an EMPTY
-    /// Comment, meaning THIS strategy never recognized it as its own after a mid-session restart
-    /// and never re-armed its protective orders. A second, worse case the same session: two
-    /// Comment-empty short fills sat with ZERO stop or target for ~11 minutes until a manual close
-    /// realized a -$138.50 loss. Both happened on the FRESH-RESTART bootstrap path (`resolvedSymbolId`
-    /// still null), which previously required an EXACT Comment match with no fallback at all — unlike
-    /// the post-bootstrap path above, which already accepts this same risk. Now, on bootstrap, a
-    /// position/order on the EXACT configured contract (`symbol.Id == this.CurrentSymbol.Id`) is
-    /// adopted even when Comment doesn't match, same tradeoff as above, just no longer gated behind
-    /// having already bootstrapped once. A genuinely different symbol on the same connection still
-    /// requires the Comment to match, same as before.</summary>
+    /// </summary>
     private bool IsMyPosition(Symbol? symbol, Account? account, string? comment)
     {
         if (account is null || this.CurrentAccount is null) return false;
@@ -3113,10 +2678,7 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         if (this.resolvedSymbolId is not null)
             return string.Equals(symbol.Id, this.resolvedSymbolId, StringComparison.Ordinal);
 
-        var commentMatches = comment == StrategyTag;
-        var sameExactContract = this.CurrentSymbol is not null && string.Equals(symbol.Id, this.CurrentSymbol.Id, StringComparison.Ordinal);
-        if (!commentMatches && !sameExactContract) return false;
-
+        if (comment != StrategyTag) return false;
         if (this.CurrentSymbol is null || !string.Equals(symbol.ConnectionId, this.CurrentSymbol.ConnectionId, StringComparison.Ordinal))
             return false;
 
@@ -3238,78 +2800,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         {
             this.waitOpenPosition = false;
             this.waitClosePositions = false;
-
-            // FOUND 2026-10-05 ("this position never put a take profit") — root-caused via
-            // Serilog: Rithmic accepted a protective order, briefly flipped it to "Opened", then
-            // refused it ~2ms later ("Description: bad price", off an off-tick-grid price — see
-            // PlaceProtectiveOrders' own fix for that root cause). That refusal is ASYNCHRONOUS;
-            // the synchronous Success/Failure check right after PlaceOrder had already passed by
-            // the time it arrived, so the strategy's own log said "placed" and never looked again.
-            // This reacts to ANY refusal on our account by checking what's ACTUALLY resting right
-            // now and repairing whichever leg is missing, rather than trusting a one-time
-            // placement result.
-            this.RepairMissingProtectiveOrders();
-        }
-    }
-
-    /// <summary>See <see cref="Core_OrdersHistoryAdded"/>'s own doc comment for the incident this
-    /// closes. Self-correcting by design: if both legs are actually resting, this does nothing.</summary>
-    private void RepairMissingProtectiveOrders()
-    {
-        if (!this.protectiveOrdersPlaced) return;
-
-        var positions = this.MyPositions();
-        if (positions.Length == 0) return;
-
-        var position = positions[0]; // one position at a time, by design
-        var tickSize = this.CurrentSymbol.TickSize;
-        if (tickSize <= 0) return;
-
-        var isLong = position.Side == Side.Buy;
-        var closingSide = isLong ? Side.Sell : Side.Buy;
-
-        if (this.FindProtectiveStopOrder() is null)
-        {
-            // A missing stop is the one state this strategy will never knowingly run with — close
-            // immediately rather than try to re-place blind, same philosophy as the synchronous
-            // stop-failure path in PlaceProtectiveOrders.
-            this.Log(
-                "[Risk] protective STOP is missing (refused asynchronously after initially "
-                + "reporting success) — closing immediately rather than run unprotected.",
-                StrategyLoggingLevel.Error);
-
-            var closeResult = position.Close();
-            if (closeResult.Status != TradingOperationResultStatus.Success)
-                this.Log($"[Order] failed to close unprotected position: {closeResult.Message}", StrategyLoggingLevel.Error);
-            return;
-        }
-
-        if (this.FindProtectiveTargetOrder() is null)
-        {
-            var fallbackTarget = isLong
-                ? position.OpenPrice + (this.FallbackTargetTicks * tickSize)
-                : position.OpenPrice - (this.FallbackTargetTicks * tickSize);
-            fallbackTarget = Math.Round(fallbackTarget / tickSize, MidpointRounding.AwayFromZero) * tickSize;
-
-            this.Log(
-                $"[Risk] protective TARGET is missing (refused asynchronously after initially "
-                + $"reporting success) — re-placing a fallback target ({this.FallbackTargetTicks} "
-                + $"ticks) at {fallbackTarget:0.####} from the real fill.",
-                StrategyLoggingLevel.Trading);
-
-            var targetResult = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
-            {
-                Account = this.CurrentAccount,
-                Symbol = this.CurrentSymbol,
-                OrderTypeId = this.limitOrderTypeId,
-                Quantity = position.Quantity,
-                Side = closingSide,
-                Comment = StrategyTag,
-                Price = fallbackTarget,
-            });
-
-            if (targetResult.Status != TradingOperationResultStatus.Success)
-                this.Log($"[Order] fallback target re-placement failed: {targetResult.Message}", StrategyLoggingLevel.Error);
         }
     }
 
@@ -3321,35 +2811,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         {
             this.dailyPnl += pnl.Value;
             this.totalRealizedPnl += pnl.Value;
-
-            // See MaxLossesPerLevel/ConsecutiveLossCooldownEnabled's own doc comments — both read
-            // off this SAME per-trade realized P&L sign, the one place both can be judged accurately
-            // (an entry fill reports no GrossPnl at all, so this only ever fires on an actual close).
-            if (pnl.Value < 0)
-            {
-                this.consecutiveLosses++;
-
-                if (this.pendingEntryLevelPrice is { } levelPrice)
-                {
-                    this.lossesPerLevel[levelPrice] = this.lossesPerLevel.TryGetValue(levelPrice, out var existing)
-                        ? existing + 1
-                        : 1;
-                }
-
-                if (this.ConsecutiveLossCooldownEnabled && this.consecutiveLosses >= this.ConsecutiveLossThreshold)
-                {
-                    this.cooldownUntilUtc = Core.TimeUtils.DateTimeUtcNow.AddMinutes(this.ConsecutiveLossCooldownMinutes);
-                    this.consecutiveLosses = 0;
-                    this.Log(
-                        $"[Risk] {this.ConsecutiveLossThreshold} losses in a row — pausing new entries "
-                        + $"for {this.ConsecutiveLossCooldownMinutes} min (until {this.cooldownUntilUtc:HH:mm:ss} UTC).",
-                        StrategyLoggingLevel.Trading);
-                }
-            }
-            else if (pnl.Value > 0)
-            {
-                this.consecutiveLosses = 0;
-            }
         }
     }
 
@@ -3371,9 +2832,6 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
             this.dailyPnl = 0;
             this.dailyLimitHit = false;
             this.profitTargetHit = false;
-            this.lossesPerLevel.Clear();
-            this.consecutiveLosses = 0;
-            this.cooldownUntilUtc = null;
             this.Log("[Risk] daily P&L reset (new EST session).", StrategyLoggingLevel.Trading);
         }
 
@@ -3385,164 +2843,9 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
         }
     }
 
-    // ---- account-balance-based risk — restart-immune, see AccountBalanceFloor's own doc comment
-    // for why the strategy's own internal dailyPnl/peakEquity counters aren't trustworthy enough
-    // for this on their own (they reset on every RESTART, not just a new trading day) -----------
-
-    private const string DailyStateFileName = "daily_risk_state.txt";
-
-    /// <summary>Next to the deployed DLL (this strategy's own fixed OutputPath) — stable across
-    /// restarts and rebuilds, unlike the per-instance ScriptsData log folder, which gets a new GUID
-    /// every attach and so could never be found again by a DIFFERENT instance.</summary>
-    private static string DailyStateFilePath() =>
-        Path.Combine(AppDomain.CurrentDomain.BaseDirectory, DailyStateFileName);
-
-    /// <summary>Loads today's starting account balance from disk (or initializes it, on a genuinely
-    /// new day or an unreadable file) — at most once per EST day per restart, not every poll.
-    /// `accountFloorBreached` is read from whatever's on disk regardless of day (sticky, never
-    /// cleared here) — only `dayStartBalance` is day-scoped. Best-effort: a read/write failure
-    /// degrades to "today starts now" rather than blocking or crashing (same failure posture this
-    /// codebase's other best-effort I/O already uses, e.g. ORB-IX's own `OpenResearchWriter`).
-    /// </summary>
-    private void EnsureDailyBalanceState(double currentBalance, int todayKey)
-    {
-        if (this.balanceDayKey == todayKey) return; // already loaded for today, this restart
-
-        var breachedFromFile = false;
-        var haveTodaysBalance = false;
-
-        try
-        {
-            var path = DailyStateFilePath();
-            if (File.Exists(path))
-            {
-                var lines = File.ReadAllLines(path);
-                if (lines.Length >= 3)
-                {
-                    breachedFromFile = lines[2].Trim() == "1";
-
-                    if (int.TryParse(lines[0], out var savedDayKey)
-                        && double.TryParse(lines[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var savedBalance)
-                        && savedDayKey == todayKey)
-                    {
-                        this.dayStartBalance = savedBalance;
-                        haveTodaysBalance = true;
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            this.Log($"[Risk] could not read daily balance state file, starting fresh: {ex.GetType().Name}: {ex.Message}", StrategyLoggingLevel.Error);
-        }
-
-        this.accountFloorBreached = this.accountFloorBreached || breachedFromFile; // sticky — never un-set here
-
-        if (!haveTodaysBalance)
-            this.dayStartBalance = currentBalance; // new day, or state unreadable — today starts now
-
-        this.balanceDayKey = todayKey;
-        this.WriteDailyBalanceState();
-    }
-
-    private void WriteDailyBalanceState()
-    {
-        try
-        {
-            File.WriteAllLines(DailyStateFilePath(), new[]
-            {
-                this.balanceDayKey.ToString(CultureInfo.InvariantCulture),
-                this.dayStartBalance.ToString("R", CultureInfo.InvariantCulture),
-                this.accountFloorBreached ? "1" : "0",
-            });
-        }
-        catch (Exception ex)
-        {
-            this.Log($"[Risk] could not write daily balance state file: {ex.GetType().Name}: {ex.Message}", StrategyLoggingLevel.Error);
-        }
-    }
-
-    /// <summary>LIVE, recomputed fresh every call from the REAL account balance — never a cached/
-    /// latched flag, specifically so a mid-day restart can't silently forget a breach the way a
-    /// simple `dailyLimitHit` boolean would. False (not breached) whenever the balance can't be
-    /// read at all — same "don't block on missing data" posture <see cref="IsAccountFloorBreached"/>
-    /// uses.</summary>
-    private bool IsDailyLossLimitBreached()
-    {
-        if (this.MaxDailyLoss <= 0) return false;
-        if (this.CurrentAccount?.Balance is not { } balance) return false;
-
-        this.EnsureDailyBalanceState(balance, EstSessionDayKey(Core.TimeUtils.DateTimeUtcNow));
-
-        return balance - this.dayStartBalance <= -this.MaxDailyLoss;
-    }
-
-    /// <summary>See <see cref="AccountBalanceFloor"/>'s own doc comment — STICKY, unlike every other
-    /// risk flag in this file: once true, stays true (including across a restart, via
-    /// <see cref="WriteDailyBalanceState"/>) until the operator changes the setting themselves.
-    /// </summary>
-    private bool IsAccountFloorBreached()
-    {
-        if (this.CurrentAccount?.Balance is not { } balance) return this.accountFloorBreached;
-
-        this.EnsureDailyBalanceState(balance, EstSessionDayKey(Core.TimeUtils.DateTimeUtcNow));
-
-        if (!this.accountFloorBreached && this.AccountBalanceFloor > 0 && balance <= this.AccountBalanceFloor)
-        {
-            this.accountFloorBreached = true;
-            this.WriteDailyBalanceState();
-            this.Log(
-                $"[Risk] ACCOUNT BALANCE FLOOR BREACHED — ${balance:F2} <= ${this.AccountBalanceFloor:F2}. "
-                + "This is STICKY and does NOT auto-reset, including across a restart — update "
-                + "AccountBalanceFloor yourself once you've confirmed the real account/eval state.",
-                StrategyLoggingLevel.Trading);
-        }
-
-        return this.accountFloorBreached;
-    }
-
     private void CheckRiskLimits()
     {
         if (this.waitOpenPosition || this.waitClosePositions) return;
-
-        // Checked FIRST, ahead of everything else — both read the REAL account, not internal
-        // counters, so they stay correct across a restart. Evaluated even while flat (same
-        // reasoning as DailyProfitTarget below): a breach from an earlier closed trade must still
-        // refuse new entries for the rest of the day/eval, not just close an already-open one.
-        if (this.IsAccountFloorBreached())
-        {
-            var floorPositions = this.MyPositions();
-            if (floorPositions.Any())
-            {
-                this.waitClosePositions = true;
-                foreach (var pos in floorPositions) pos.Close();
-            }
-
-            return;
-        }
-
-        if (this.IsDailyLossLimitBreached())
-        {
-            if (!this.dailyLimitHit)
-            {
-                this.dailyLimitHit = true;
-                var todayLoss = this.CurrentAccount?.Balance is { } bal ? this.dayStartBalance - bal : (double?)null;
-                this.Log(
-                    $"[Risk] DAILY LOSS LIMIT HIT (real account balance, restart-immune) — "
-                    + $"balance has dropped {(todayLoss is { } loss ? $"${loss:F2}" : "an unknown amount")} "
-                    + $"today, >= ${this.MaxDailyLoss}. Closing all, no more trades today.",
-                    StrategyLoggingLevel.Trading);
-            }
-
-            var dailyLossPositions = this.MyPositions();
-            if (dailyLossPositions.Any())
-            {
-                this.waitClosePositions = true;
-                foreach (var pos in dailyLossPositions) pos.Close();
-            }
-
-            return;
-        }
 
         var positions = this.MyPositions();
 
@@ -3577,9 +2880,18 @@ public sealed class finchDomScalpStrategy : Strategy, ICurrentAccount, ICurrentS
 
         if (!positions.Any()) return;
 
-        // OLD dailyPnl-based MaxDailyLoss check REMOVED 2026-10-05 — superseded by
-        // IsDailyLossLimitBreached() above, which reads the REAL account balance instead of this
-        // strategy's own internal counter (which resets on every restart, not just a new day).
+        if (this.MaxDailyLoss > 0 && !this.dailyLimitHit)
+        {
+            var totalDailyPnl = this.dailyPnl + unrealizedPnl;
+            if (totalDailyPnl <= -this.MaxDailyLoss)
+            {
+                this.dailyLimitHit = true;
+                this.waitClosePositions = true;
+                this.Log($"[Risk] DAILY LOSS LIMIT HIT — ${totalDailyPnl:F2} <= -${this.MaxDailyLoss}. Closing all.", StrategyLoggingLevel.Trading);
+                foreach (var pos in positions) pos.Close();
+                return;
+            }
+        }
 
         if (this.MaxDrawdown > 0 && !this.drawdownLimitHit)
         {

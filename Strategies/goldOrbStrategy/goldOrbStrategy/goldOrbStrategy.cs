@@ -23,6 +23,15 @@ namespace goldOrbStrategy
         FixedTickAmount
     }
 
+    /// <summary>The operator's own ask, 2026-10-05 ("target hh and ll levels"): aim the take-
+    /// profit at the nearest confirmed swing structure ahead of price instead of a fixed
+    /// Risk:Reward multiple of the stop distance.</summary>
+    public enum TargetMode
+    {
+        RiskReward,
+        SwingHighLow
+    }
+
     public sealed class goldOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     {
         [InputParameter("Symbol", 0)]
@@ -62,9 +71,13 @@ namespace goldOrbStrategy
             "Retest 50% Zone", BreakoutMode.Retest50Percent,
             "Candle Closure", BreakoutMode.CandleClosure
         })]
-        public BreakoutMode entryMode = BreakoutMode.FirstBreakout;
+        public BreakoutMode entryMode = BreakoutMode.CandleClosure;
 
         [InputParameter("Confirmation Wait Time (minutes)", 8)]
+        // NOTE 2026-10-05: no longer read by BreakoutMode.CandleClosure (now confirms off a real
+        // 1-min bar's own continuation instead of a plain time delay — see
+        // ContinuationHistory_OnNewHistoryItem). Left declared, unused, rather than removed, since
+        // an InputParameter's index is how Quantower maps a saved instance's settings back to it.
         public int confirmationMinutes = 1;
 
         [InputParameter("Risk:Reward Ratio", 9)]
@@ -109,10 +122,46 @@ namespace goldOrbStrategy
         [InputParameter("Fixed Stop Loss (Ticks)", 20)]
         public int fixedStopLossTicks = 20;
 
+        // ---- added 2026-10-05: target HH/LL levels + genuine 1-min continuation confirmation,
+        // per the operator's own description of "the main strategy" (see the class doc comment's
+        // "REPURPOSED 2026-10-05" note) ---------------------------------------------------------
+
+        [InputParameter("Target Mode", 21, variants: new object[]
+        {
+            "Risk:Reward Multiple", TargetMode.RiskReward,
+            "Nearest Swing High/Low", TargetMode.SwingHighLow
+        })]
+        public TargetMode targetMode = TargetMode.SwingHighLow;
+
+        [InputParameter("Swing Detection Period", 22)]
+        public Period SwingDetectionPeriod { get; set; }
+
+        [InputParameter("Swing Pivot Lookback (bars each side)", 23)]
+        public int swingPivotLookback = 3;
+
+        /// <summary>If the nearest qualifying swing high/low would give LESS than this multiple
+        /// of the stop's own risk distance, it's too close to be worth taking — falls back to the
+        /// Risk:Reward calculation instead rather than accepting a poor-quality target.</summary>
+        [InputParameter("Min Target Risk Multiple (fallback trigger)", 24)]
+        public double minTargetRiskMultiple = 1.0;
+
+        /// <summary>The operator's own words: "...wait for a candle body closure out of the range
+        /// and then a continuation in the 1min timeframe." Separate from whatever `Period` the
+        /// main breakout-closure detection runs on (30 seconds by default) — this is always its
+        /// own dedicated 1-minute series, matching mesOrbStrategy's own cross-timeframe pattern
+        /// built the same day.</summary>
+        [InputParameter("Continuation Confirmation Period", 25)]
+        public Period ContinuationPeriod { get; set; }
+
         public override string[] MonitoringConnectionsIds => new string[] { this.CurrentSymbol?.ConnectionId, this.CurrentAccount?.ConnectionId };
 
         private HistoricalData hdm;
         private string orderTypeId;
+
+        private HistoricalData swingHistory;
+        private SwingLevelTracker swingTracker;
+
+        private HistoricalData continuationHistory;
 
         private int longPositionsCount;
         private int shortPositionsCount;
@@ -158,10 +207,16 @@ namespace goldOrbStrategy
             : base()
         {
             this.Name = "Gold ORB Strategy";
-            this.Description = "Gold Opening Range Breakout Strategy - 8:00-8:05 PM EST (5 min window)";
+            this.Description =
+                "Gold Opening Range Breakout Strategy - 8:00-8:05 PM EST (5 min window). Main "
+                + "mode (Candle Closure): waits for a candle body close out of the range, then a "
+                + "real 1-min continuation before entering. Target aims at the nearest swing "
+                + "high/low ahead of price by default, falling back to a Risk:Reward multiple.";
 
             this.Period = Period.SECOND30;
             this.StartPoint = Core.TimeUtils.DateTimeUtcNow.AddDays(-1);
+            this.SwingDetectionPeriod = Period.MIN5;
+            this.ContinuationPeriod = Period.MIN1;
         }
 
         protected override void OnRun()
@@ -216,6 +271,34 @@ namespace goldOrbStrategy
 
             this.hdm = this.CurrentSymbol.GetHistory(this.Period, this.CurrentSymbol.HistoryType, this.StartPoint);
 
+            // Target-mode swing detection — its OWN dedicated series regardless of what `Period`
+            // the main breakout detection runs on (30 seconds by default), same reasoning as
+            // finchDomScalpStrategy's own structure-filter timeframe fix: a swing pivot on
+            // sub-minute bars is noise, not real structure. Non-fatal if it fails to fetch —
+            // CalculateTarget degrades to the Risk:Reward fallback.
+            try
+            {
+                this.swingHistory = this.CurrentSymbol.GetHistory(this.SwingDetectionPeriod, this.CurrentSymbol.HistoryType, this.StartPoint);
+                this.swingTracker = new SwingLevelTracker(this.swingPivotLookback);
+                this.swingHistory.NewHistoryItem += this.SwingHistory_OnNewHistoryItem;
+            }
+            catch (Exception ex)
+            {
+                this.Log($"Swing detection series unavailable, target mode will fall back to Risk:Reward: {ex.GetType().Name}: {ex.Message}", StrategyLoggingLevel.Error);
+            }
+
+            // 1-minute continuation confirmation — "wait for a candle body closure out of the
+            // range and then a continuation in the 1min timeframe" (the operator's own words).
+            try
+            {
+                this.continuationHistory = this.CurrentSymbol.GetHistory(this.ContinuationPeriod, this.CurrentSymbol.HistoryType, this.StartPoint);
+                this.continuationHistory.NewHistoryItem += this.ContinuationHistory_OnNewHistoryItem;
+            }
+            catch (Exception ex)
+            {
+                this.Log($"1-min continuation series unavailable — Candle Closure mode cannot confirm entries: {ex.GetType().Name}: {ex.Message}", StrategyLoggingLevel.Error);
+            }
+
             Core.PositionAdded += this.Core_PositionAdded;
             Core.PositionRemoved += this.Core_PositionRemoved;
             Core.OrdersHistoryAdded += this.Core_OrdersHistoryAdded;
@@ -239,7 +322,77 @@ namespace goldOrbStrategy
                 this.hdm.Dispose();
             }
 
+            if (this.swingHistory != null)
+            {
+                this.swingHistory.NewHistoryItem -= this.SwingHistory_OnNewHistoryItem;
+                this.swingHistory.Dispose();
+            }
+
+            if (this.continuationHistory != null)
+            {
+                this.continuationHistory.NewHistoryItem -= this.ContinuationHistory_OnNewHistoryItem;
+                this.continuationHistory.Dispose();
+            }
+
             base.OnStop();
+        }
+
+        private void SwingHistory_OnNewHistoryItem(object sender, HistoryEventArgs args)
+        {
+            // Index 0 is the bar that just started forming — index 1 is the one that just CLOSED
+            // (same indexing convention this file already uses elsewhere, e.g. Hdm_OnNewHistoryItem).
+            if (this.swingHistory == null || this.swingHistory.Count < 2 || this.swingTracker == null) return;
+
+            var time = HistoricalDataExtensions.Time(this.swingHistory, 1);
+            var high = HistoricalDataExtensions.High(this.swingHistory, 1);
+            var low = HistoricalDataExtensions.Low(this.swingHistory, 1);
+            this.swingTracker.FeedBar(time, high, low);
+        }
+
+        /// <summary>Drives the ONLY real confirmation step for `BreakoutMode.CandleClosure`: once
+        /// a body-close breakout is armed (see `ProcessBreakoutLogic`), the next 1-minute bar to
+        /// close decides whether it actually continues (enter) or fails (reset and keep
+        /// watching) — replaces the old pure time-delay (`confirmationMinutes`), which never
+        /// actually checked price action, just waited a clock and entered regardless.</summary>
+        private void ContinuationHistory_OnNewHistoryItem(object sender, HistoryEventArgs args)
+        {
+            if (this.continuationHistory == null || this.continuationHistory.Count < 2) return;
+            if (!this.bullishBreakoutDetected && !this.bearishBreakoutDetected) return;
+
+            var barTime = HistoricalDataExtensions.Time(this.continuationHistory, 1);
+            if (barTime <= this.breakoutTime) return; // the bar containing the breakout itself doesn't count
+
+            var open = HistoricalDataExtensions.Open(this.continuationHistory, 1);
+            var close = HistoricalDataExtensions.Close(this.continuationHistory, 1);
+
+            if (this.bullishBreakoutDetected)
+            {
+                if (!this.buyOrderPlaced && close > this.breakoutPrice && close > open)
+                {
+                    this.Log($"1-min continuation CONFIRMED — close {close} > breakout price {this.breakoutPrice} with a bullish body. Entering long.", StrategyLoggingLevel.Trading);
+                    this.PlaceBuyOrder(close);
+                }
+                else
+                {
+                    this.Log($"1-min continuation FAILED (close {close}, open {open}, breakout {this.breakoutPrice}) — resetting, watching for a fresh breakout.", StrategyLoggingLevel.Trading);
+                }
+
+                this.bullishBreakoutDetected = false;
+            }
+            else if (this.bearishBreakoutDetected)
+            {
+                if (!this.sellOrderPlaced && close < this.breakoutPrice && close < open)
+                {
+                    this.Log($"1-min continuation CONFIRMED — close {close} < breakout price {this.breakoutPrice} with a bearish body. Entering short.", StrategyLoggingLevel.Trading);
+                    this.PlaceSellOrder(close);
+                }
+                else
+                {
+                    this.Log($"1-min continuation FAILED (close {close}, open {open}, breakout {this.breakoutPrice}) — resetting, watching for a fresh breakout.", StrategyLoggingLevel.Trading);
+                }
+
+                this.bearishBreakoutDetected = false;
+            }
         }
 
         protected override void OnInitializeMetrics(Meter meter)
@@ -485,23 +638,27 @@ namespace goldOrbStrategy
                     break;
 
                 case BreakoutMode.CandleClosure:
+                    // REPURPOSED 2026-10-05 ("the main strategy is to mark out the 8:00-8:05pm
+                    // est range and then wait for a candle body closure out of the range and
+                    // then a continuation in the 1min timeframe") — this case now only ARMS the
+                    // breakout; ContinuationHistory_OnNewHistoryItem decides entry/reset off the
+                    // next real 1-minute bar close, replacing the old pure time-delay confirmation
+                    // (which never actually checked price action, just waited a clock and entered
+                    // regardless of whether the move had continued or reversed).
                     if (bullishBreakout && !this.bullishBreakoutDetected && !this.buyOrderPlaced)
                     {
                         this.bullishBreakoutDetected = true;
                         this.breakoutTime = currentTime;
                         this.breakoutPrice = currentClose;
-                        this.Log($"Bullish breakout detected at {currentClose}. Waiting for confirmation...");
+                        this.Log($"Bullish breakout detected at {currentClose}. Waiting for 1-min continuation...");
                     }
                     else if (bearishBreakout && !this.bearishBreakoutDetected && !this.sellOrderPlaced)
                     {
                         this.bearishBreakoutDetected = true;
                         this.breakoutTime = currentTime;
                         this.breakoutPrice = currentClose;
-                        this.Log($"Bearish breakout detected at {currentClose}. Waiting for confirmation...");
+                        this.Log($"Bearish breakout detected at {currentClose}. Waiting for 1-min continuation...");
                     }
-
-                    // Check for confirmation
-                    this.CheckForConfirmation(currentTime, currentClose);
                     break;
             }
 
@@ -509,32 +666,10 @@ namespace goldOrbStrategy
             this.UpdateTrailingStop();
         }
 
-        private void CheckForConfirmation(DateTime currentTime, double currentClose)
-        {
-            TimeSpan timeSinceBreakout = currentTime - this.breakoutTime;
-            
-            if (timeSinceBreakout.TotalMinutes >= this.confirmationMinutes)
-            {
-                if (this.bullishBreakoutDetected && !this.buyOrderPlaced)
-                {
-                    this.Log($"Bullish breakout confirmed after {this.confirmationMinutes} minute(s). Placing buy order at {currentClose}");
-                    this.PlaceBuyOrder(currentClose);
-                    this.bullishBreakoutDetected = false;
-                }
-                else if (this.bearishBreakoutDetected && !this.sellOrderPlaced)
-                {
-                    this.Log($"Bearish breakout confirmed after {this.confirmationMinutes} minute(s). Placing sell order at {currentClose}");
-                    this.PlaceSellOrder(currentClose);
-                    this.bearishBreakoutDetected = false;
-                }
-            }
-        }
-
         private void PlaceBuyOrder(double entryPrice)
         {
             double stopPrice = this.CalculateStopLoss(entryPrice, Side.Buy);
-            double riskAmount = entryPrice - stopPrice;
-            double targetPrice = entryPrice + (riskAmount * this.riskRewardRatio);
+            double targetPrice = this.CalculateTarget(entryPrice, stopPrice, Side.Buy);
 
             this.Log($"Placing Buy Order - Entry: {entryPrice}, Stop: {stopPrice}, Target: {targetPrice}");
 
@@ -575,8 +710,7 @@ namespace goldOrbStrategy
         private void PlaceSellOrder(double entryPrice)
         {
             double stopPrice = this.CalculateStopLoss(entryPrice, Side.Sell);
-            double riskAmount = stopPrice - entryPrice;
-            double targetPrice = entryPrice - (riskAmount * this.riskRewardRatio);
+            double targetPrice = this.CalculateTarget(entryPrice, stopPrice, Side.Sell);
 
             this.Log($"Placing Sell Order - Entry: {entryPrice}, Stop: {stopPrice}, Target: {targetPrice}");
 
@@ -794,6 +928,46 @@ namespace goldOrbStrategy
                 this.Log($"Failed to close position: {result.Message}", StrategyLoggingLevel.Error);
             }
         }
+        /// <summary>The operator's own ask, 2026-10-05: "target hh and ll levels." Aims at the
+        /// nearest confirmed swing high (longs) / swing low (shorts) ahead of price instead of a
+        /// fixed Risk:Reward multiple — a real DOM/UA level has no opinion about where structure
+        /// actually sits, this does. Falls back to the old Risk:Reward calculation whenever no
+        /// qualifying swing exists yet, or the nearest one is too close to be worth the trade
+        /// (<see cref="minTargetRiskMultiple"/>) — never leaves a trade with no target at all.</summary>
+        private double CalculateTarget(double entryPrice, double stopPrice, Side side)
+        {
+            var riskAmount = Math.Abs(entryPrice - stopPrice);
+
+            if (this.targetMode == TargetMode.SwingHighLow && this.swingTracker != null)
+            {
+                var swingTarget = side == Side.Buy
+                    ? this.swingTracker.NearestSwingHighAbove(entryPrice)
+                    : this.swingTracker.NearestSwingLowBelow(entryPrice);
+
+                if (swingTarget is { } candidate)
+                {
+                    var rewardAmount = Math.Abs(candidate - entryPrice);
+                    if (riskAmount <= 0 || rewardAmount / riskAmount >= this.minTargetRiskMultiple)
+                    {
+                        this.Log($"Target Mode: Nearest Swing {(side == Side.Buy ? "High" : "Low")} - Target Price: {candidate}");
+                        return candidate;
+                    }
+
+                    this.Log($"Nearest swing {(side == Side.Buy ? "high" : "low")} at {candidate} is too close ({rewardAmount:F2} < {this.minTargetRiskMultiple}x risk of {riskAmount:F2}) - falling back to Risk:Reward.");
+                }
+                else
+                {
+                    this.Log($"No qualifying swing {(side == Side.Buy ? "high" : "low")} found ahead of price yet - falling back to Risk:Reward.");
+                }
+            }
+
+            var fallbackTarget = side == Side.Buy
+                ? entryPrice + (riskAmount * this.riskRewardRatio)
+                : entryPrice - (riskAmount * this.riskRewardRatio);
+            this.Log($"Target Mode: Risk:Reward ({this.riskRewardRatio}x) - Target Price: {fallbackTarget}");
+            return fallbackTarget;
+        }
+
         private double CalculateStopLoss(double entryPrice, Side side)
         {
             double stopPrice;
@@ -804,12 +978,12 @@ namespace goldOrbStrategy
                 case StopLossMode.FullOrbRange:
                     if (side == Side.Buy)
                     {
-                        stopPrice = this.orbLow - (this.orbBufferTicks * 0.25);
+                        stopPrice = this.orbLow - (this.orbBufferTicks * this.CurrentSymbol.TickSize);
                         stopDescription = "Full ORB Range (ORB Low)";
                     }
                     else
                     {
-                        stopPrice = this.orbHigh + (this.orbBufferTicks * 0.25);
+                        stopPrice = this.orbHigh + (this.orbBufferTicks * this.CurrentSymbol.TickSize);
                         stopDescription = "Full ORB Range (ORB High)";
                     }
                     break;
@@ -818,12 +992,12 @@ namespace goldOrbStrategy
                     double orbMidpoint = (this.orbHigh + this.orbLow) / 2.0;
                     if (side == Side.Buy)
                     {
-                        stopPrice = orbMidpoint - (this.orbBufferTicks * 0.25);
+                        stopPrice = orbMidpoint - (this.orbBufferTicks * this.CurrentSymbol.TickSize);
                         stopDescription = "50% ORB Range (Midpoint)";
                     }
                     else
                     {
-                        stopPrice = orbMidpoint + (this.orbBufferTicks * 0.25);
+                        stopPrice = orbMidpoint + (this.orbBufferTicks * this.CurrentSymbol.TickSize);
                         stopDescription = "50% ORB Range (Midpoint)";
                     }
                     break;
@@ -858,12 +1032,12 @@ namespace goldOrbStrategy
                     // Fallback to full ORB range
                     if (side == Side.Buy)
                     {
-                        stopPrice = this.orbLow - (this.orbBufferTicks * 0.25);
+                        stopPrice = this.orbLow - (this.orbBufferTicks * this.CurrentSymbol.TickSize);
                         stopDescription = "Default Full ORB Range";
                     }
                     else
                     {
-                        stopPrice = this.orbHigh + (this.orbBufferTicks * 0.25);
+                        stopPrice = this.orbHigh + (this.orbBufferTicks * this.CurrentSymbol.TickSize);
                         stopDescription = "Default Full ORB Range";
                     }
                     break;

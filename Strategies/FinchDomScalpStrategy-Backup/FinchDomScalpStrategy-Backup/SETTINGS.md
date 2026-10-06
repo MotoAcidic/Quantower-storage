@@ -1,4 +1,12 @@
-# finchDomScalpStrategy — Settings Guide
+# FinchDomScalpStrategy-Backup — Settings Guide
+
+**FROZEN BACKUP, created 2026-10-04** — a snapshot of `finchDomScalpStrategy`'s own settings
+reference, taken right before the market-structure entry gate was added to the live strategy. Kept
+so this backup can be loaded back up as-is if that experiment doesn't work out. Everything below
+describes the strategy exactly as it stood at that snapshot — it will NOT reflect any changes made
+to the live `finchDomScalpStrategy` afterward.
+
+---
 
 What every setting does, the recommended value, and why. For the full chronological history of
 every bug fix and design change, see `Quantower-storage/CLAUDE.md`'s Strategy Catalog entry — this
@@ -97,9 +105,8 @@ standalone entry trigger and POC's absorption confluence gate use the SAME two t
 | Stop buffer beyond swing/level (ticks) | 8 | Stops sit at the most recent confirmed swing low/high (long/short), offset by this many ticks — "a few ticks below the swing low in case it bounces off that point again," the operator's own request. |
 | Minimum stop distance (ticks) | 20 | Floors the stop distance if the swing-based calculation comes in tighter than this — a single bar's range says nothing about real volatility. |
 | Minimum target distance (ticks) | 10 | Same idea, for the target side. |
-| Maximum target distance (ticks, 0=uncapped) | **40** | **ADDED 2026-10-05** — "even if we scalp for like 15-20$ wins makes the strategy a true scalping strategy." A real DOM/IFVG/POC level still has to exist and qualify, but the PRICE used is now capped at this distance even when the level itself sits farther out — a clamp, not a disqualification. 40 ticks = $20 on MNQ. Interacts with the R:R filter below: capping reward this low also forces stop distance to stay proportionate for a trade to still clear it, without a separate stop cap. |
-| Fallback target if nothing qualifies ahead (ticks) | 40 | Used only when no opposing level/IFVG/POC qualifies as a target. Already matches the new max-target cap above, so no conflict. |
-| Minimum reward:risk (%, 0=off) | **120** | **Do not disable.** Added after a live trade risked 84 points to make 15 (~1:5.5 against the trade) — a technically-valid-but-stale swing stop passed every other check. This is the last-resort economic sanity check, checked against the REAL numbers after everything else is decided. **RAISED 2026-10-05, 100→120** — an overnight review found the two biggest losses of that session both cleared the bare 1:1 floor with almost no margin (1.06:1, exactly 1.0:1) and went straight to a full stop. Not raised further, since the new target cap above already does most of the work keeping stops proportionate. |
+| Fallback target if nothing qualifies ahead (ticks) | 40 | Used only when no opposing level/IFVG/POC qualifies as a target. |
+| Minimum reward:risk (%, 0=off) | **100** | **Do not disable.** Added after a live trade risked 84 points to make 15 (~1:5.5 against the trade) — a technically-valid-but-stale swing stop passed every other check. This is the last-resort economic sanity check, checked against the REAL numbers after everything else is decided. 100 = require at least 1:1. |
 
 **Target selection is two-tier, not a straight "nearest wins" across everything** (FIXED 2026-10-01):
 opposing DOM/UA resting levels and opposing IFVG zones are tried first — nearest of those wins if
@@ -133,54 +140,15 @@ original stop had nothing protecting it while breakeven was disabled.
 | Near-level pushback: reversal to trigger close (% of entry-to-level distance) | 25 | How far price has to reverse away from that extreme (back toward entry) before the position closes at market — same per-leg percentage scaling as the proximity setting above. |
 | Near-level pushback: also apply to stop side | **false** | **CHANGED 2026-10-02** — originally applied symmetrically (near stop then recovered → take the smaller loss rather than risk the full round-trip). Turned OFF: "when it comes to the stop loss i dont want it to close if it edges the stop loss like it does for the take profit." The two sides aren't actually equivalent — a reversal off the TARGET is a genuine failure to break through (protect the gain), but a reversal off the STOP can be the market defending the trade's own structure, i.e. the real move just starting. Closing there risked cutting winners off right as they began working. Kept as a separate toggle, not deleted, in case this needs revisiting. |
 
-## Profit momentum dying (added 2026-10-04 — a FOURTH, DOM-aware risk mechanism)
-
-Built after a live trade peaked around +$50 and gave it all back with nothing watching — it never
-reached the near-level-pushback's own target-proximity band (that one only engages in the final 25%
-stretch toward target), and breakeven wasn't enabled on that run. The operator: "it should be
-looking at the dom for the levels its rejecting off of and know when a trade that is in profit is
-dying out" — then confirmed live, watching the exact trade: "i saw there was a larger resting order
-at the level it topped at and reversed."
-
-Reads the SAME `RestingOrderEngine` levels the entry pathways already scan, now pointed at managing
-an OPEN position instead of triggering a new one.
-
-| Setting | Default | Why |
-|---|---|---|
-| Profit momentum dying: enable | **true** | Independent of breakeven/trailing/near-level-pushback — all four can run together. |
-| Profit momentum dying: minimum profit to arm (ticks) | 20 | Doesn't start watching at all until a trade has earned at least this much — avoids reacting to noise on a barely-positive trade. |
-| Profit momentum dying: opposing level proximity to peak (ticks) | 10 | How close a large opposing resting order (ask wall for a long, bid wall for a short) has to sit to the BEST price this trade has reached so far to count as "that's what capped it." |
-| Profit momentum dying: pullback off peak to trigger close (ticks) | 10 | Price must have actually pulled back off the peak by this much, on top of a qualifying level being nearby — a wall existing isn't enough on its own, price has to have actually reacted to it. |
-
-Level size uses the existing `AbsorptionStrongContracts` threshold (same "what counts as real"
-number absorption confluence already uses) rather than a new separate setting.
-
-**One mechanical note**: `bestPriceSinceEntry`/`worstPriceSinceEntry` (the "best price reached since
-entry" tracking both this feature and near-level-pushback depend on) used to only update while
-`NearLevelPushbackEnabled` was on — extracted into its own always-on `UpdatePriceExtremesSinceEntry`
-step so this feature gets accurate data regardless of that unrelated toggle.
-
 ## Risk management
 
-**Two different data sources, deliberately**: `AccountBalanceFloor` and `MaxDailyLoss` are checked
-against the REAL, LIVE `Account.Balance` (restart-immune — see below). `DailyProfitTarget` and
-`MaxDrawdown` still use the strategy's own internal counters (`dailyPnl`/`peakEquity`), which reset
-to zero on every RESTART, not just a new trading day — fine for a profit target (missing it just
-means a slightly late stop, not a blown account) but NOT fine for anything protecting against real
-loss, which is why those two were upgraded and the other two weren't.
-
 | Setting | Default | Why |
 |---|---|---|
-| Account balance floor ($, 0=off, STICKY) | **24200.00** | **ADDED 2026-10-05** — "i have currently a 25k account with a 600 daily draw down and a 1k max loss limit and the current max loss limit is set to 24,108.04." That's a TRAILING floor (ratchets up with new account highs). This codebase has no confirmed way to reconstruct a prop firm's own exact ratchet formula, so rather than guess, this is a DIRECTLY-SET hard floor on the real account balance — **update it yourself** whenever your firm's dashboard shows the real floor has moved. Default here = $24,108.04 + ~$92 margin, rounded. **STICKY**: once breached, stays breached — does NOT reset at the next day boundary, and survives a restart (persisted to `daily_risk_state.txt` next to the deployed DLL) — breaching a real trailing floor generally means the evaluation itself is over. |
-| Max daily loss ($, 0=off) | **450** | **CHANGED 2026-10-05, off→450** — real numbers: $600/day real limit, this is 75% of that, genuine margin not a round guess. Checked against the REAL account balance (`IsDailyLossLimitBreached`), not the strategy's own `dailyPnl` counter — see the note above this table for why that distinction matters given how often this strategy gets restarted mid-session. Resets daily (not sticky) via the same state file's day-key check. |
+| Max daily loss ($, 0=off) | 0 (off) | Your call — no strong evidence pushing this either way yet. |
 | Daily profit target ($, 0=off) | 0 (off) | Once realized + unrealized P&L for the day reaches this, closes any open position and refuses every new entry (both pathways) for the rest of the trading day — reset at the next EST session rollover. Unlike the loss/drawdown limits below, this is also checked while FLAT, so it stays in force after the trade that hit it has already closed. |
-| Max drawdown ($, 0=off) | **2000** | Same-session secondary layer only (internal `peakEquity`, resets on restart) — `AccountBalanceFloor` above is the real, restart-immune defense for your actual trailing-drawdown rule. Worth having *some* value here regardless. |
+| Max drawdown ($, 0=off) | **2000** | Recommended ON. At one point this was manually disabled on a live instance with no cap of any kind — worth having *some* circuit breaker even if $2,000 isn't the exact right number for your size. |
 | Max trades per session (0=off) | **10** | Same reasoning — a live instance ran with this off (unlimited) at the same time as the drawdown cap being off, which is a combination worth avoiding. |
 | Cooldown between entries (bars) | **5** | A live instance had this at 1 bar, which let it re-fire almost instantly after a close — part of what let a bad repeated-fade pattern run up a real loss in one overnight session. 5 gives a beat before trying again. |
-| Max losses per resting level (0=off) | **2** | **ADDED 2026-10-05** — an overnight session saw the SAME resting order triggering 7 separate absorption entries over ~3 hours as it kept absorbing without ever actually holding, net -$87 from that one level alone. Tracked per EXACT resting-level price, reset daily. Once a specific level has produced this many losing entries this session, `TryEnter` stops trading that exact level for the rest of the day — other levels are unaffected. |
-| Consecutive-loss cooldown: enable | **true** | **ADDED 2026-10-05** — a classic risk-of-ruin control. |
-| Consecutive-loss cooldown: losses to trigger | **4** | At this strategy's typical ~35-45% win rate, 4 losses in a row happens by pure chance often enough that this isn't reacting to noise alone — but it's also not so high that a genuinely bad stretch runs unchecked for long. |
-| Consecutive-loss cooldown: pause duration (minutes) | **30** | Time-based, not signal-count-based — a genuine cooldown regardless of how many (or few) qualifying setups appear during the pause. Applies to both entry pathways. |
 
 ## Session filter
 
@@ -238,26 +206,6 @@ on.
 | Trend filter: enable | true | Recommended ON. Asks a different, still-valid question — "is the whole SESSION running against this trade" — using a much longer window, so it doesn't have the same immediate-pre-reversal conflict as the local filter above. |
 | Trend filter: rolling window (bars) | 60 | Deliberately much longer than the local delta window — meant to span roughly an hour at 1-minute bars, not a handful of minutes. |
 
-## Structure filter (added 2026-10-04 — PRICE structure, not volume)
-
-A THIRD, independent filter — "i feel like purely trading off the poc can be dangourus without
-really looking at the market structure of the chart... we are not following the momentum of the
-price." The trend filter above asks whether volume *delta* agrees; this asks whether *price itself*
-has already broken to new ground. The two can genuinely disagree — a slow, absorption-driven grind
-to new highs can show flat or even negative delta the whole way up while price structure is
-unambiguously bullish.
-
-| Setting | Default | Why |
-|---|---|---|
-| Structure filter: enable | **true** | Blocks a SELL if current price has already traded above the last CONFIRMED swing high (real evidence the market broke to new ground against the fade) — mirrored for a BUY against the last confirmed swing low. No swing confirmed yet this run passes through, same as the trend filter's own "insufficient data doesn't block" convention. |
-| Structure filter: timeframe | **5 minute** | **REVISED 2026-10-04, same day.** The first version reused the chart's own 1-minute `SwingTracker` (the one built for stop placement), driven by `PocSwingPivotLookback` (default 3) — a pivot that only needs ~7 minutes to confirm on 1-minute bars. Live evidence caught it immediately: it blocked BUY signals on a noisy local dip right before a real rally. Now runs its OWN dedicated higher-timeframe series and its OWN `SwingTracker` instance, same pattern as the 5m/15m POC engines' own dedicated series — completely independent of the 1-minute tracker stops still use. Configurable so this can be tuned live (try 15-minute if 5 still feels too reactive) without a rebuild. |
-
-**Deliberately simple for a first pass** — this checks only the SINGLE most recent swing each side,
-not a genuine higher-high/higher-low SEQUENCE. A richer version would need `SwingTracker` to keep a
-short history of confirmed swings instead of just the latest. A full backup of the strategy as it
-stood right before this filter was added lives at `Strategies/FinchDomScalpStrategy-Backup/` — load
-that back up if this version doesn't work out.
-
 ## Observability
 
 Pure logging — neither of these touches trading logic.
@@ -265,4 +213,4 @@ Pure logging — neither of these touches trading logic.
 | Setting | Default | What it does |
 |---|---|---|
 | Heartbeat: log interval (minutes, 0=off) | 15 | Logs a snapshot (POC levels, delta readings, session state, minutes since last trade) on a fixed interval regardless of whether anything's happening — proof the poll loop is alive during a quiet stretch. Goes silent while a position is open. |
-| *(always on, no switch)* | — | Once a genuine setup is actually detected — a real POC rejection, or a resting level that already cleared its size + aligned-IFVG bars — a `[Signal skipped]` log line names the exact gate that blocked it and why: swing size, local delta, trend, structure, absorption confluence, or risk:reward, with the real numbers. The POC pathway only ever evaluates once per newly-closed bar, so it was never noisy. **FIXED 2026-10-05** — the absorption pathway's own skip logging had NO de-duplication and was reachable every poll; a persistent blocked level re-logged the identical line 4x/second (26,703 lines in one overnight session). Now de-duplicated the same way `ReportPollFault` already avoids repeat noise — only logs when the message actually changes. |
+| *(always on, no switch)* | — | Once a genuine setup is actually detected — a real POC rejection, or a resting level that already cleared its size + aligned-IFVG bars — a `[Signal skipped]` log line names the exact gate that blocked it and why: swing size, local delta, trend, absorption confluence, or risk:reward, with the real numbers (e.g. the actual rolling delta value, or the nearest same-side level's real current/absorbed numbers next to what's required). Only fires on a real near-miss, from either pathway, never as noise on an ordinary bar. |

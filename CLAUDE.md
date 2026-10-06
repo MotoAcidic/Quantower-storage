@@ -2241,6 +2241,58 @@ See `tvConfluenceStrategy/readme.md` for the full table (27 parameters: instrume
 - `confirmationCandleMinutes`: Time to wait for confirmation
 - `riskRewardRatio`: Target calculation multiplier
 
+#### UPDATE 2026-10-05 — repurposed: real 1-min continuation confirmation + swing HH/LL targets
+
+The operator: "there is also a mgc gold orb strategy i have in quantower that i want to repurpose,"
+then, confirmed via `AskUserQuestion`, scoped it narrowly: **keep the existing logic, fix/tune it
+in place** (not a rebuild like `mesOrbStrategy`'s own fresh ORB build the same day) — "the main
+strategy is to mark out the 8:00-8:05pm est range and then wait for a candle body closure out of
+the range and then a continuation in the 1min timeframe," plus "target hh and ll levels" for the
+take-profit.
+
+**Found and fixed first — the project wouldn't even build**: `.csproj` still pointed at
+`v1.146.18` (`StartProgram`/`HintPath`/`OutputPath`), which no longer exists on disk (only
+`v1.147.5` is installed) — same drift documented elsewhere in this file for other projects.
+Bumped to `v1.147.5` and the `OutputPath` to the standard `C:\Quantower\Settings\Scripts\
+Strategies\goldOrbStrategy` (it had been nested under the old version folder).
+
+**`BreakoutMode.CandleClosure` already existed** (detects a body CLOSE beyond the ORB range on
+the main `hdm` series) but its own "confirmation" step (`CheckForConfirmation`) was a pure TIME
+delay (`confirmationMinutes`, default 1) — it never actually checked price action, just waited a
+clock and entered regardless of whether the move had continued or reversed in that time. Replaced
+with a genuine 1-minute continuation check: a new, dedicated `continuationHistory` series
+(`ContinuationPeriod`, default `Period.MIN1`) decides off the NEXT real 1-min bar to close after
+the breakout — a bullish body that closes beyond the breakout price confirms (enter); anything
+else resets the breakout watch entirely rather than entering blind. `entryMode` default changed
+`FirstBreakout` → `CandleClosure`, matching the operator's own "the main strategy" framing.
+`confirmationMinutes` left declared but unused (removing an `InputParameter` risks breaking a
+saved instance's index-based settings mapping) with a note explaining why.
+
+**New `TargetMode` (`RiskReward` | `SwingHighLow`, default `SwingHighLow`)**: a new
+`SwingLevelTracker.cs` (fractal pivot confirmation, same rule as `finchDomScalpStrategy`'s own
+`SwingTracker`, but keeping a bounded HISTORY of confirmed swings on each side rather than just
+the latest one — needed because the target must be the nearest swing AHEAD of price, and the most
+recent confirmed swing is often already behind it once price has broken out). Fed from its own
+dedicated `swingHistory` series (`SwingDetectionPeriod`, default `Period.MIN5` — sub-minute pivots
+are noise, same lesson already learned fixing `finchDomScalpStrategy`'s structure filter).
+`CalculateTarget` picks the nearest qualifying swing high (longs) / low (shorts), falling back to
+the old Risk:Reward-multiple calculation whenever none exists yet or the nearest one is too close
+to be worth the trade (`minTargetRiskMultiple`, default 1.0x the stop's own risk) — never leaves a
+trade with no target.
+
+**Also fixed, found incidentally while touching `CalculateStopLoss`**: `FullOrbRange`/
+`FiftyPercentOrb`/the default case all multiplied `orbBufferTicks` by a hardcoded `0.25` — MNQ's
+tick size, not gold's (MGC's own tick size is 0.10). Changed to `this.CurrentSymbol.TickSize` in
+all three places. `FixedTickAmount` mode already did this correctly, which is how the mismatch
+surfaced — directly adjacent, clearly in scope for "tune it," fixed rather than left for later.
+
+**Verified 2026-10-05**: `dotnet build goldOrbStrategy/goldOrbStrategy.csproj -c Release` — 0
+errors, both right after the version-path fix alone and again after the full feature set. Deployed
+to `C:\Quantower\Settings\Scripts\Strategies\goldOrbStrategy\`. **NOT YET verified live** — the
+1-min continuation logic and the swing-target logic are both brand new paths with zero track
+record; watch the log (`"1-min continuation CONFIRMED/FAILED..."`, `"Target Mode: ..."`) against
+the real chart before trusting it unattended.
+
 ---
 
 ### 9. EMA Simple Strategy (`emaSimpleStrategy`) — undocumented until 2026-09-14
@@ -3401,6 +3453,397 @@ a target explicitly.
 
 ---
 
+#### THIRTIETH FIX, 2026-10-01 — POC demoted to last-resort target, not a peer competing on distance
+
+Live win/loss investigation (operator: "the win loss ratio needs to be improved"), diagnosed by
+pulling the per-instance strategy log's own `[Signal]` lines (which carry the anchor AND the
+`targetSource` string) and cross-referencing each against its real Serilog fill outcome for one full
+trading day. Broken down by WHAT THE TARGET WAS:
+
+| Target reason | Trades | Win rate | Net |
+|---|---|---|---|
+| Opposing IFVG zone | 14 | 42.9% | +$214.50 |
+| Opposing DOM/UA level | 5 | 40.0% | +$48.00 |
+| **Another POC** (5m or current-move) | 5 | **0%** | **-$49.50** |
+
+Every winning trade that day targeted a real structural level (an IFVG zone or a DOM/UA resting
+wall); every trade that targeted a different POC instead lost, 5-for-5. Root cause in
+`TryComputeTarget`: it gathered DOM/UA levels, IFVG zones, AND every enabled POC into one candidate
+pool and picked whichever was NEAREST, full stop — a POC has no side or role of its own (just
+wherever volume happened to cluster, unlike a resting-order wall or a gap), so a weak-but-closer POC
+could steal the target slot from a stronger-but-slightly-farther real level purely on proximity.
+
+Confirmed via `AskUserQuestion` over three options (demote POC to last-resort / remove POC-as-target
+entirely / wait for more days of data) — operator chose **demote to last resort**. `TryComputeTarget`
+rewritten as a two-tier search: DOM/UA + IFVG candidates are tried first, nearest of those wins if
+any qualify; a POC is only even considered when **none** of those qualify at all (not "none closer
+than the POC" — none, period). Applies to BOTH entry pathways (`TryEnter`/`PlacePocEntry`), since
+both share this one function.
+
+**Verified 2026-10-01**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c Release`
+— 0 errors. **NOT YET verified live** — based on one day's sample (24 trades); watch whether
+POC-as-target trades (now rarer) keep the same losing pattern, or whether this was partly noise.
+
+---
+
+#### THIRTY-FIRST FIX, 2026-10-02 — near-level pushback's stop side turned OFF, no longer symmetric with the target side
+
+The operator: "when it comes to the stop loss i dont want it to close if it edges the stop loss like
+it does for the take profit." This REVERSES part of the near-level-pushback feature's own original
+design (2026-09-29, see the TWENTY-SIXTH/TWENTY-SEVENTH entries above), which deliberately built the
+stop side as the symmetric mirror of the target side.
+
+The insight: the two sides were never actually equivalent in what a reversal MEANS. Price edging the
+TARGET then reversing away is a genuine failure to break through — closing protects the gain. Price
+edging the STOP then recovering away from it is the market defending the trade's own structure —
+closing there risks cutting the position right as the real move starts working, exactly the scenario
+the trade was placed to catch.
+
+New `NearStopPushbackEnabled` (default **false**) gates only the stop-side branch inside
+`CheckNearLevelPushback`; the target-side branch is unchanged and still governed solely by the
+existing `NearLevelPushbackEnabled`. Kept as its own toggle rather than deleting the stop-side code
+outright, matching this codebase's own established "a checkbox, not a revert" pattern (see
+`PocAbsorptionConfluenceEnabled`'s own history) — the operator can turn it back on later without
+anyone having to rebuild the mechanism from scratch.
+
+**Verified 2026-10-02**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c Release`
+— 0 errors. **NOT YET verified live.**
+
+---
+
+#### BACKUP, 2026-10-04 — `FinchDomScalpStrategy-Backup`, a frozen snapshot of the live strategy
+
+Before adding a new market-structure entry gate, the operator asked for "a full backup of this
+current strategy... i need a working backup of this incase i want to re-use it." A complete,
+renamed copy of the live strategy — `Strategies/FinchDomScalpStrategy-Backup/
+FinchDomScalpStrategy-Backup/` — taken as of right after the THIRTY-FIRST FIX above. Renamed
+throughout (`AssemblyName`/`RootNamespace`/class name `FinchDomScalpStrategyBackup`/`StrategyTag`
+→ `FinchDomScalpBackup`/display `Name` → `FinchDomScalpStrategy-Backup`/`OutputPath`/debug port
+62744→62745) so Quantower loads it as a genuinely separate script with its own identity and deployed
+folder — never colliding with the live strategy's own positions, orders, or settings, even if both
+were ever attached at once. Same `<Compile Include>` sources from Finch-Lite's own folder as the
+live strategy's own csproj.
+
+**Not meant to run alongside the live strategy day-to-day** — it exists purely so the operator can
+load this one back up if the market-structure experiment (below) doesn't work out, without anyone
+having to reconstruct the pre-change strategy from git history or memory.
+
+**Verified 2026-10-04**: `dotnet build FinchDomScalpStrategy-Backup/FinchDomScalpStrategy-Backup.csproj
+-c Release` — 0 errors, same 28 pre-existing warnings as the live strategy. Deployed DLL confirmed at
+`C:\Quantower\Settings\Scripts\Strategies\FinchDomScalpStrategy-Backup\`.
+
+---
+
+#### THIRTY-SECOND FEATURE, 2026-10-04 (same day) — structure filter: a PRICE-based hard block, distinct from the volume-based trend filter
+
+The operator: "i feel like purely trading off the poc can be dangourus without really looking at the
+market structure of the chart at that given time i have seen us try to reverse a trade a few time
+just for the price to keep going in the direction so we are not following the momentum of the
+price." Diagnosed by reading `PassesTrendFilter`'s own code: it sums buy/sell VOLUME over a rolling
+window, which can sit flat or even disagree with the real trend during a slow, absorption-driven
+grind to new highs/lows — no single aggressive push, so the delta sum never clearly flips, even
+though price itself has unambiguously broken structure.
+
+New `StructureFilterEnabled` (default **true**) and `PassesStructureFilter(Side)` — reuses
+`SwingTracker`'s own fractal pivots (already running unconditionally for stop placement, no new
+tracker needed): blocks a SELL if current price has already traded above the last CONFIRMED swing
+high, blocks a BUY the mirror way against the last confirmed swing low. No swing confirmed yet this
+run passes through, matching `PassesTrendFilter`'s own "insufficient data doesn't block" convention.
+Wired into both entry pathways (`TryEnter`/`TryGatePocSignal`), logged via the same
+`LogAbsorptionSignalSkipped`/`LogPocSignalSkipped` lines the other filters already use.
+
+**Deliberately a first pass, not the full idea**: this only checks the single most recent swing each
+side, not a genuine HH/HL-vs-LH/LL sequence (`SwingTracker` currently only remembers the LATEST
+confirmed high and low, not a short history of each). A richer sequence-based version was discussed
+and explicitly deferred — the operator asked to keep that idea in reserve in case this simpler
+version doesn't work out, which is also why the `FinchDomScalpStrategy-Backup` snapshot above exists:
+a clean rollback path that doesn't depend on reconstructing the pre-filter strategy from memory.
+
+**Verified 2026-10-04**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c Release`
+— 0 errors. **NOT YET verified live.**
+
+---
+
+#### THIRTY-THIRD FIX, 2026-10-04 (same day) — structure filter given its own higher-timeframe series, same-day catch
+
+The structure filter above shipped and was live for well under an hour before a screenshot caught
+it in the act: a run of `[Signal skipped] Buy ... blocked: structure filter (price already broke the
+opposing swing)` lines firing repeatedly right before price rallied hard — exactly the "fighting
+momentum" pattern the filter was built to prevent, except it was the FILTER doing the fighting. The
+operator: "should we really be basing everything just off the 1min poc."
+
+Root cause: the first version reused `SwingTracker` (built for stop placement), fed the chart's own
+1-minute bars with `PocSwingPivotLookback` (default 3) — a pivot confirms with only 3 bars on each
+side, so on 1-minute bars that's roughly a 7-minute window. That's noise-level, not genuine market
+structure — a routine local dip gets tagged as "the" swing low, and the filter then reads an
+ordinary pullback as "structure broken" and blocks the very entry that would have caught the move.
+
+Fixed by giving the structure filter its OWN dedicated higher-timeframe series and its OWN
+`SwingTracker` instance (`structureHistory`/`structureSwingTracker`/`structureBarsSeen`, drained by
+a new `DrainStructureSwings()`), completely independent of the 1-minute tracker stop placement still
+uses — same "own cursor, own history object" pattern the 5m/15m POC engines already established.
+New `StructureFilterPeriod` InputParameter (default 5-minute, confirmed via `AskUserQuestion` as
+configurable rather than hard-coded) picks the timeframe.
+
+**Verified 2026-10-04**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c Release`
+— 0 errors. **NOT YET verified live** — watch whether 5-minute swings still catch the same kind of
+false block; `StructureFilterPeriod` can be raised to 15-minute live, no rebuild needed, if so.
+
+---
+
+#### THIRTY-FOURTH FEATURE, 2026-10-04 (same day) — profit momentum dying: a DOM-aware FOURTH risk mechanism
+
+Live trade watched in real time: Buy at 31196.75, peaked around +$50 (~25 points), then gave it all
+back to -$8.32 with NOTHING protecting it — breakeven wasn't enabled on that run, and near-level-
+pushback's own target-side check never engaged (it only arms in the final 25% stretch toward target;
+the target was 53 points away, so the protected zone only started ~13 points short of it, and the
+trade topped out roughly 15 points before even reaching that zone). The operator: "it should be
+looking at the dom for the levels its rejecting off of and know when a trade that is in profit is
+dying out" — then, watching the SAME live trade: "i saw there was a larger resting order at the
+level it topped at and reversed."
+
+That live observation IS the mechanism: a FOURTH, independent check (`ProfitDecayEnabled`) that
+reads the exact same `RestingOrderEngine` levels `TryEnter` already scans for entries, now pointed at
+an OPEN position. Once a trade is in profit beyond `ProfitDecayMinProfitTicks`, if a large opposing
+resting order (ask wall for a long, bid wall for a short — size at or above the existing
+`AbsorptionStrongContracts` threshold) sits within `ProfitDecayLevelProximityTicks` of the best price
+reached so far, AND price has pulled back off that peak by `ProfitDecayPullbackTicks`, the position
+closes immediately — the DOM itself is the trigger, not a fixed percentage of distance to a target
+that might be nowhere close.
+
+**One shared-state fix along the way**: `bestPriceSinceEntry`/`worstPriceSinceEntry` used to only get
+updated INSIDE `CheckNearLevelPushback`, gated behind `NearLevelPushbackEnabled` — meaning if that
+unrelated toggle were ever off, this new feature would have silently gotten stale data. Extracted
+into its own always-on `UpdatePriceExtremesSinceEntry`, called unconditionally every poll before
+either feature reads it.
+
+**Verified 2026-10-04**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c Release`
+— 0 errors. **NOT YET verified live** — built directly from watching one real trade; worth confirming
+it fires correctly (and not too eagerly) on the next few winners that stall out.
+
+---
+
+#### THIRTY-FIFTH FEATURE, 2026-10-05 — five eval-hardening changes from one overnight -$300 review
+
+The operator: "review the trades from overnight and see what can be done better because we are down
+300," then, after finding the structure filter couldn't be directly blamed (it can only ever block a
+trade, never cause a loss): "i want this strategy to pass evaluations for me" — which reframes the
+whole priority. For an evaluation, avoiding a ruinous stretch matters more than maximizing average
+trade quality: one breach of a daily-loss or max-drawdown rule fails the eval regardless of how
+profitable the strategy is on average. Then, mid-review: "even if we scalp for like 15-20$ wins makes
+the strategy a true scalping strategy and more profitable than what we have going right now."
+
+**Root-caused from real data, not guessed**: pulled every fill + signal from the overnight session
+and found two concrete, confirmed patterns — not "targets too far, ran back to stop" (the operator's
+own first guess, checked and found NOT to match: the two biggest losses had R:R sitting at 1.06:1
+and exactly 1.0:1 and went straight to a full stop, no pullback-from-near-target involved).
+
+1. **The SAME resting order at 31200 triggered 7 separate absorption-pathway entries** over ~3 hours
+   as it kept absorbing more size (252→285 contracts) without ever actually holding — net -$87 from
+   that one level. The exact repeated-re-shorting failure mode already documented once before in
+   this file's own history (2026-09-29, a different level) — recurred because nothing in the code
+   actually remembers "we already lost against this specific price today."
+2. **Two near-1:1 R:R trades** (1.06:1, exactly 1.0:1) produced the two biggest losses of the night
+   (-$80.50, -$69.50), both going straight to a full stop with no real margin for error.
+
+**Five changes, all data-justified**:
+
+- **`MaxTargetDistanceTicks`** (new, default 40 ticks = $20) — caps every computed target (IFVG/
+  DOM-UA/last-resort POC/fallback) at this distance from entry, even when the qualifying level sits
+  farther out. The scalp-mode change: consistent small wins instead of chasing whatever level
+  happens to be 50+ points away. `TryComputeTarget` clamps the PRICE, not the candidate search — a
+  real level still has to exist and qualify, it just doesn't need the full distance. This also
+  forces stop distance to stay proportionate for a trade to clear the (unchanged) R:R filter,
+  without a second explicit stop cap — one change, two effects.
+- **`MinRewardRiskPercent`: 100 → 120** — modest margin increase, directly targeting the "barely
+  clears 1:1" pattern behind the night's two biggest losses. Not raised further since the target cap
+  above already does most of the proportionality work.
+- **`MaxLossesPerLevel`** (new, default 2) — tracked per EXACT resting-level price
+  (`lossesPerLevel`, reset daily). After this many LOSING entries against one specific level,
+  `TryEnter` stops trading that exact level for the rest of the session. Required threading a new
+  `pendingEntryLevelPrice` through `PlaceEntry` (null for POC entries, the level's own price for
+  absorption entries) so `Core_TradeAdded` knows which level to blame at trade-close time.
+- **Consecutive-loss cooldown** (new: `ConsecutiveLossCooldownEnabled`/`ConsecutiveLossThreshold`=4/
+  `ConsecutiveLossCooldownMinutes`=30) — a classic risk-of-ruin control, proposed days earlier and
+  finally built. Time-based, not signal-count-based. Tracked in `Core_TradeAdded` off the SAME
+  per-trade realized-P&L sign the per-level tracker uses.
+- **`MaxDailyLoss`: off → $300** — there was NO automatic circuit breaker before this; the overnight
+  session that prompted this whole review ran to -$300 with nothing stopping it. **Explicitly a
+  data-driven placeholder** (it's exactly what that session lost), not a real evaluation's own rule —
+  needs tightening to the operator's actual eval limit, with real margin below it, once known.
+
+**One more bug found and fixed along the way, unrelated to P&L**: `LogAbsorptionSignalSkipped` had
+no de-duplication, unlike every other fault-reporting path in this file (`ReportPollFault`,
+`CheckPocRejection`'s own skip logging). Reachable every poll (not bar-gated like the POC pathway),
+a persistently-blocked level re-logged the identical line 4x/second — 26,703 lines in the one
+overnight session reviewed. Fixed with the same `lastX`-compare-and-skip pattern already used
+elsewhere.
+
+**Verified 2026-10-05**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c Release`
+— 0 errors (one real compile error along the way — `source` is an `out` parameter and C# won't allow
+capturing it inside a local function; fixed by returning the clamped price and comparing it against
+the original in the caller instead of assigning `source` from inside `ClampToMaxDistance`).
+**NOT YET verified live** — five simultaneous changes from one review; worth watching the next
+session closely rather than assuming all five land exactly as intended.
+
+---
+
+#### THIRTY-SIXTH FEATURE, 2026-10-05 (same day) — account-balance-based risk, restart-immune, with the real eval numbers
+
+Immediately following the THIRTY-FIFTH entry above, the operator gave the real evaluation numbers:
+"i have currently a 25k account with a 600 daily draw down and a 1k max loss limit and the current
+max loss limit is set to 24,108.04 and the current account balance is 24,541.94." Working through
+those numbers surfaced a much bigger problem than the $300/$2000 placeholders from the entry above.
+
+**The bug**: `MaxDailyLoss`/`MaxDrawdown` were (and `MaxDrawdown` still is) checked against this
+strategy's own internal counters — `dailyPnl`, `peakEquity`. Both reset to ZERO in `OnRun`, which
+runs on every STRATEGY RESTART, not just at a new trading day. The operator restarts this strategy
+to redeploy builds constantly — dozens of times across single sessions this week alone (visible
+throughout this file's own changelog). A circuit breaker that forgets everything it knew the moment
+the operator redeploys a fix is not a circuit breaker for an evaluation account.
+
+**Prior art found and used**: `Indicators/ORB-IX/src/OrbIx.Core/Risk/AccountSnapshot.cs` had already
+solved an adjacent version of this problem for the ORB-IX indicator, and documented one thing as
+explicitly UNVERIFIED: whether `Account.Balance` already includes unrealized P&L intraday on this
+connector, or only updates on a closed trade ("balance - start double-counts if it already carries
+open profit"). The fix here sidesteps needing to know the answer: using `Balance_now -
+Balance_at_day_start` directly, with NO separately-tracked unrealized P&L added on top, is correct
+either way — if Balance already marks-to-market, the delta already reflects today's live P&L; if it
+doesn't, the delta is exactly today's realized P&L. No double-counting risk in either case.
+
+**Built**:
+- **`AccountBalanceFloor`** (new, default $24,200.00 — the operator's own $24,108.04 real floor plus
+  ~$92 margin) — a hard floor on the REAL, LIVE `Account.Balance`. Deliberately NOT an attempt to
+  reconstruct the firm's own trailing-drawdown ratchet formula automatically (unconfirmed whether it
+  uses intraday or EOD peaks, whether it caps at the starting balance — none of that is knowable from
+  this codebase) — the operator updates this themselves from their own firm dashboard. **STICKY**:
+  once breached, stays breached across both day boundaries AND restarts (persisted to
+  `daily_risk_state.txt`, written next to the deployed DLL — a stable path across restarts/rebuilds,
+  unlike the per-instance ScriptsData log folder which gets a new GUID every attach). Breaching a
+  real trailing floor generally means the evaluation itself is over, not "pause for today."
+- **`MaxDailyLoss`: $300 → $450** (75% of the real $600 daily limit — genuine margin, not a round
+  guess) — and more importantly, its CHECK was rebuilt: `IsDailyLossLimitBreached()` recomputes LIVE,
+  every call, from `Account.Balance - dayStartBalance`, never a cached/latched flag. `dayStartBalance`
+  itself IS persisted (same state file), reloaded once per EST day per restart by
+  `EnsureDailyBalanceState`, defaulting to "today starts now" if the file is new, unreadable, or
+  stale from a prior day — never blocking or crashing on a read failure.
+- **Old `dailyPnl`-based `MaxDailyLoss` check REMOVED** from `CheckRiskLimits`, fully superseded by
+  the balance-based one. `DailyProfitTarget`/`MaxDrawdown` deliberately left on the OLD internal-
+  counter approach — missing a profit-target stop a bit late, or having a same-session-only secondary
+  drawdown layer, isn't dangerous the way a forgotten LOSS limit is.
+- Both new checks wired into the entry gates too (`TryEnter`/`CheckPocRejection`) — a floor breach or
+  daily-loss breach must block NEW entries, not just close an already-open position.
+
+**Verified 2026-10-05**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c Release`
+— 0 errors, 31 warnings (all pre-existing nullable-annotation-context style). **NOT YET verified
+live** — specifically, the one thing AccountSnapshot.cs itself flagged as never confirmed (does
+`Account.Balance` move intraday on this Rithmic connection, or only on a closed trade) is STILL
+unconfirmed here — the design is correct either way, but worth watching the `daily_risk_state.txt`
+file's own written values against what the account actually does over the next session to build real
+confidence.
+
+---
+
+#### THIRTY-SEVENTH FIX, 2026-10-05 (same day) — orphaned positions ran with ZERO protection; position re-identification relaxed on bootstrap too
+
+The operator: "i just manually closed out an order that was up $71.50 because the take profit was so
+far away, I dont want these larger trades i want quick scalps." Investigation found the target cap
+from earlier today WAS working correctly (the entry signal showed `target=31205.125 ... capped`, 10
+points from entry) — the real problem was the position's own CLOSING fill carried an EMPTY Comment,
+meaning this strategy instance never recognized the position as its own after a mid-session restart
+and never armed a stop or target for it at all. A second, worse case the SAME session: two
+Comment-empty short fills sat with literally no protection for ~11 minutes until a manual close
+realized a **-$138.50 loss**. Both happened during a cascade of THREE restarts within about 90
+seconds (14:10–14:13 ET) — exactly the kind of rapid mid-session redeploy this operator does
+constantly, now confirmed to actually cost real money, not just a theoretical risk (this exact
+mechanism was diagnosed and explained, unfixed, a few turns earlier in this same conversation).
+
+**Root cause**: `IsMyPosition`/`IsMine`'s own BOOTSTRAP path (`resolvedSymbolId` still null, i.e.
+right after a fresh restart) required an EXACT `Comment == "FinchDomScalp"` match with no fallback —
+unlike the POST-bootstrap path, whose own doc comment already documents an "ACCEPTED RISK" of
+adopting ANY position on the exact contract+account regardless of Comment. The bootstrap path was
+stricter than the codebase's own already-accepted philosophy, for no good reason — and Comment
+coming back empty on a position event is a repeatedly-observed platform quirk this file has hit
+before (see the TENTH-issue-era history above `IsMyPosition`'s own doc comment).
+
+**Fixed**: both methods now accept EITHER a Comment match OR an exact contract-id match
+(`symbol.Id == this.CurrentSymbol.Id`) on the bootstrap path too — the same tradeoff the
+post-bootstrap path already accepts, just no longer gated behind having bootstrapped once already.
+A genuinely different symbol on the same connection/account still requires the Comment to match.
+
+**A second bug found while fixing the first**: an ADOPTED position (one this instance never itself
+signaled) leaves `pendingStopPrice`/`pendingTargetPrice` at their `OnRun`-reset default of **0** —
+and `EnforceMinStopDistance`/`EnforceMinTargetDistance` would have passed 0 straight through (it's
+"far enough" from the real fill to look like an already-qualifying price), producing a protective
+stop order at price ZERO. `PlaceProtectiveOrders` now detects this exact state (`pendingStopPrice ==
+0 && pendingTargetPrice == 0`) and falls back to a sane stop/target computed straight from the
+position's own real fill (`MinStopDistanceTicks`/`FallbackTargetTicks`, the same shape `TryEnter`'s
+own no-real-level fallback already uses), logging clearly that this was an adopted position being
+given fallback protection rather than its own real signal data.
+
+**Verified 2026-10-05**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c Release`
+— 0 errors, 31 warnings (all pre-existing). **NOT YET verified live** — next restart-while-in-a-trade
+should show a `[Risk] ADOPTED a position...` log line and a real (non-zero) protective bracket,
+instead of today's silent, unprotected orphan.
+
+---
+
+#### THIRTY-EIGHTH FIX, 2026-10-05 (same day) — protective target silently refused by the broker ~2ms after reporting success; off-tick-grid prices from the `midPrice` anchor
+
+The operator, screenshot of an open `2@31,214.50 -11.64 USD` position with only a STP order visible:
+"this position never put a take profit." The strategy's own per-instance log said the opposite —
+`[Order] protective stop=31204.5 target=31224.375 ... placed as separate orders.` — so this was
+checked against Quantower's raw Serilog (`C:\Quantower\Logs\Serilog\20261005.slog`) around the fill,
+not taken at either the operator's or the strategy's own word (see
+`quantower-strategy-log-debugging` memory). The full sequence for order 41254858 (the Sell Limit
+target, Qty 2 @ 31,224.38):
+
+```
+15:36:07.4905  Trading operation result: Success. Order Id: 41254858
+15:36:07.4920  Order update: ... Sell, Limit, 0/2, Pr = 31,224.38, Opened
+15:36:07.4926  Refuse — Description: bad price
+15:36:07.4927  Order remove / Order history: ... Refused
+```
+
+The broker accepted the order, flipped it to "Opened" for about half a millisecond, then refused it
+outright with **"bad price."** The operator was right; the strategy's own "placed" log was true only
+of the SYNCHRONOUS `PlaceOrder` result — Rithmic's real, async verdict arrived ~2ms later and nothing
+in this file was listening for it.
+
+**Root cause of the bad price**: `TryEnter` anchors its target math on `midPrice` (bid+ask midpoint,
+its own call site: `this.TryEnter(levels, fvg.Active, midPrice, tickSize)`), not the fill price.
+MNQ trades in 0.25 ticks, so any time the spread is an odd number of ticks the midpoint itself sits
+exactly half a tick off-grid (e.g. bid 31214.25 / ask 31214.50 → mid 31214.375). `MaxTargetDistanceTicks`'s
+own clamp (`TryComputeTarget`'s `ClampToMaxDistance`, added earlier today) computes `midPrice ±
+(ticks * tickSize)`, which inherits that same fractional offset straight into the final order price —
+exactly how 31224.375 (not a legal MNQ price) got sent to the exchange.
+
+**Fixed, two layers**:
+1. **Prevent it**: `PlaceProtectiveOrders` now rounds both `stopPrice` and `targetPrice` to the
+   nearest real tick (`Math.Round(price / tickSize, MidpointRounding.AwayFromZero) * tickSize`)
+   immediately before either `Core.Instance.PlaceOrder` call — the single choke point every pricing
+   path (signal-computed, POC-computed, adopted-position fallback) already funnels through, so one
+   fix covers all of them rather than patching `ClampToMaxDistance` and every other price source
+   individually.
+2. **Catch it if it still happens for some other reason**: `Core_OrdersHistoryAdded` already handled
+   `OrderStatus.Refused` but only reset two unrelated wait-flags — it never checked whether the
+   refused order was one of THIS position's protective legs. Added `RepairMissingProtectiveOrders()`,
+   called on every refusal: checks what's ACTUALLY resting right now via the existing
+   `FindProtectiveStopOrder`/`FindProtectiveTargetOrder` lookups, and self-heals — a missing TARGET
+   gets a fresh fallback re-placed (`FallbackTargetTicks` from the real fill, tick-rounded); a missing
+   STOP closes the position immediately, matching the existing synchronous stop-failure philosophy
+   ("a trade must never run with no stop at all") now extended to the asynchronous case. Self-correcting
+   by design — if both legs are genuinely resting, it does nothing.
+
+**Verified 2026-10-05**: `dotnet build finchDomScalpStrategy/finchDomScalpStrategy.csproj -c Release`
+— 0 errors, 31 warnings (all pre-existing, unrelated). Deployed (`OutputPath` writes straight to
+`C:\Quantower\Settings\Scripts\Strategies\finchDomScalpStrategy\`). **NOT YET verified live** — next
+live target placement should never again show a fractional (non-multiple-of-0.25) price in the
+`[Order] protective ...` log line, and if a refusal ever does slip through for some other reason, a
+new `[Risk] protective TARGET/STOP is missing ...` log line should appear instead of silence.
+
+---
+
 ### 14. Ocean's Stack Strategy (`oceansStackStrategy`) — added 2026-09-29
 
 **Files:** `Strategies/oceansStackStrategy/oceansStackStrategy/oceansStackStrategy.csproj`,
@@ -3488,6 +3931,115 @@ cross-checked against the same day's Ocean's Stack Pine chart directly before tr
 signal, and it fires rarely by design (score >= threshold AND fuel AND sweep AND reclaim, all
 inside a 60-minute window) — expect to watch `[Signal skipped]`/heartbeat logs for a while before
 seeing a real trade.
+
+---
+
+### 15. MES ORB Strategy (`mesOrbStrategy`) — added 2026-10-05
+
+**Files:** `Strategies/mesOrbStrategy/mesOrbStrategy/mesOrbStrategy.csproj`, `mesOrbStrategy.cs`,
+`SETTINGS.md`.
+
+A port of the operator's own discretionary MES opening-range-breakout play ("this is one i
+personally traded for a good while"): mark the 8:00-8:15 ET high/low, wait for a 5-minute close
+beyond either side, wait for a ~50% retest of the midpoint, drop to the 1-minute chart to confirm a
+rejection off that zone in the break direction, then enter with a fixed stop/target. Genuinely
+different character from both `finchDomScalpStrategy` (DOM/order-flow, continuous scalping) and
+`oceansStackStrategy` (value-area sweep-and-reclaim) — this one is pure price-action, cross-
+timeframe (5m for the break/retest, 1m for the rejection confirmation), at most once a day.
+
+**Three decisions confirmed via `AskUserQuestion` before any code was written** (the operator's
+own description had two genuine ambiguities that mattered for real money):
+1. **Rejection definition**: a 1-min bar that wicks into/through the retest zone but CLOSES back
+   through the midpoint in the breakout direction — pure price action, no DOM/order-flow data
+   (the stricter pin-bar and the full order-flow-absorption alternatives were both declined).
+2. **Stop placement**: the operator's own words named both "the other side of the box" AND "~5pt
+   stop loss" — these conflict on a wide-range day. Resolved: **always a fixed ~5pt stop**, never
+   box-relative; the box's width still gates whether the day trades at all (`Min/Max ORB range`),
+   just not the stop's own distance.
+3. **Second-chance reversal** (the operator's own description, not one of the offered options):
+   if the midpoint rejection gets "disrespected" and price closes beyond the OPPOSITE side of the
+   box, follow that reversal directly — same fixed stop/target, no second retest-and-rejection
+   wait, since the full-range move already showed the conviction that wait would otherwise check
+   for. This is the sole exception to "one trade per day."
+
+**Prior art checked first**: `esOrbStrategy` already exists in this repo and covers similar
+ground (three entry modes including a "50% retest" mode, three stop-loss modes) but is a single-
+timeframe strategy with a hand-rolled EST offset (`estTimezoneOffset`, a manual double rather than
+real `TimeZoneInfo` conversion — silently wrong across a DST transition) and a lot of unrelated
+scope (session-reversal trading, pre-market volume gating). Not reused — this is a genuinely new,
+cross-timeframe build, using `oceansStackStrategy`'s own proper `TimeZoneInfo.FindSystemTimeZoneById
+("America/New_York")` pattern instead.
+
+**Order-placement safety ported wholesale from `finchDomScalpStrategy`**, not re-learned from
+scratch on a second live strategy: separate stop/target orders tick-rounded immediately before
+either reaches the broker (closes the exact "bad price" async-refusal bug found and fixed there
+today — THIRTY-EIGHTH FIX above), an adopted position (one this instance didn't itself open) gets
+a sane fallback stop/target from its real fill instead of a zeroed default, any async order refusal
+self-heals (missing target re-placed, missing stop closes the position immediately — never run
+with no stop at all), and `IsMine`/`IsMyPosition` use the same bootstrap-relaxed contract+account
+matching. Daily-loss/account-floor risk limits read the real broker `Account.Balance`, persisted in
+their own `mes_orb_daily_risk_state.txt` file so they survive a mid-session restart.
+
+**Known, accepted limitation**: on `OnRun`, the ORB box itself (high/low/midpoint) is always
+correctly rebuilt from history for today — a simple min/max over today's window bars, order-
+independent, safe at any restart time. The breakout → retest → rejection SEQUENCE is deliberately
+NOT retroactively replayed — a restart after the window closes always resumes "awaiting a fresh
+breakout" from that moment forward, even if a breakout/retest/rejection already fully completed
+earlier today. An early design considered replaying 1-minute bars through the full state machine on
+startup to close this gap, but was rejected: the phase a replayed bar would be checked against is
+whatever the state machine ends up at AFTER processing all of today's 5-minute bars, not the phase
+that was actually active when each 1-minute bar historically closed — a bar from right after the
+breakout (before ever reaching the retest zone) could spuriously look like a rejection by
+coincidence and fire a stale, wrong entry immediately on restart. Given this strategy trades at
+most once a day, the honest documented gap was judged safer than a subtly-wrong fix.
+
+**Same-day addition: SESSION LEVELS, a second independent setup** ("the other part of my
+strategy... mark out the untested highs and lows from each session so asia, london, ny"). Marks
+each of Asia/London/NY's own high/low, frozen the instant that session ends — same accumulate-
+and-freeze pattern as `oceansStackStrategy`'s own `SessionPoolTracker`, just three sessions instead
+of overnight/Asia/prior-day/prior-week. Six independent level state machines (one per session per
+side), each watched until a 5-min bar touches it, then handed to the 1-min chart for one of two
+reads: a REJECTION right there (fade, opposite the approach direction), or a clean BREAK through
+followed by "a little pullback" and a 1-min rejection candle off THAT pullback (confirming a move
+WITH the breakout). Same fixed stop/target as the ORB play, reusing the exact same
+`StopLossPoints`/`ProfitTargetPoints` — the operator's own words were "the same 5pt stop and
+15-20pt tp," so this intentionally shares the risk-sizing inputs rather than duplicating them.
+
+**Four decisions confirmed via `AskUserQuestion`**:
+1. **Same strategy, not a separate project** — one attach runs both playbooks, sharing the same
+   account-balance risk limits (avoids the two setups double-counting risk against each other).
+2. **A touch marks a level tested, period** — classic liquidity-sweep semantics: once price trades
+   through a level, that resting liquidity is spent whether or not THIS strategy acts on it. Each
+   of the six levels gets exactly one look per cycle, never re-armed until the next time that
+   specific session completes again.
+3. **Independent daily cap**: up to six session-level trades a day (one per level touched),
+   entirely separate from the ORB play's own one-trade-per-day cap — the only shared constraint is
+   the ordinary "never more than one position open at once" guard (`EnterTrade` itself).
+4. **Pullback entry = a 1-min rejection candle off the pullback**, not a bare "price receded a bit"
+   check — same confirmation discipline as the main rejection play, applied to the continuation
+   case too.
+
+**Decoupled `EnterTrade` from the ORB's own day-end flag**: it used to set `phase =
+OrbPhase.DoneForDay` internally, which was fine while the ORB play was the only caller, but would
+have wrongly ended the ORB's own day every time a session-level trade fired (and vice versa, had
+the dependency run the other way). `EnterTrade` now just returns whether the order was placed; each
+ORB call site sets its own `DoneForDay` afterward, regardless of the return value (an attempt that
+fails to place still shouldn't retry the same stale signal every bar) — session-level entries don't
+touch ORB state at all, and the two setups now genuinely run independently.
+
+**Startup reconstruction reuses the live code path directly** rather than a second, parallel
+implementation: `ReconstructSessionLevels` just replays all of `history5m` through the exact same
+`ProcessSessionLevels5mBar` the live poll loop calls, then forces every level back to `Idle` before
+going live (same restart-limitation reasoning as the ORB's own box — reconstructing
+Price/Untested status is safe and order-independent, but resuming a mid-reaction/pullback watch is
+not). Zero risk of the replay path drifting from the live path, since it IS the live path.
+
+**Verified 2026-10-05**: `dotnet build mesOrbStrategy/mesOrbStrategy.csproj -c Release` — 0 errors
+(both before and after the session-levels addition; warning count unchanged, all pre-existing
+nullable-annotation-context notices). Deployed to
+`C:\Quantower\Settings\Scripts\Strategies\mesOrbStrategy\`. **NOT YET verified live** — brand new,
+zero automated track record for either setup; watch the `[ORB]`/`[Session]`/`[Signal]`/`[Order]`
+log lines against the real chart for several days before trusting it unattended.
 
 ---
 
@@ -3637,6 +4189,7 @@ above.
 | Slope Change | Momentum shifts | Choppy trends | High |
 | Weighted Surge | Refined momentum | Variable volatility | Medium |
 | Gold ORB | Session breakouts | Gold futures | Medium |
+| MES ORB | Opening-range breakout + retest/rejection | MES futures, morning session | Medium |
 
 This documentation should be updated whenever strategy logic or parameters are modified.
 
