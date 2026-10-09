@@ -45,7 +45,9 @@ public sealed class OrbLevelsIndicator : Qt.Indicator
     private Qt.Symbol? symbol;
     private string? overlayFault;
     private HistoricalData? history5m;
+    private HistoricalData? history15m;
     private int barsSeen5m;
+    private int barsSeen15m;
 
     [InputParameter("Poll interval (ms)", 1, 100, 5000, 50, 0)]
     public int PollIntervalMs { get; set; } = 1000;
@@ -83,6 +85,13 @@ public sealed class OrbLevelsIndicator : Qt.Indicator
 
     [InputParameter("Session levels: enabled", 30)]
     public bool SessionLevelsEnabled { get; set; } = true;
+
+    /// <summary>CHANGED 2026-10-06 to match mesOrbStrategy's own same-day update (source TikTok:
+    /// "he goes to the 15min time frame and marks out all the untested highs and lows") — session
+    /// levels now read from their OWN dedicated series, independent of the ORB box's 5-minute one,
+    /// so what this indicator draws matches what the strategy is actually watching.</summary>
+    [InputParameter("Session levels: timeframe", 47)]
+    public Period SessionLevelPeriod { get; set; } = Period.MIN15;
 
     [InputParameter("Asia session start hour (ET)", 31, 0, 23, 1, 0)]
     public int AsiaStartHour { get; set; } = 18;
@@ -238,6 +247,7 @@ public sealed class OrbLevelsIndicator : Qt.Indicator
 
             var lookback = DateTime.UtcNow.AddDays(-(Math.Max(0, this.KeepPriorDays) + 4));
             var history = symbol.GetHistory(Period.MIN5, symbol.HistoryType, lookback);
+            var sessionHistory = symbol.GetHistory(this.SessionLevelPeriod, symbol.HistoryType, lookback);
 
             // FOUND 2026-10-06 (mesOrbStrategy's own identical bug, same day: "why did it not
             // have a orb box drawn... it should look at historical bars to build it if it started
@@ -252,15 +262,18 @@ public sealed class OrbLevelsIndicator : Qt.Indicator
             // precondition pattern in Finch-Lite) — reusing it here is cleaner than blocking: if
             // the backlog isn't populated yet, dispose this attempt and let OnRetryTimer call
             // TryInitialise again a second later, which re-fetches and re-checks from scratch.
-            if (history.Count < 100)
+            if (history.Count < 100 || sessionHistory.Count < 50)
             {
                 history.Dispose();
-                this.overlayFault = $"Waiting for history to populate ({history.Count}/100 bars so far)...";
+                sessionHistory.Dispose();
+                this.overlayFault = $"Waiting for history to populate ({history.Count}/100, {sessionHistory.Count}/50 bars so far)...";
                 return false;
             }
 
             this.history5m = history;
+            this.history15m = sessionHistory;
             this.barsSeen5m = 0;
+            this.barsSeen15m = 0;
 
             this.ReplayHistory();
 
@@ -280,6 +293,7 @@ public sealed class OrbLevelsIndicator : Qt.Indicator
         this.retryTimer?.Dispose();
         this.pollTimer?.Dispose();
         this.history5m?.Dispose();
+        this.history15m?.Dispose();
         this.orbOverlay.Dispose();
         this.levelOverlay.Dispose();
         base.Dispose();
@@ -311,44 +325,62 @@ public sealed class OrbLevelsIndicator : Qt.Indicator
     }
 
     /// <summary>Full backlog replay on attach — reconstructs completed ORB boxes and the current
-    /// session-level state all at once, through the exact same per-bar method the live poll uses
-    /// (zero risk of the replay path drifting from the live path, since it IS the live path).</summary>
+    /// session-level state all at once, through the exact same per-bar methods the live poll uses
+    /// (zero risk of the replay path drifting from the live path, since it IS the live path). ORB
+    /// (5-min) and session levels (own dedicated timeframe, 15-min by default) are independent
+    /// series since 2026-10-06, matching mesOrbStrategy's own same-day split.</summary>
     private void ReplayHistory()
     {
-        if (this.history5m is not { } h) return;
-
-        var closedUpTo = Math.Max(0, h.Count - 1);
-        for (var i = 0; i < closedUpTo; i++)
+        if (this.history5m is { } h5)
         {
-            if (TryReadBar(h, i, out var openUtc, out var open, out var high, out var low, out var close))
-                this.ProcessBar(openUtc, high, low);
+            var closedUpTo = Math.Max(0, h5.Count - 1);
+            for (var i = 0; i < closedUpTo; i++)
+            {
+                if (TryReadBar(h5, i, out var openUtc, out var open, out var high, out var low, out var close))
+                    this.ProcessOrbBar(openUtc, TimeZoneInfo.ConvertTimeFromUtc(openUtc, SessionZone), high, low);
+            }
+
+            this.barsSeen5m = closedUpTo;
         }
 
-        this.barsSeen5m = closedUpTo;
+        if (this.SessionLevelsEnabled && this.history15m is { } h15)
+        {
+            var closedUpTo = Math.Max(0, h15.Count - 1);
+            for (var i = 0; i < closedUpTo; i++)
+            {
+                if (TryReadBar(h15, i, out var openUtc, out var open, out var high, out var low, out var close))
+                    this.ProcessSessionLevelsBar(openUtc, TimeZoneInfo.ConvertTimeFromUtc(openUtc, SessionZone), high, low);
+            }
+
+            this.barsSeen15m = closedUpTo;
+        }
     }
 
     private void DrainNewBars()
     {
-        if (this.history5m is not { } h || h.Count <= 1) return;
-
-        var closedUpTo = h.Count - 1;
-        for (var i = this.barsSeen5m; i < closedUpTo; i++)
+        if (this.history5m is { } h5 && h5.Count > 1)
         {
-            if (TryReadBar(h, i, out var openUtc, out var open, out var high, out var low, out var close))
-                this.ProcessBar(openUtc, high, low);
+            var closedUpTo = h5.Count - 1;
+            for (var i = this.barsSeen5m; i < closedUpTo; i++)
+            {
+                if (TryReadBar(h5, i, out var openUtc, out var open, out var high, out var low, out var close))
+                    this.ProcessOrbBar(openUtc, TimeZoneInfo.ConvertTimeFromUtc(openUtc, SessionZone), high, low);
+            }
+
+            this.barsSeen5m = closedUpTo;
         }
 
-        this.barsSeen5m = closedUpTo;
-    }
+        if (this.SessionLevelsEnabled && this.history15m is { } h15 && h15.Count > 1)
+        {
+            var closedUpTo = h15.Count - 1;
+            for (var i = this.barsSeen15m; i < closedUpTo; i++)
+            {
+                if (TryReadBar(h15, i, out var openUtc, out var open, out var high, out var low, out var close))
+                    this.ProcessSessionLevelsBar(openUtc, TimeZoneInfo.ConvertTimeFromUtc(openUtc, SessionZone), high, low);
+            }
 
-    private void ProcessBar(DateTime openUtc, double high, double low)
-    {
-        var barEt = TimeZoneInfo.ConvertTimeFromUtc(openUtc, SessionZone);
-
-        this.ProcessOrbBar(openUtc, barEt, high, low);
-
-        if (this.SessionLevelsEnabled)
-            this.ProcessSessionLevelsBar(openUtc, barEt, high, low);
+            this.barsSeen15m = closedUpTo;
+        }
     }
 
     // ---- ORB box building — mirrors mesOrbStrategy's own ProcessClosed5mBar/FinalizeOrbRange,

@@ -67,6 +67,7 @@ box's width still matters — see `Min/Max ORB range` below — just not as the 
 | Symbol | — | MES (Micro E-mini S&P 500). Nothing in the code hardcodes the contract — any symbol works, but the point-based stop/target sizing was tuned for MES's own point value. |
 | Quantity | 1 | Single contract. |
 | ORB window start/end (hour/minute, ET) | 8:00–8:15 | The range-marking window. |
+| Start watching for a breakout after (hour/minute, ET) | 9:30 | ADDED 2026-10-06, from the source TikTok: "waits till 9:30 when volume comes in." The box still captures at 8:15 as always — this only holds off EVALUATING a breakout until real NY cash-open volume is behind it, so thin pre-market drift beyond the range doesn't count. |
 | Stop watching for a NEW breakout after (hour/minute, ET) | 11:00 | Classic ORB discipline — if no breakout has fired by this time, the day is a scratch. Does NOT cut off an already-armed retest/rejection wait, only a brand-new breakout. |
 | Poll interval (ms) | 500 | Lower frequency than the scalpers — this strategy only ever needs to notice a bar close, not sub-second DOM movement. |
 
@@ -82,12 +83,15 @@ box's width still matters — see `Min/Max ORB range` below — just not as the 
 
 ## Session levels — Asia/London/NY untested highs & lows
 
-A second, INDEPENDENT setup running in parallel with the ORB play — same stop/target inputs above,
-different trigger. Marks each session's own high and low, frozen the moment that session ends.
-Once frozen, a level stays "untested" and live to watch until a 5-min bar touches it — ANY touch
-consumes it immediately, whether or not a trade follows (classic liquidity-sweep semantics: the
-resting liquidity is spent the moment price trades through it). Each of the six levels (3 sessions
-x high/low) only ever gets ONE look per cycle.
+A second, INDEPENDENT setup running in parallel with the ORB play, different trigger. Marks each
+session's own high and low, frozen the moment that session ends — CHANGED 2026-10-06 (source
+TikTok: "he goes to the 15min time frame and marks out all the untested highs and lows"): now
+tracked off its OWN dedicated 15-minute series (`Session levels: timeframe`), independent of the
+ORB box's own 5-minute series. Once frozen, a level stays "untested" and live to watch until a bar
+touches it — ANY touch consumes it immediately, whether or not a trade follows (classic
+liquidity-sweep semantics: the resting liquidity is spent the moment price trades through it,
+confirmed via `AskUserQuestion`). Each of the six levels (3 sessions x high/low) only ever gets ONE
+look per cycle.
 
 Once touched, the 1-minute chart decides which of two plays fires:
 
@@ -98,19 +102,39 @@ Once touched, the 1-minute chart decides which of two plays fires:
    pullback (wicks toward the level, closes back away from it in the breakout direction) confirms
    following the breakout instead.
 
+Both plays also require the `EMA confluence` to confirm the trigger candle's direction (see above).
+
 Up to six of these can fire in a day (one per level touched) — entirely independent of the ORB
 play's own one-trade-per-day cap. The only shared constraint across BOTH setups is the ordinary
 "never more than one position open at once" guard.
 
+### Target & stop (changed 2026-10-06 — "targeted the opposing high")
+
+- **Target**: with `Session target: use nearest opposing level` on (default), the target is the
+  NEAREST still-untested level in the trade's own direction, from ANY of the six — not specifically
+  the same session's own paired level, just the closest real resting liquidity ahead of price
+  (confirmed via `AskUserQuestion`). Falls back to the fixed `Profit target (points)` whenever no
+  qualifying opposing level exists (price already past every marked level, or none have frozen
+  yet) — a trade never goes out with no target. Turn the toggle off to go back to the fixed-point
+  target unconditionally.
+- **Stop**: `Session stop mode` — `Fixed` (default, unchanged: entry ∓ `Stop loss (points, fixed)`)
+  or `Beyond Tested Level` (entry's own stop instead sits `Stop buffer beyond tested level (points)`
+  past the level that was actually tested). Added as a settings-panel toggle rather than a forced
+  choice, per the operator's own words: "let me control the stop by a setting."
+
 | Setting | Default | Notes |
 |---|---|---|
 | Session levels: enabled | On | Master toggle for this whole second setup. |
+| Session levels: timeframe | 15 min | Which series the Asia/London/NY high/low accumulation reads from — independent of the ORB box's own 5-minute series. |
 | Asia session (start/end, ET) | 18:00–03:00 | Crosses midnight — handled correctly (same wraparound-safe window check as `oceansStackStrategy`). |
 | London session (start/end, ET) | 03:00–11:00 | |
 | NY session (start/end, ET) | 08:00–17:00 | Deliberately broader than the ORB's own 8:00–8:15 window — this is the session's FULL high/low, not the opening range. |
 | Level touch tolerance (points) | 0.5 | How close counts as "touched." |
 | Min break distance beyond level (points) | 1.0 | Requires a real close past the level before arming the pullback watch — filters out single-tick noise "breaks." |
 | Pullback tolerance beyond level (points) | 3.0 | How close back to the broken level counts as "the pullback zone" for the continuation play. |
+| Session target: use nearest opposing level | On | See above. |
+| Session stop mode | Fixed Points | See above. |
+| Session stop: buffer beyond tested level (points) | 1.0 | Only used in `Beyond Tested Level` stop mode. |
 
 ## Risk management — real account balance, restart-immune
 

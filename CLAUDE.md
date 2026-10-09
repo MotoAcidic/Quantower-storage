@@ -1904,6 +1904,25 @@ it loaded — copying a new DLL over a running platform can appear to succeed wh
 nothing. If the fix doesn't show up, remove and re-attach the indicator (or restart Quantower)
 rather than assuming the fix didn't work.
 
+#### UPDATE, same day — session levels moved to their own 15-minute series
+
+Operator: "i need a indicator that marks out these levels as well so i can watch it" — a follow-up
+to `mesOrbStrategy`'s own same-day switch to a dedicated 15-minute series for Asia/London/NY level
+tracking (source TikTok: "he goes to the 15min time frame..."). This indicator had been riding the
+ORB box's own 5-minute series for session levels too, same as the strategy used to. Added a new
+`SessionLevelPeriod` InputParameter (default `Period.MIN15`) and its own `history15m`/
+`barsSeen15m`, fetched and population-checked alongside the existing 5-minute series in
+`TryInitialise` (same `Count < threshold` retry-timer pattern, just a second independent check).
+`ReplayHistory`/`DrainNewBars` split into two independent per-series loops — ORB box via
+`ProcessOrbBar` off `history5m`, session levels via `ProcessSessionLevelsBar` off `history15m` —
+replacing the old combined `ProcessBar` method (removed, now dead code). The ORB box itself is
+unaffected, still 5-minute, matching the strategy's own split exactly.
+
+**Verified 2026-10-06**: `dotnet build src/OrbLevels.Indicator/OrbLevels.Indicator.csproj -c
+Release -p:Share=true -p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.5\bin\
+TradingPlatform.BusinessLayer.dll"` — 0 errors. Redeployed. **NOT YET confirmed on a live chart**
+— same remove-and-reattach caveat as above applies to this update too.
+
 ---
 
 ## Strategy Catalog
@@ -4231,6 +4250,51 @@ follow-on changes came from watching that live trade and the ORB play afterward:
 Deployed. **NOT YET re-verified live** — watch for `[ORB] 1-min rejection confirmed ... (above/
 below the 9-EMA)` on the next entry, and `[ORB] retest attempt resolved without a confirmed
 rejection ... done watching for today` on a retest that fails to confirm.
+
+#### FEATURE, same day — four changes from checking the strategy against its own source material
+
+The operator asked for the video they built this strategy from to be checked against the actual
+code ("can you make sure my strategy does this"). No transcript tool worked cleanly (TikTok has no
+captions; the `watch` skill's local WhisperX backend crashed identically twice on this Windows
+machine, exit 3221225477/access-violation — a known-untested platform for that path per its own
+docs), so the operator described the video's key points directly instead, confirmed against two
+screenshots. Four concrete differences surfaced:
+
+1. **Session levels moved to their own 15-minute series** — "he goes to the 15min time frame and
+   marks out all the untested highs and lows for asia london and ny sessions." Previously rode the
+   ORB's own 5-minute series. New `SessionLevelPeriod` InputParameter (default `Period.MIN15`), its
+   own `history15m`/`barsSeen15m`/`Drain15m()`, `ProcessSessionLevels5mBar` renamed to
+   `ProcessSessionLevelsBar` since it's no longer tied to a specific timeframe. The ORB box itself
+   is untouched — still 5-minute, unrelated to this change.
+2. **ORB breakout detection gated to 9:30 ET** — "marks out the 8-8:15 candle as the order and
+   then waits till 9:30 when volume comes in and waits for a break." New `BreakoutWatchStartHour`/
+   `Minute` InputParameters (default 9:30), checked at the top of the `AwaitingBreakout` case — the
+   box still captures at 8:15 as always, this only holds off evaluating `bar.Close` against it
+   until real NY cash-open volume is behind the move, confirmed by a screenshot showing the 15m
+   chart's own "ORB = 27.?? PTS / WARNING: ORB IS TOO LARGE TO TRADE" overlay, which also
+   independently confirms this codebase's own `MaxOrbRangePoints` skip-logic matches the source
+   method.
+3. **Session-level target = nearest opposing untested level** — "waited for a valid rejection and
+   then targeted the opposing high." Confirmed via `AskUserQuestion`: the nearest still-untested
+   level in the trade's own direction from ANY of the six (not specifically the same session's own
+   paired level) — "nearest resting liquidity ahead of price." New `FindNearestOpposingLevel`,
+   gated by `SessionTargetUseOpposingLevel` (default on), falling back to the fixed-point target
+   when none qualifies (confirmed via `AskUserQuestion`) — a trade never goes out with no target.
+   `EnterTrade` extended with optional `explicitStopPrice`/`explicitTargetPrice` overrides so the
+   ORB play's own call sites (which pass neither) stay exactly as they were.
+4. **Session stop mode made a settings toggle** — the operator's own words, declining both offered
+   options: "let me control the stop by a setting." New `SessionStopMode` enum (`Fixed`, default,
+   unchanged behavior; `BeyondTestedLevel`, a new `StopBufferBeyondLevelPoints` past the level that
+   was actually tested) plus `ComputeSessionStopPrice`. Scoped to the session-level plays only — the
+   ORB play's own stop stays always-fixed, a separate decision already confirmed earlier this week
+   and untouched by this change.
+
+**Verified 2026-10-06**: `dotnet build mesOrbStrategy/mesOrbStrategy.csproj -c Release` — 0 errors
+(each of the four changes built clean individually before the next was added). Deployed. **NOT YET
+verified live** — all four are brand new paths with zero track record; watch for
+`[Session] ... rejection confirmed ... targeting opposing level ...` and confirm the 9:30 gate by
+checking no `[ORB] bullish/bearish breakout confirmed` line appears before that time even when
+`bar.Close` clears the range earlier.
 
 ---
 

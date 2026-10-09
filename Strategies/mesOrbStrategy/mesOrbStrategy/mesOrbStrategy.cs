@@ -57,6 +57,18 @@ namespace mesOrbStrategy;
 /// the log after any restart during active hours to see whether today's setup already played out
 /// before concluding the strategy missed something.
 /// </summary>
+/// <summary>Session-level stop placement, operator's own ask 2026-10-06 ("let me control the
+/// stop by a setting"). Fixed keeps the already-confirmed fixed-point behavior unchanged by
+/// default; BeyondTestedLevel places the stop a small buffer past the level that was actually
+/// tested, for the operator to experiment with via the settings panel. Scoped to the
+/// session-level plays only — the ORB play's own stop stays always-fixed, a separate decision
+/// already confirmed earlier and untouched by this.</summary>
+public enum SessionStopMode
+{
+    Fixed,
+    BeyondTestedLevel,
+}
+
 public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 {
     private const string StrategyTag = "MesOrb";
@@ -114,6 +126,17 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     [InputParameter("Stop watching for a NEW breakout after (minute, ET)", 41, 0, 59, 1, 0)]
     public int SetupCutoffMinute { get; set; }
 
+    /// <summary>FOUND 2026-10-06, from the source TikTok: "marks out the 8-8:15 candle as the
+    /// order and then waits till 9:30 when volume comes in and waits for a break." The ORB box
+    /// still captures at 8:15 as always — this only gates WHEN breakout detection starts, so the
+    /// real NY cash-open volume (not thin pre-market drift) is what has to produce the close
+    /// beyond the range.</summary>
+    [InputParameter("Start watching for a breakout after (hour, ET)", 43, 0, 23, 1, 0)]
+    public int BreakoutWatchStartHour { get; set; }
+
+    [InputParameter("Start watching for a breakout after (minute, ET)", 44, 0, 59, 1, 0)]
+    public int BreakoutWatchStartMinute { get; set; }
+
     /// <summary>The operator's own second-chance case: if the midpoint rejection gets
     /// "disrespected" and price closes beyond the OPPOSITE side of the box, follow that reversal
     /// directly instead of calling the day over.</summary>
@@ -136,6 +159,15 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 
     [InputParameter("Session levels: enabled", 70)]
     public bool SessionLevelsEnabled { get; set; }
+
+    /// <summary>FOUND 2026-10-06, from the TikTok the operator built this setup from: "he goes
+    /// to the 15min time frame and marks out all the untested highs and lows for asia london and
+    /// ny sessions." This had been riding the ORB's own 5-minute series (sharing bar-drain
+    /// infrastructure) — given its own dedicated series instead, matching the source method
+    /// exactly and keeping the ORB box itself unaffected (it stays on 5-minute bars, unrelated to
+    /// this change).</summary>
+    [InputParameter("Session levels: timeframe", 86)]
+    public Period SessionLevelPeriod { get; set; }
 
     [InputParameter("Asia session start hour (ET)", 71, 0, 23, 1, 0)]
     public int AsiaStartHour { get; set; }
@@ -191,6 +223,23 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     [InputParameter("EMA confluence: period (1-min bars)", 91, 2, 200, 1, 0)]
     public int EmaPeriod { get; set; }
 
+    // ---- session-level target/stop (operator's own ask, 2026-10-06, from the source TikTok:
+    // "waited for a valid rejection and then targeted the opposing high") — session-level plays
+    // ONLY; the ORB play's own stop/target are untouched by any of this.
+
+    [InputParameter("Session target: use nearest opposing level", 92)]
+    public bool SessionTargetUseOpposingLevel { get; set; }
+
+    [InputParameter("Session stop mode", 93, variants: new object[]
+    {
+        "Fixed Points", SessionStopMode.Fixed,
+        "Beyond Tested Level", SessionStopMode.BeyondTestedLevel,
+    })]
+    public SessionStopMode SessionStopMode { get; set; }
+
+    [InputParameter("Session stop: buffer beyond tested level (points)", 94, 0, 20, 0.25, 2)]
+    public double StopBufferBeyondLevelPoints { get; set; }
+
     public override string[] MonitoringConnectionsIds => new[] { this.CurrentSymbol?.ConnectionId, this.CurrentAccount?.ConnectionId };
 
     private enum OrbPhase
@@ -233,8 +282,10 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     private Timer? pollTimer;
     private HistoricalData? history5m;
     private HistoricalData? history1m;
+    private HistoricalData? history15m;
     private int barsSeen5m;
     private int barsSeen1m;
+    private int barsSeen15m;
 
     private string? orderTypeId;
     private string? stopOrderTypeId;
@@ -295,12 +346,15 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.MaxOrbRangePoints = 40.0;
         this.SetupCutoffHour = 11;
         this.SetupCutoffMinute = 0;
+        this.BreakoutWatchStartHour = 9;
+        this.BreakoutWatchStartMinute = 30;
         this.AllowReversalEntry = true;
         this.MaxDailyLoss = 0;
         this.AccountBalanceFloor = 0;
         this.PollIntervalMs = 500;
 
         this.SessionLevelsEnabled = true;
+        this.SessionLevelPeriod = Period.MIN15;
         this.AsiaStartHour = 18; this.AsiaStartMinute = 0; this.AsiaEndHour = 3; this.AsiaEndMinute = 0;
         this.LondonStartHour = 3; this.LondonStartMinute = 0; this.LondonEndHour = 11; this.LondonEndMinute = 0;
         this.NySessionStartHour = 8; this.NySessionStartMinute = 0; this.NySessionEndHour = 17; this.NySessionEndMinute = 0;
@@ -310,6 +364,10 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 
         this.EmaConfluenceEnabled = true;
         this.EmaPeriod = 9;
+
+        this.SessionTargetUseOpposingLevel = true;
+        this.SessionStopMode = SessionStopMode.Fixed;
+        this.StopBufferBeyondLevelPoints = 1.0;
     }
 
     // ---- lifecycle ------------------------------------------------------------------------------
@@ -381,6 +439,7 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         {
             this.history5m = this.CurrentSymbol.GetHistory(Period.MIN5, this.CurrentSymbol.HistoryType, Core.TimeUtils.DateTimeUtcNow.AddDays(-3));
             this.history1m = this.CurrentSymbol.GetHistory(Period.MIN1, this.CurrentSymbol.HistoryType, Core.TimeUtils.DateTimeUtcNow.AddDays(-1));
+            this.history15m = this.CurrentSymbol.GetHistory(this.SessionLevelPeriod, this.CurrentSymbol.HistoryType, Core.TimeUtils.DateTimeUtcNow.AddDays(-4));
 
             // FOUND 2026-10-06 ("why did it not take this short" -> traced to "[ORB] could not
             // reconstruct today's ORB range from history after a restart" firing on EVERY
@@ -393,11 +452,14 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             // DoneForDay for the rest of the day, with no live bar ever able to undo it. Waits
             // here, briefly, for the data to actually arrive before trusting it for anything.
             var deadline = Core.TimeUtils.DateTimeUtcNow.AddSeconds(5);
-            while (this.history5m.Count < 100 && Core.TimeUtils.DateTimeUtcNow < deadline)
+            while ((this.history5m.Count < 100 || this.history15m.Count < 50) && Core.TimeUtils.DateTimeUtcNow < deadline)
                 Thread.Sleep(100);
 
             if (this.history5m.Count < 100)
                 this.Log($"[ORB] history5m only has {this.history5m.Count} bars after a 5s wait — reconstruction may be incomplete.", StrategyLoggingLevel.Error);
+
+            if (this.history15m.Count < 50)
+                this.Log($"[Session] history15m only has {this.history15m.Count} bars after a 5s wait — session-level reconstruction may be incomplete.", StrategyLoggingLevel.Error);
         }
         catch (Exception ex)
         {
@@ -412,6 +474,7 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         // skipped — only bars that close AFTER this point drive the live state machine from here on.
         this.barsSeen5m = Math.Max(0, this.history5m.Count - 1);
         this.barsSeen1m = Math.Max(0, this.history1m.Count - 1);
+        this.barsSeen15m = Math.Max(0, this.history15m.Count - 1);
 
         Core.PositionAdded += this.Core_PositionAdded;
         Core.PositionRemoved += this.Core_PositionRemoved;
@@ -434,8 +497,10 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 
         this.history5m?.Dispose();
         this.history1m?.Dispose();
+        this.history15m?.Dispose();
         this.history5m = null;
         this.history1m = null;
+        this.history15m = null;
 
         this.Log("Strategy stopped.", StrategyLoggingLevel.Trading);
     }
@@ -474,6 +539,7 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.MaybeLogHeartbeat();
         this.Drain5m();
         this.Drain1m();
+        this.Drain15m();
     }
 
     private DateTime lastHeartbeatUtc = DateTime.MinValue;
@@ -565,8 +631,8 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.Log("[ORB] could not reconstruct today's ORB range from history after a restart — skipping today.", StrategyLoggingLevel.Trading);
     }
 
-    /// <summary>Replays the SAME live per-bar method (<see cref="ProcessSessionLevels5mBar"/>)
-    /// across all of history5m — reconstructs each level's Price/Untested status correctly (a
+    /// <summary>Replays the SAME live per-bar method (<see cref="ProcessSessionLevelsBar"/>)
+    /// across all of history15m — reconstructs each level's Price/Untested status correctly (a
     /// touch anywhere in the backlog is still a touch) with zero risk of drifting from the live
     /// logic, since it IS the live logic. Deliberately does NOT resume a mid-reaction/pullback
     /// watch afterward — same restart limitation as the ORB's own breakout/retest/rejection
@@ -575,13 +641,13 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     /// when that bar historically closed).</summary>
     private void ReconstructSessionLevels()
     {
-        if (!this.SessionLevelsEnabled || this.history5m is not { } h) return;
+        if (!this.SessionLevelsEnabled || this.history15m is not { } h) return;
 
         var closedUpTo = Math.Max(0, h.Count - 1);
         for (var i = 0; i < closedUpTo; i++)
         {
             if (TryReadBar(h, i, out var bar))
-                this.ProcessSessionLevels5mBar(bar);
+                this.ProcessSessionLevelsBar(bar);
         }
 
         foreach (var level in this.AllSessionLevels())
@@ -602,12 +668,27 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             if (!TryReadBar(h, i, out var bar)) continue;
 
             this.ProcessClosed5mBar(bar);
-
-            if (this.SessionLevelsEnabled)
-                this.ProcessSessionLevels5mBar(bar);
         }
 
         this.barsSeen5m = closedUpTo;
+    }
+
+    /// <summary>FOUND 2026-10-06, from the source TikTok: "he goes to the 15min time frame and
+    /// marks out all the untested highs and lows for asia london and ny sessions" — session-level
+    /// tracking now runs off its OWN dedicated 15-minute series, independent of the ORB's own
+    /// 5-minute one.</summary>
+    private void Drain15m()
+    {
+        if (!this.SessionLevelsEnabled || this.history15m is not { } h || h.Count <= 1) return;
+
+        var closedUpTo = h.Count - 1;
+        for (var i = this.barsSeen15m; i < closedUpTo; i++)
+        {
+            if (TryReadBar(h, i, out var bar))
+                this.ProcessSessionLevelsBar(bar);
+        }
+
+        this.barsSeen15m = closedUpTo;
     }
 
     /// <summary>Counter always advances regardless of phase (otherwise re-entering
@@ -748,6 +829,13 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
                     this.Log($"[ORB] no breakout by the {this.SetupCutoffHour:00}:{this.SetupCutoffMinute:00} ET cutoff — done for today.", StrategyLoggingLevel.Trading);
                     break;
                 }
+
+                // FOUND 2026-10-06, from the source TikTok: "waits till 9:30 when volume comes
+                // in." The box still captured at 8:15 as always; this just holds off EVALUATING
+                // a breakout until real NY cash-open volume is behind it, rather than reacting to
+                // a thin pre-market drift beyond the range.
+                if (!IsAtOrAfter(barEt, this.BreakoutWatchStartHour, this.BreakoutWatchStartMinute))
+                    break;
 
                 if (bar.Close > this.orbHigh)
                 {
@@ -906,7 +994,7 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.asiaHigh, this.asiaLow, this.londonHigh, this.londonLow, this.nyHigh, this.nyLow,
     };
 
-    private void ProcessSessionLevels5mBar(Ohlc bar)
+    private void ProcessSessionLevelsBar(Ohlc bar)
     {
         var barEt = TimeZoneInfo.ConvertTimeFromUtc(bar.OpenUtc, SessionZone);
 
@@ -933,6 +1021,50 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     {
         foreach (var level in this.AllSessionLevels())
             this.ProcessLevelReaction(level, bar);
+    }
+
+    /// <summary>FOUND 2026-10-06, from the source TikTok: "waited for a valid rejection and then
+    /// targeted the opposing high" — confirmed via AskUserQuestion: the nearest still-UNTESTED
+    /// level in the trade's own direction, from ANY session (not specifically the same session's
+    /// paired level) — "nearest resting liquidity ahead of price," not a same-session pairing.
+    /// Null if none qualify (price already past every marked level on that side, or none have
+    /// frozen yet) — the caller falls back to the fixed-point target in that case.</summary>
+    private double? FindNearestOpposingLevel(bool wantHigh, double price)
+    {
+        double? best = null;
+
+        foreach (var level in this.AllSessionLevels())
+        {
+            if (!level.Untested || level.IsHighLevel != wantHigh) continue;
+
+            if (wantHigh)
+            {
+                if (level.Price <= price) continue;
+                if (best is null || level.Price < best) best = level.Price;
+            }
+            else
+            {
+                if (level.Price >= price) continue;
+                if (best is null || level.Price > best) best = level.Price;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>Session-level stop, per <see cref="mesOrbStrategy.SessionStopMode"/> (operator's
+    /// own ask, 2026-10-06: "let me control the stop by a setting") — Fixed (default, unchanged)
+    /// or a small buffer beyond the level that was actually tested.</summary>
+    private double ComputeSessionStopPrice(Side side, double referencePrice, double levelPrice)
+    {
+        if (this.SessionStopMode == SessionStopMode.BeyondTestedLevel)
+        {
+            return side == Side.Buy
+                ? levelPrice - this.StopBufferBeyondLevelPoints
+                : levelPrice + this.StopBufferBeyondLevelPoints;
+        }
+
+        return side == Side.Buy ? referencePrice - this.StopLossPoints : referencePrice + this.StopLossPoints;
     }
 
     /// <summary>Accumulates one session's running high/low while inside its window (fresh-started
@@ -1006,8 +1138,10 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
                 {
                     if (bar.High >= level.Price - this.LevelTouchTolerancePoints && bar.Close < level.Price && this.EmaConfirms(Side.Sell, bar.Close))
                     {
-                        this.Log($"[Session] {level.Name} rejection confirmed — wicked to {bar.High:0.##}, closed back below {level.Price:0.##} (below the {this.EmaPeriod}-EMA). Entering short.", StrategyLoggingLevel.Trading);
-                        this.EnterTrade(Side.Sell, bar.Close);
+                        var stop = this.ComputeSessionStopPrice(Side.Sell, bar.Close, level.Price);
+                        var target = this.SessionTargetUseOpposingLevel ? this.FindNearestOpposingLevel(wantHigh: false, bar.Close) : null;
+                        this.Log($"[Session] {level.Name} rejection confirmed — wicked to {bar.High:0.##}, closed back below {level.Price:0.##} (below the {this.EmaPeriod}-EMA). Entering short{(target is { } t ? $", targeting opposing level {t:0.##}" : "")}.", StrategyLoggingLevel.Trading);
+                        this.EnterTrade(Side.Sell, bar.Close, stop, target);
                         level.Phase = LevelPhase.Idle;
                     }
                     else if (bar.Close > level.Price + this.MinBreakDistancePoints)
@@ -1020,8 +1154,10 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
                 {
                     if (bar.Low <= level.Price + this.LevelTouchTolerancePoints && bar.Close > level.Price && this.EmaConfirms(Side.Buy, bar.Close))
                     {
-                        this.Log($"[Session] {level.Name} rejection confirmed — wicked to {bar.Low:0.##}, closed back above {level.Price:0.##} (above the {this.EmaPeriod}-EMA). Entering long.", StrategyLoggingLevel.Trading);
-                        this.EnterTrade(Side.Buy, bar.Close);
+                        var stop = this.ComputeSessionStopPrice(Side.Buy, bar.Close, level.Price);
+                        var target = this.SessionTargetUseOpposingLevel ? this.FindNearestOpposingLevel(wantHigh: true, bar.Close) : null;
+                        this.Log($"[Session] {level.Name} rejection confirmed — wicked to {bar.Low:0.##}, closed back above {level.Price:0.##} (above the {this.EmaPeriod}-EMA). Entering long{(target is { } t ? $", targeting opposing level {t:0.##}" : "")}.", StrategyLoggingLevel.Trading);
+                        this.EnterTrade(Side.Buy, bar.Close, stop, target);
                         level.Phase = LevelPhase.Idle;
                     }
                     else if (bar.Close < level.Price - this.MinBreakDistancePoints)
@@ -1037,8 +1173,10 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
                 {
                     if (bar.Low <= level.Price + this.PullbackTolerancePoints && bar.Close > level.Price && this.EmaConfirms(Side.Buy, bar.Close))
                     {
-                        this.Log($"[Session] {level.Name} pullback rejection confirmed — wicked to {bar.Low:0.##}, closed back above {level.Price:0.##} (above the {this.EmaPeriod}-EMA). Following the breakout long.", StrategyLoggingLevel.Trading);
-                        this.EnterTrade(Side.Buy, bar.Close);
+                        var stop = this.ComputeSessionStopPrice(Side.Buy, bar.Close, level.Price);
+                        var target = this.SessionTargetUseOpposingLevel ? this.FindNearestOpposingLevel(wantHigh: true, bar.Close) : null;
+                        this.Log($"[Session] {level.Name} pullback rejection confirmed — wicked to {bar.Low:0.##}, closed back above {level.Price:0.##} (above the {this.EmaPeriod}-EMA). Following the breakout long{(target is { } t ? $", targeting opposing level {t:0.##}" : "")}.", StrategyLoggingLevel.Trading);
+                        this.EnterTrade(Side.Buy, bar.Close, stop, target);
                         level.Phase = LevelPhase.Idle;
                     }
                 }
@@ -1046,8 +1184,10 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
                 {
                     if (bar.High >= level.Price - this.PullbackTolerancePoints && bar.Close < level.Price && this.EmaConfirms(Side.Sell, bar.Close))
                     {
-                        this.Log($"[Session] {level.Name} pullback rejection confirmed — wicked to {bar.High:0.##}, closed back below {level.Price:0.##} (below the {this.EmaPeriod}-EMA). Following the breakout short.", StrategyLoggingLevel.Trading);
-                        this.EnterTrade(Side.Sell, bar.Close);
+                        var stop = this.ComputeSessionStopPrice(Side.Sell, bar.Close, level.Price);
+                        var target = this.SessionTargetUseOpposingLevel ? this.FindNearestOpposingLevel(wantHigh: false, bar.Close) : null;
+                        this.Log($"[Session] {level.Name} pullback rejection confirmed — wicked to {bar.High:0.##}, closed back below {level.Price:0.##} (below the {this.EmaPeriod}-EMA). Following the breakout short{(target is { } t ? $", targeting opposing level {t:0.##}" : "")}.", StrategyLoggingLevel.Trading);
+                        this.EnterTrade(Side.Sell, bar.Close, stop, target);
                         level.Phase = LevelPhase.Idle;
                     }
                 }
@@ -1061,7 +1201,12 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     /// <see cref="phase"/> or any <see cref="SessionLevel"/> itself; each caller marks its OWN
     /// setup consumed right after calling this, regardless of the return value (an attempt that
     /// fails to place still shouldn't retry the same stale signal every bar).</summary>
-    private bool EnterTrade(Side side, double referencePrice)
+    /// <summary><paramref name="explicitStopPrice"/>/<paramref name="explicitTargetPrice"/> let a
+    /// caller override the default fixed-point stop/target — used by the session-level plays for
+    /// the opposing-level target (see FindNearestOpposingLevel) and the optional
+    /// beyond-tested-level stop mode (see ComputeSessionStopPrice). The ORB play's own call sites
+    /// pass neither, keeping its stop/target exactly as originally confirmed (always fixed).</summary>
+    private bool EnterTrade(Side side, double referencePrice, double? explicitStopPrice = null, double? explicitTargetPrice = null)
     {
         if (this.CurrentSymbol is null || this.CurrentAccount is null) return false;
         if (this.MyPositions().Length > 0) return false;
@@ -1072,8 +1217,8 @@ public class mesOrbStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 
         var isLong = side == Side.Buy;
 
-        this.pendingStopPrice = isLong ? referencePrice - this.StopLossPoints : referencePrice + this.StopLossPoints;
-        this.pendingTargetPrice = isLong ? referencePrice + this.ProfitTargetPoints : referencePrice - this.ProfitTargetPoints;
+        this.pendingStopPrice = explicitStopPrice ?? (isLong ? referencePrice - this.StopLossPoints : referencePrice + this.StopLossPoints);
+        this.pendingTargetPrice = explicitTargetPrice ?? (isLong ? referencePrice + this.ProfitTargetPoints : referencePrice - this.ProfitTargetPoints);
 
         var result = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
         {
