@@ -1834,6 +1834,130 @@ zone boxes, then absorption markers, then sweep signals, then QQQ in isolation).
 
 ---
 
+#### FEATURE, 2026-10-08 — session VWAP + 3σ bands, ported from the operator's own `oceanVwap.pine`
+
+The operator: "so i have been trading manually and would like my indicator updated to reflect it,
+i use the oceanVwap.pine in the tradingview folder and priceLevels.pine and srm.pine." Given the
+size of all three (srm.pine alone is 868 lines — a full volatility-budgeted range-map system,
+comparable in scope to the still-unbuilt OceansStack indicator), scoped via `AskUserQuestion` to
+one at a time, starting with the smallest: `oceanVwap.pine`'s session-anchored VWAP + 3
+volume-weighted standard-deviation bands. Added directly to the live `Finch-Lite` indicator
+(operator's own call — not a new/merged indicator) after taking a full frozen backup first
+(`Finch-Lite-Backup`, same reasoning as `FinchDomScalpStrategy-Backup`: copy, rename namespace
+`FinchLite` → `FinchLiteBackup` across all 13 files via a bulk find-replace, own `.csproj`/
+`AssemblyName`/deploy path, verified building before touching the live copy).
+
+**New files**: `VwapEngine.cs` (the math), `VwapOverlay.cs` (the drawing, adapted from
+`PocOverlay.cs`'s line-and-label pattern plus `StructureBoxOverlay.cs`'s cached-brush dictionary
+shape).
+
+**One deliberate improvement over the source script**: `oceanVwap.pine` has an "Intrabar
+precision" toggle that rebuilds from 1-minute sub-bars because chart-timeframe bars are too coarse
+above 1m. `VwapEngine` doesn't need that toggle at all — `FeedTrade` is fed from Finch-Lite's own
+live tick stream (the same one already driving the delta panel/big-trade markers), so every live
+contribution is already tick-precise regardless of chart timeframe, strictly better than the
+source script's own best mode.
+
+**Same accepted seeding gap `PocEngine` already carries**: Finch-Lite has no historical tick
+backfill, so the portion of a session before the indicator attached can't be reconstructed from
+ticks. `SeedFromBar` closes most of that gap using the source script's OWN per-bar formula
+(hlc3 × bar volume) against a 1-minute history fetch on attach — `FeedTrade` then takes over
+tick-by-tick for anything live-forward, both feeding the same accumulators with no seam between
+the seeded and live portions.
+
+**Scope deliberately trimmed from the full Pine feature set** (first pass — add more later if
+wanted, matching this indicator's own "one feature at a time, verified before the next" house
+rule): ported session presets (RTH/Globex/Asia/London/Custom), both band modes (Std Dev/Percent),
+prior-session VWAP as a single reference line, band-rejection markers, bull/bear/neutral VWAP
+colouring (price-vs-VWAP only, not the source's "both agree with slope" option). NOT ported this
+pass: the full prior-session BAND cluster (just the VWAP line carries over, not all 6 bands), the
+dashboard table, bar-colouring by σ-position, and `alertcondition()`s (no alert-equivalent exists
+anywhere else in this codebase to hang them on).
+
+**Verified 2026-10-08**: `dotnet build Finch.Lite.Indicator.csproj -c Release
+-p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.6\bin\TradingPlatform.BusinessLayer.dll"`
+— 0 errors, both for the backup and the live indicator. **Also found**: the SDK path had drifted
+again — v1.147.5 (used for every build earlier this week) no longer exists on disk, only
+v1.147.6 — same silent-auto-update behavior this file has documented happening before. Only this
+indicator's own build command was updated; other projects' `.csproj` files still reference
+v1.147.5 and will need the same bump the next time any of them rebuild. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`. **NOT YET confirmed
+on a live chart** — remove and re-attach (or restart Quantower) to pick up the change, same
+caveat as every other indicator redeploy this week.
+
+#### `priceLevels.pine` and `srm.pine` moved to their own indicator — `LevelsMap`
+
+The operator, after the VWAP addition above: "for those two lets built it into a seperate
+indicator this one is getting crowded." New project, `Indicators/LevelsMap/src/
+LevelsMap.Indicator/` (csproj/lifecycle scaffold copied from `OrbLevels.Indicator`, the most
+recent indicator built this way), first pass covering `priceLevels.pine` only (`srm.pine` still
+not started — its own separate effort, per the original scoping).
+
+**What's in**: Zero Gamma, Vol Skew, Call Wall, Put Wall, MVC (each a single manually-typed
+price), plus 3 dark pool zones (low-high range + $B notional) and 3 dark pool lines (single price
++ $B notional) — trimmed from the source's 5 of each, since the source's own example data rarely
+fills more than 2-3. Each draws as a soft band + solid line + right-edge label, matching the
+source script's own `makeBandLine`/`makePool` visual shape.
+
+**Confirmed via `AskUserQuestion`**: BOTH a QQQ ratio and a SPY ratio (not either/or) — relevant
+because this whole project trades MES/MGC (SPY-equivalent), not just NQ (QQQ-equivalent).
+Implemented as a single global `LevelsUnit` selector (Chart/QQQ/SPY) applied to every level at
+once, rather than the source script's own per-level unit toggle — simplified because a real day's
+pasted data is quoted in ONE reference at a time (confirmed by the operator's own example data,
+all QQQ), not mixed within the same paste.
+
+**Deliberately dropped for this pass**: the source's big reference price grid (every integer QQQ
+price across a configurable range) and its "Levels Code" copy/paste parser — the real trading
+value is the dark-pool/options levels themselves; both the grid and the paste convenience can be
+added later if wanted.
+
+**NEW, UNVERIFIED TERRITORY**: this is the first Indicator in this codebase (as opposed to a
+Strategy — `oceansStackStrategy` already does this successfully) to pull a SECOND symbol's live
+price (`QqqSymbolInput`/`SpySymbolInput`, both plain `[InputParameter] Symbol?` fields). It built
+clean, which at least confirms the property shape compiles the same way a Strategy's does, but
+whether it actually RESOLVES to live data the same way inside an Indicator is unconfirmed — wrapped
+in its own try/catch, degrading to "ratio unavailable, Chart-unit levels only" rather than failing
+the whole indicator if it doesn't. Verify this specific piece in isolation first (QQQ or SPY unit
+mode, nothing else) before trusting any ratio-converted level.
+
+**Verified 2026-10-08**: `dotnet build LevelsMap.Indicator.csproj -c Release
+-p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.6\bin\TradingPlatform.BusinessLayer.dll"`
+— 0 errors. Deployed to `C:\Quantower\Settings\Scripts\Indicators\LevelsMap\
+LevelsMapIndicator.dll`. **NOT YET confirmed on a live chart** — same remove-and-reattach caveat as
+every other indicator this week, and the QQQ/SPY resolution specifically needs its own isolated
+verification per the paragraph above before the rest is trusted.
+
+#### FEATURE, same day — Levels Code auto-fill (`LevelsCodeParser.cs`)
+
+The operator, immediately after seeing the one-by-one individual fields: "is there a way to auto
+fill these levels instead of me doing them one by one" — one of the two features deliberately
+dropped from the first pass. Ported `priceLevels.pine`'s own `parseCode`/`kindOf` functions
+directly: a new `LevelsCode` string InputParameter, paste a friend's/service's existing Levels
+Code into it (confirmed against the operator's own real example: `"DP ZONE 759.53-759.53 1.80B |
+DP ZONE 756.30-757.10 1.20B | DP ZONE 752.44-753.09 0.82B | ZERO GAMMA 755.05 | VOL SKEW 754.00 |
+CALL WALL 760.00 | MVC 760.00"`) and it REPLACES every individually-typed field, same "paste wins"
+behavior as the source script — same format, no new syntax to learn. Unlike the individual fields
+(capped at 5 option levels + 3 zones + 3 lines), the parsed path draws AS MANY levels as were
+actually pasted, no cap, and honors each entry's own "@" prefix (use chart-native price for just
+that one entry, skip the QQQ/SPY ratio) the same way the source does.
+
+**Unverified**: `string` InputParameters have no prior precedent anywhere in this codebase, so
+whether Quantower renders this as a single-line box or a proper multi-line text area isn't
+confirmed — if it's single-line only, a long paste may be awkward to review even though parsing
+itself doesn't care about line breaks (they're treated as entry separators either way, same as
+`|`).
+
+**Verified 2026-10-08**: `dotnet build LevelsMap.Indicator.csproj -c Release
+-p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.6\bin\TradingPlatform.BusinessLayer.dll"`
+— 0 errors. Deployed to the same path.
+
+`srm.pine` (868 lines: volatility-implied session/weekly/monthly range budgets pulling
+VXN/VIX/VIX3M, adaptive completion-projection curves, session volume profiles with POC/VAH/VAL,
+naked levels, NY initial balance, Vol-Step ranges) still has not been started — it goes into this
+SAME `LevelsMap` indicator as a later pass, not Finch-Lite and not a third project.
+
+---
+
 ### ORB + Session Levels (`Indicators/OrbLevels/`) — added 2026-10-06
 
 **Files:** `Indicators/OrbLevels/src/OrbLevels.Indicator/OrbLevels.Indicator.csproj`,

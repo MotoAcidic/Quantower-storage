@@ -1,0 +1,868 @@
+//@version=6
+// Session Range Map v9 (release candidate) — NY initial balance · adaptive (time-aware) completion projection · v7 math audit: fresh VXN, recalibrated budgets (2-yr NQ), finer profile math (Ocean palette: charcoal · copper · teal · silver; avoids GEX red/green/yellow and your purple QQQ / cyan dark-pool colors) — Asia / London / New York + Weekly + Monthly layers · alerts · per-layer label switches · Vol-Step Ranges
+// Vol-Step Ranges: idea inspired by LuxAlgo's "Predictive Ranges" (CC BY-NC-SA 4.0); independent implementation, not their code.
+// Range budgets · completion projections · session volume profiles (POC / VAH / VAL) · naked levels · labels · full color control
+// A range MAP, not a signal tool. Evidence for the defaults is at the bottom.
+indicator("Session Range Map", "SRM", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+string TZ = "America/New_York"
+
+// ═════════════ Inputs ═════════════
+grpV = "Volatility source"
+volSym  = input.symbol("CBOE:VXN",   "Implied vol index (VXN for NQ/MNQ/QQQ · VIX for ES/MES/SPY)", group = grpV)
+vixSym  = input.symbol("CBOE:VIX",   "VIX",   group = grpV)
+vix3Sym = input.symbol("CBOE:VIX3M", "VIX3M", group = grpV)
+
+grpS = "Sessions (New York time) · budget = share of daily expected move"
+asiaOn    = input.bool(true, "Asia",   inline = "a", group = grpS)
+asiaSes   = input.session("1800-0300", "", inline = "a", group = grpS)
+asiaShare = input.float(0.43, "×", step = 0.01, inline = "a", group = grpS)
+lonOn     = input.bool(true, "London", inline = "l", group = grpS)
+lonSes    = input.session("0300-0930", "", inline = "l", group = grpS)
+lonShare  = input.float(0.48, "×", step = 0.01, inline = "l", group = grpS)
+nyOn      = input.bool(true, "NY",     inline = "n", group = grpS)
+nySes     = input.session("0930-1600", "", inline = "n", group = grpS)
+nyShare   = input.float(0.90, "×", step = 0.01, inline = "n", group = grpS)
+kProj     = input.float(1.3, "Completion projection (× session budget)", step = 0.1, group = grpS)
+projMode  = input.string("Adaptive", "Projection mode", options = ["Adaptive", "Fixed"], group = grpS, tooltip = "Adaptive = max(fixed line, current extreme + remaining-extension allowance that shrinks as the period elapses). Never sits inside the range. Out-of-sample coverage: sessions 81–90% vs 70–80% fixed; week 84% vs 79%; month 88% vs 82%.")
+extMult   = input.float(1.0, "Adaptive allowance multiplier (1.0 = calibrated 85th pct per side)", step = 0.05, minval = 0.1, group = grpS)
+expScale    = input.bool(true, "Widen all budgets in EXPANDED regime (VIX ≥ VIX3M)", group = grpS)
+expMult     = input.float(1.39, "EXPANDED budget multiplier (NQ: 1.56× vs 1.12× median day)", step = 0.01, group = grpS)
+showBudget  = input.bool(true, "Show budget band", group = grpS)
+budgetStyle = input.string("Dashed", "Budget line style", options = ["Solid", "Dashed", "Dotted"], group = grpS)
+budgetWidth = input.int(1, "Budget line width", minval = 1, maxval = 4, group = grpS)
+showProj    = input.bool(true, "Show completion projection", group = grpS)
+projStyle   = input.string("Dotted", "Projection line style", options = ["Solid", "Dashed", "Dotted"], group = grpS)
+projWidth   = input.int(2, "Projection line width", minval = 1, maxval = 4, group = grpS)
+showPastBands = input.bool(false, "Keep past session budget bands", group = grpS)
+ibOn      = input.bool(true, "NY initial balance (first-hour high / low)", group = grpS, tooltip = "One side of the NY first hour holds as the session extreme ~80% of days (QQQ 720 sessions: 79%; NQ 50 sessions: 82%).")
+ibMinutes = input.int(60, "Initial balance length (minutes)", minval = 5, maxval = 180, group = grpS)
+ibKeep    = input.bool(false, "Keep past initial balances", group = grpS)
+
+grpP = "Session volume profiles"
+showProf      = input.bool(true, "Show session profiles", group = grpP)
+rowsPerBudget = input.int(48, "Session profile math resolution (rows per budget)", minval = 6, maxval = 200, group = grpP)
+wkRows        = input.int(96, "Weekly profile math resolution (rows per budget)", minval = 12, maxval = 300, group = grpP)
+moRows        = input.int(160, "Monthly profile math resolution (rows per budget)", minval = 12, maxval = 400, group = grpP)
+profMaxRows   = input.int(40, "Max drawn rows per profile (display only; math stays fine)", minval = 10, maxval = 120, group = grpP)
+profWidth     = input.float(0.35, "Profile width (fraction of session)", minval = 0.05, maxval = 1.0, step = 0.05, group = grpP)
+vaPct         = input.float(70, "Value area %", minval = 50, maxval = 95, group = grpP)
+keepProfiles  = input.int(9, "Keep last N session profiles", minval = 1, maxval = 30, group = grpP)
+showPocVa     = input.bool(true, "Draw POC / VAH / VAL lines inside each session", group = grpP)
+nakedPoc      = input.bool(true, "Extend naked POCs until touched", group = grpP)
+nakedVa       = input.bool(false, "Extend naked VAH / VAL until touched", group = grpP)
+vaStyle       = input.string("Dashed", "VAH / VAL line style", options = ["Solid", "Dashed", "Dotted"], group = grpP)
+pocWidth      = input.int(2, "POC line width", minval = 1, maxval = 4, group = grpP)
+
+grpL = "Levels"
+showPD      = input.bool(true, "Prior day high / low / close", group = grpL)
+showPW      = input.bool(true, "Prior week high / low", group = grpL)
+showNaked   = input.bool(true, "Naked session highs / lows (extend until touched)", group = grpL)
+nakedStyle  = input.string("Dotted", "Naked line style", options = ["Solid", "Dashed", "Dotted"], group = grpL)
+nakedMax    = input.int(150, "Max naked levels kept", minval = 10, maxval = 300, group = grpL)
+nakedRange  = input.float(2.5, "Label naked levels within (× daily expected move)", step = 0.5, group = grpL)
+nearestN    = input.int(4, "Label nearest N level groups above and below price", minval = 1, maxval = 15, group = grpL)
+mergeTol    = input.float(0.03, "Merge labels closer than (× daily expected move)", step = 0.01, group = grpL)
+
+grpLb = "Labels"
+showLabels     = input.bool(true, "Show labels on lines", group = grpLb)
+labelSize      = input.string("Small", "Label size", options = ["Tiny", "Small", "Normal"], group = grpLb)
+labelLineColor = input.bool(true, "Color each label like its line", group = grpLb)
+cLabel         = input.color(#C9CED6, "Label color (when not line-colored)", group = grpLb)
+labelOffset    = input.int(3, "Right-edge label offset (bars)", minval = 0, maxval = 50, group = grpLb)
+labSess        = input.bool(true, "Session labels (budget, projection, live POC/VA)", group = grpLb)
+labNaked       = input.bool(true, "Naked session level labels", group = grpLb)
+labWk          = input.bool(true, "Weekly labels", group = grpLb)
+labMo          = input.bool(true, "Monthly labels", group = grpLb)
+labCtx         = input.bool(true, "Prior day / week labels", group = grpLb)
+labVs          = input.bool(true, "Vol-Step Range labels", group = grpLb)
+
+grpW = "Weekly layer"
+wkOn       = input.bool(true, "Show weekly layer", group = grpW)
+wkMult     = input.float(1.22, "Weekly budget (× weekly expected move = daily × √5) · median NQ week = 1.22", step = 0.05, group = grpW)
+wkKProj    = input.float(1.3, "Weekly completion projection (× weekly budget)", step = 0.1, group = grpW)
+wkBudget   = input.bool(true, "Show weekly budget band", group = grpW)
+wkProjOn   = input.bool(true, "Show weekly completion projection", group = grpW)
+wkProfOn   = input.bool(true, "Draw finished weekly profiles", group = grpW)
+wkKeep     = input.int(2, "Keep last N weekly profiles", minval = 1, maxval = 10, group = grpW)
+wkPocVa    = input.bool(true, "Draw weekly POC / VAH / VAL inside each week", group = grpW)
+wkNakedPoc = input.bool(true, "Extend naked weekly POCs until touched", group = grpW)
+wkNakedVa  = input.bool(true, "Extend naked weekly VAH / VAL until touched", group = grpW)
+wkNakedHL  = input.bool(true, "Extend naked weekly highs / lows until touched", group = grpW)
+wkWidth    = input.int(2, "Weekly line width", minval = 1, maxval = 4, group = grpW)
+wkLiveProf = input.bool(true, "Show developing weekly profile", group = grpW)
+wkProfPos  = input.string("Right edge", "Developing weekly profile position", options = ["Right edge", "Week start"], group = grpW)
+wkRightOff = input.int(60, "Right-edge profile offset (bars)", minval = 0, maxval = 400, group = grpW)
+wkRightW   = input.int(80, "Right-edge profile width (bars)", minval = 10, maxval = 400, group = grpW)
+wkPrevVa   = input.bool(true, "Carry prior-week POC / VAH / VAL through the whole week (even after touched)", group = grpW)
+
+grpM = "Monthly layer"
+moOn       = input.bool(true, "Show monthly layer", group = grpM)
+moMult     = input.float(1.34, "Monthly budget (× monthly expected move = daily × √21) · median NQ month = 1.34", step = 0.05, group = grpM)
+moKProj    = input.float(1.3, "Monthly completion projection (× monthly budget)", step = 0.1, group = grpM)
+moBudget   = input.bool(true, "Show monthly budget band", group = grpM)
+moProjOn   = input.bool(true, "Show monthly completion projection", group = grpM)
+moProfOn   = input.bool(true, "Draw finished monthly profiles", group = grpM)
+moKeep     = input.int(1, "Keep last N monthly profiles", minval = 1, maxval = 6, group = grpM)
+moPocVa    = input.bool(true, "Draw monthly POC / VAH / VAL inside each month", group = grpM)
+moNakedPoc = input.bool(true, "Extend naked monthly POCs until touched", group = grpM)
+moNakedVa  = input.bool(true, "Extend naked monthly VAH / VAL until touched", group = grpM)
+moNakedHL  = input.bool(true, "Extend naked monthly highs / lows until touched", group = grpM)
+moWidth    = input.int(3, "Monthly line width", minval = 1, maxval = 4, group = grpM)
+moLiveProf = input.bool(true, "Show developing monthly profile", group = grpM)
+moProfPos  = input.string("Right edge", "Developing monthly profile position", options = ["Right edge", "Month start"], group = grpM)
+moRightOff = input.int(150, "Right-edge profile offset (bars)", minval = 0, maxval = 450, group = grpM)
+moRightW   = input.int(80, "Right-edge profile width (bars)", minval = 10, maxval = 400, group = grpM)
+moPrevVa   = input.bool(true, "Carry prior-month POC / VAH / VAL through the whole month (even after touched)", group = grpM)
+
+grpA = "Alerts (create one alert → condition: Any alert() function call)"
+alBudget    = input.bool(true,  "Range budget spent (session / week / month)", group = grpA)
+alPrevVa    = input.bool(true,  "Price touches prior-week / prior-month POC, VAH, VAL", group = grpA)
+alNakedHTF  = input.bool(true,  "Naked weekly / monthly level touched", group = grpA)
+alNakedSess = input.bool(false, "Naked session level touched (noisy)", group = grpA)
+alVs        = input.bool(true,  "Vol-Step Range shifts up / down", group = grpA)
+alIb        = input.bool(true,  "NY initial balance broken (first break each side)", group = grpA)
+
+grpVS = "Vol-Step Ranges (inspired by LuxAlgo Predictive Ranges)"
+vsOn     = input.bool(true, "Show Vol-Step Ranges", group = grpVS)
+vsSource = input.string("Implied move (VXN)", "Step size from", options = ["Implied move (VXN)", "ATR (classic)"], group = grpVS)
+vsMult   = input.float(0.5, "Step = × daily expected move (implied mode)", step = 0.05, minval = 0.05, group = grpVS)
+vsAtrLen = input.int(200, "ATR length (classic mode)", minval = 2, group = grpVS)
+vsAtrFac = input.float(6.0, "ATR factor (classic mode)", step = 0.5, minval = 0.5, group = grpVS)
+vsFill   = input.int(92, "Band fill transparency", minval = 0, maxval = 100, group = grpVS)
+
+grpC = "Colors"
+cAsia    = input.color(#7D8A99, "Asia",   inline = "s", group = grpC)
+cLon     = input.color(#C8794A, "London", inline = "s", group = grpC)
+cNY      = input.color(#E3C9A8, "NY",     inline = "s", group = grpC)
+cProj    = input.color(#6FBFB3, "Completion projection", group = grpC)
+cWk      = input.color(#9DB4B6, "Weekly", inline = "w", group = grpC)
+cWkPoc   = input.color(#B5532E, "Weekly POC", inline = "w", group = grpC)
+cWkVa    = input.color(#1F8A7E, "Weekly VAH / VAL", inline = "w", group = grpC)
+cMo      = input.color(#E8DFCC, "Monthly", inline = "m", group = grpC)
+cMoPoc   = input.color(#D9733F, "Monthly POC", inline = "m", group = grpC)
+cMoVa    = input.color(#5FB8A8, "Monthly VAH / VAL", inline = "m", group = grpC)
+cVsUp    = input.color(#C97B63, "Vol-Step upper", inline = "v", group = grpC)
+cVsMid   = input.color(#8C9AA8, "Vol-Step mid", inline = "v", group = grpC)
+cVsDn    = input.color(#3E9C8F, "Vol-Step lower", inline = "v", group = grpC)
+cIB      = input.color(#B8A88A, "NY initial balance", group = grpC)
+cPD      = input.color(#A7AEB7, "Prior day",  inline = "c", group = grpC)
+cPW      = input.color(#C3C9D1, "Prior week", inline = "c", group = grpC)
+cRow     = input.color(color.new(#4A525C, 65), "Profile rows",    inline = "p", group = grpC)
+cVA      = input.color(color.new(#2A9D8F, 72), "Value-area rows", inline = "p", group = grpC)
+cPOC     = input.color(#E08A5A, "POC",       inline = "q", group = grpC)
+cVAedge  = input.color(#2A9D8F, "VAH / VAL", inline = "q", group = grpC)
+cStack   = input.color(#F2E6D0, "Stacked-levels label", group = grpC)
+cBadgeBg = input.color(color.new(#1B1F24, 10), "Badge background", inline = "b", group = grpC)
+cBadgeTx = input.color(#C9CED6, "Badge text",    inline = "b", group = grpC)
+cBadgeWn = input.color(#E07A5F, "Badge warning", inline = "b", group = grpC)
+
+// ═════════════ Helpers ═════════════
+lstyle(string s) => s == "Solid" ? line.style_solid : s == "Dashed" ? line.style_dashed : line.style_dotted
+lsize() => labelSize == "Tiny" ? size.tiny : labelSize == "Normal" ? size.normal : size.small
+lcol(color c) => labelLineColor ? c : cLabel
+fmt(float p) => str.tostring(p, format.mintick)
+inSes(string s) => not na(time(timeframe.period, s, TZ))
+
+// ═════════════ Data (prior completed bars only → no repaint) ═════════════
+[pdH, pdL, pdC, dATR] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1], ta.atr(14)[1]], lookahead = barmerge.lookahead_on)
+[pwH, pwL]            = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+// Vol indexes: last COMPLETED value on the chart timeframe (fixes a one-day-stale VXN during Asia/London:
+// the daily close[1] trick returned the day-before-yesterday close overnight). Falls back to daily close[1].
+string volTf = timeframe.isintraday ? timeframe.period : "D"
+vxLive  = request.security(volSym,  volTf, close)
+vixLive = request.security(vixSym,  volTf, close)
+v3Live  = request.security(vix3Sym, volTf, close)
+vxD     = request.security(volSym,  "D", close[1], lookahead = barmerge.lookahead_on)
+vixD    = request.security(vixSym,  "D", close[1], lookahead = barmerge.lookahead_on)
+v3D     = request.security(vix3Sym, "D", close[1], lookahead = barmerge.lookahead_on)
+vxPrev  = timeframe.isintraday and not na(vxLive[1])  ? vxLive[1]  : vxD
+vixPrev = timeframe.isintraday and not na(vixLive[1]) ? vixLive[1] : vixD
+v3Prev  = timeframe.isintraday and not na(v3Live[1])  ? v3Live[1]  : v3D
+
+bool  usingVol = not na(vxPrev) and not na(pdC)
+float emDay    = usingVol ? pdC * vxPrev / 100.0 / math.sqrt(252) : dATR * 0.87
+bool  expanded = not na(vixPrev) and not na(v3Prev) and vixPrev >= v3Prev
+float regMult  = expanded and expScale ? expMult : 1.0
+
+// ═════════════ Types ═════════════
+type Lvl
+    float  price
+    string name
+    color  col
+    line   ln
+    bool   prov = false
+    bool   live = true
+
+type Prof
+    array<box>  bx
+    array<line> ln
+
+type Sess
+    string name
+    color  col
+    float  share
+    float  o      = na
+    float  hi     = na
+    float  lo     = na
+    int    hiX    = na
+    int    loX    = na
+    int    x0     = na
+    int    t0     = na
+    float  lenMs  = na
+    float  budget = na
+    float  bin    = na
+    map<int, float> vp = na
+    line   bUp    = na
+    line   bDn    = na
+    line   pUp    = na
+    line   pDn    = na
+    label  lbUp   = na
+    label  lbDn   = na
+    label  lpUp   = na
+    label  lpDn   = na
+    bool   active = false
+    bool   spent  = false
+    bool   weekly = false
+    bool   monthly = false
+
+var Sess asia = Sess.new("ASIA", cAsia, asiaShare)
+var Sess lon  = Sess.new("LDN",  cLon,  lonShare)
+var Sess nys  = Sess.new("NY",   cNY,   nyShare)
+var Sess wk   = Sess.new("WK",   cWk,   1.0, weekly = true)
+var Sess mo   = Sess.new("MO",   cMo,   1.0, monthly = true)
+var array<Prof> mprofs = array.new<Prof>()
+var Prof liveMProf = Prof.new(array.new<box>(), array.new<line>())
+var float pmPoc = na
+var float pmVah = na
+var float pmVal = na
+var line  lPmPoc = na
+var line  lPmVah = na
+var line  lPmVal = na
+var array<Prof> wprofs = array.new<Prof>()
+var Prof liveWProf = Prof.new(array.new<box>(), array.new<line>())
+var float pwPoc = na
+var float pwVah = na
+var float pwVal = na
+var line  lPwPoc = na
+var line  lPwVah = na
+var line  lPwVal = na
+var array<Lvl>  lvls     = array.new<Lvl>()
+var array<Prof> profs    = array.new<Prof>()
+var Prof        liveProf = Prof.new(array.new<box>(), array.new<line>())
+
+mkLabel(int x, float y, color c, bool on) =>
+    showLabels and on ? label.new(x, y, "", style = label.style_label_left, color = color(na), textcolor = lcol(c), size = lsize()) : label(na)
+
+setLabel(label lb, int x, float y, string t) =>
+    if not na(lb)
+        lb.set_xy(x, y)
+        lb.set_text(t)
+
+clearProf(Prof p) =>
+    for b in p.bx
+        box.delete(b)
+    for l in p.ln
+        line.delete(l)
+    p.bx.clear()
+    p.ln.clear()
+
+// ── Adaptive projection: remaining per-side extension (in budgets) vs elapsed fraction of the period.
+// 85th percentile per side, fit on the first half of the sample, verified on the second half (NQ: sessions 2-yr hourly, week/month 12-yr daily).
+interp(array<float> xs, array<float> ys, float x) =>
+    float r = ys.last()
+    if x <= xs.first()
+        r := ys.first()
+    else
+        for i = 1 to xs.size() - 1
+            if x <= xs.get(i)
+                float x0 = xs.get(i - 1)
+                float x1 = xs.get(i)
+                r := ys.get(i - 1) + (ys.get(i) - ys.get(i - 1)) * (x - x0) / (x1 - x0)
+                break
+    r
+
+extAllow(Sess s, float f) =>
+    float r = 0.0
+    if s.monthly
+        r := interp(array.from(0.0, 0.048, 0.095, 0.143, 0.19, 0.238, 0.286, 0.333, 0.381, 0.429, 0.476, 0.524, 0.571, 0.619, 0.667, 0.714, 0.762, 0.81, 0.857, 0.905, 0.952, 1.0), array.from(0.89, 0.77, 0.74, 0.69, 0.67, 0.6, 0.55, 0.52, 0.5, 0.41, 0.39, 0.34, 0.33, 0.27, 0.27, 0.21, 0.15, 0.12, 0.07, 0.02, 0.0, 0.0), f)
+    else if s.weekly
+        r := interp(array.from(0.0, 0.2, 0.4, 0.6, 0.8, 1.0), array.from(0.96, 0.62, 0.45, 0.32, 0.11, 0.0), f)
+    else if s.name == "ASIA"
+        r := interp(array.from(0.0, 0.111, 0.222, 0.333, 0.444, 0.556, 0.667, 0.778, 0.889, 1.0), array.from(1.03, 0.68, 0.56, 0.4, 0.32, 0.25, 0.19, 0.14, 0.08, 0.0), f)
+    else if s.name == "LDN"
+        r := interp(array.from(0.0, 0.167, 0.333, 0.5, 0.667, 0.833, 1.0), array.from(0.97, 0.67, 0.54, 0.46, 0.36, 0.24, 0.0), f)
+    else
+        r := interp(array.from(0.0, 0.143, 0.286, 0.429, 0.571, 0.714, 0.857, 1.0), array.from(1.06, 0.69, 0.45, 0.35, 0.25, 0.14, 0.05, 0.0), f)
+    r
+
+sesMin(string ses) =>
+    int h1 = int(str.tonumber(str.substring(ses, 0, 2)))
+    int m1 = int(str.tonumber(str.substring(ses, 2, 4)))
+    int h2 = int(str.tonumber(str.substring(ses, 5, 7)))
+    int m2 = int(str.tonumber(str.substring(ses, 7, 9)))
+    int dm = (h2 * 60 + m2) - (h1 * 60 + m1)
+    dm <= 0 ? dm + 1440 : dm
+
+monthMs() =>
+    int ny = month == 12 ? year + 1 : year
+    int nm = month == 12 ? 1 : month + 1
+    float(timestamp(TZ, ny, nm, 1, 0, 0) - timestamp(TZ, year, month, 1, 0, 0))
+
+sessW(Sess s, int xEnd) => math.max(2, int(math.round((xEnd - s.x0) * profWidth)))
+
+// Builds the profile into p (boxes anchored at xA, w bars wide) and returns [POC, VAH, VAL]
+drawProf(Sess s, Prof p, int xA, int w, bool drawBoxes) =>
+    float poc = na
+    float vah = na
+    float val = na
+    if not na(s.vp)
+        array<int> ks = s.vp.keys()
+        if ks.size() > 0
+            ks.sort(order.ascending)
+            array<float> vs = array.new<float>()
+            float tot = 0.0
+            float mx  = 0.0
+            int   pi  = 0
+            for i = 0 to ks.size() - 1
+                float v = s.vp.get(ks.get(i))
+                vs.push(v)
+                tot += v
+                if v > mx
+                    mx := v
+                    pi := i
+            int   a   = pi
+            int   b   = pi
+            float acc = vs.get(pi)
+            int   last = ks.size() - 1
+            while acc < tot * vaPct / 100.0 and (a > 0 or b < last)
+                float upV = -1.0
+                float dnV = -1.0
+                if b < last
+                    upV := vs.get(b + 1)
+                if a > 0
+                    dnV := vs.get(a - 1)
+                if upV >= dnV
+                    b   += 1
+                    acc += upV
+                else
+                    a   -= 1
+                    acc += dnV
+            poc := s.o + (ks.get(pi) + 0.5) * s.bin
+            vah := s.o + (ks.get(b) + 1) * s.bin
+            val := s.o + ks.get(a) * s.bin
+            if drawBoxes and mx > 0
+                // math runs on fine rows; drawing groups them so a profile never exceeds profMaxRows boxes
+                int g = math.max(1, int(math.ceil((last + 1) / float(profMaxRows))))
+                float gmx = 0.0
+                for i0 = 0 to last by g
+                    float sv = 0.0
+                    for j = i0 to math.min(last, i0 + g - 1)
+                        sv += vs.get(j)
+                    gmx := math.max(gmx, sv)
+                for i0 = 0 to last by g
+                    int   i1 = math.min(last, i0 + g - 1)
+                    float sv = 0.0
+                    for j = i0 to i1
+                        sv += vs.get(j)
+                    int   len = math.max(1, int(math.round(w * sv / gmx)))
+                    float bot = s.o + ks.get(i0) * s.bin
+                    float top = s.o + (ks.get(i1) + 1) * s.bin
+                    int   im  = int(math.floor((i0 + i1) / 2.0))
+                    color c   = (pi >= i0 and pi <= i1) ? (s.monthly ? cMoPoc : s.weekly ? cWkPoc : cPOC) : (im >= a and im <= b) ? cVA : cRow
+                    p.bx.push(box.new(xA, top, xA + len, bot, border_color = color(na), border_width = 0, bgcolor = c))
+    [poc, vah, val]
+
+// ═════════════ Session logic ═════════════
+method start(Sess s, float budgetPts) =>
+    s.active := true
+    s.spent  := false
+    s.o      := open
+    s.hi     := high
+    s.lo     := low
+    s.hiX    := bar_index
+    s.loX    := bar_index
+    s.x0     := bar_index
+    s.t0     := time
+    s.budget := budgetPts
+    int rows = s.monthly ? moRows : s.weekly ? wkRows : rowsPerBudget
+    s.bin    := math.max(syminfo.mintick, budgetPts / rows)
+    s.vp     := map.new<int, float>()
+    s.bUp    := line(na)
+    s.bDn    := line(na)
+    s.pUp    := line(na)
+    s.pDn    := line(na)
+    float kk = s.monthly ? moKProj : s.weekly ? wkKProj : kProj
+    int   lw = s.monthly ? moWidth : s.weekly ? wkWidth : budgetWidth
+    bool  labOn = s.monthly ? labMo : s.weekly ? labWk : labSess
+    if (s.monthly ? moBudget : s.weekly ? wkBudget : showBudget)
+        s.bUp  := line.new(bar_index, open + budgetPts, bar_index, open + budgetPts, color = color.new(s.col, 30), style = lstyle(budgetStyle), width = lw)
+        s.bDn  := line.new(bar_index, open - budgetPts, bar_index, open - budgetPts, color = color.new(s.col, 30), style = lstyle(budgetStyle), width = lw)
+        s.lbUp := mkLabel(bar_index, open + budgetPts, s.col, labOn)
+        s.lbDn := mkLabel(bar_index, open - budgetPts, s.col, labOn)
+    if (s.monthly ? moProjOn : s.weekly ? wkProjOn : showProj)
+        s.pUp  := line.new(bar_index, low + kk * budgetPts, bar_index, low + kk * budgetPts, color = cProj, style = lstyle(projStyle), width = projWidth)
+        s.pDn  := line.new(bar_index, high - kk * budgetPts, bar_index, high - kk * budgetPts, color = cProj, style = lstyle(projStyle), width = projWidth)
+        s.lpUp := mkLabel(bar_index, low + kk * budgetPts, cProj, labOn)
+        s.lpDn := mkLabel(bar_index, high - kk * budgetPts, cProj, labOn)
+
+method update(Sess s) =>
+    if s.active
+        if high > s.hi
+            s.hi  := high
+            s.hiX := bar_index
+        if low < s.lo
+            s.lo  := low
+            s.loX := bar_index
+        if volume > 0 and s.bin > 0
+            int b0 = int(math.floor((low - s.o) / s.bin))
+            int b1 = int(math.floor((high - s.o) / s.bin))
+            float vpb = volume / (b1 - b0 + 1)
+            for k = b0 to b1
+                s.vp.put(k, nz(s.vp.get(k)) + vpb)
+        float kk = s.monthly ? moKProj : s.weekly ? wkKProj : kProj
+        float up = s.lo + kk * s.budget
+        float dn = s.hi - kk * s.budget
+        if projMode == "Adaptive" and not na(s.lenMs) and s.lenMs > 0
+            float f = math.max(0.0, math.min(1.0, (time_close - s.t0) / s.lenMs))
+            float e = extAllow(s, f) * extMult * s.budget
+            up := math.max(up, s.hi + e)
+            dn := math.min(dn, s.lo - e)
+        if not na(s.bUp)
+            s.bUp.set_x2(bar_index)
+            s.bDn.set_x2(bar_index)
+        if not na(s.pUp)
+            s.pUp.set_xy1(s.x0, up)
+            s.pUp.set_xy2(bar_index, up)
+            s.pDn.set_xy1(s.x0, dn)
+            s.pDn.set_xy2(bar_index, dn)
+        float used = s.budget > 0 ? 100.0 * (s.hi - s.lo) / s.budget : na
+        if not s.spent and used >= 100
+            s.spent := true
+            if alBudget
+                alert(s.name + " range budget spent (" + str.tostring(used, "#") + "%) — late extensions are short; stop chasing", alert.freq_once_per_bar)
+        if barstate.islast
+            int xr = bar_index + labelOffset
+            string u = "  ·  used " + str.tostring(used, "#") + "%" + (s.spent ? " · SPENT" : "")
+            setLabel(s.lbUp, xr, s.o + s.budget, s.name + " +budget  " + fmt(s.o + s.budget) + u)
+            setLabel(s.lbDn, xr, s.o - s.budget, s.name + " −budget  " + fmt(s.o - s.budget))
+            setLabel(s.lpUp, xr, up, s.name + " proj top" + (projMode == "Adaptive" ? " (adaptive)  " : "  ") + fmt(up))
+            setLabel(s.lpDn, xr, dn, s.name + " proj bottom" + (projMode == "Adaptive" ? " (adaptive)  " : "  ") + fmt(dn))
+
+method finish(Sess s) =>
+    if s.active
+        s.active := false
+        line.delete(s.pUp)
+        line.delete(s.pDn)
+        label.delete(s.lbUp)
+        label.delete(s.lbDn)
+        label.delete(s.lpUp)
+        label.delete(s.lpDn)
+        if showPastBands and not na(s.bUp)
+            s.bUp.set_color(color.new(s.col, 75))
+            s.bDn.set_color(color.new(s.col, 75))
+        else
+            line.delete(s.bUp)
+            line.delete(s.bDn)
+        string d  = str.format_time(time, "MM/dd", TZ)
+        int    xe = bar_index - 1
+        // session profile + POC / VA
+        Prof p = Prof.new(array.new<box>(), array.new<line>())
+        [poc, vah, val] = drawProf(s, p, s.x0, sessW(s, xe), s.monthly ? moProfOn : s.weekly ? wkProfOn : showProf)
+        color pc  = s.monthly ? cMoPoc : s.weekly ? cWkPoc : cPOC
+        color vc  = s.monthly ? cMoVa  : s.weekly ? cWkVa  : cVAedge
+        int   pw  = s.monthly ? moWidth : s.weekly ? wkWidth : pocWidth
+        int   vw  = s.monthly ? moWidth : s.weekly ? wkWidth : 1
+        if not na(poc)
+            if (s.monthly ? moPocVa : s.weekly ? wkPocVa : showPocVa)
+                p.ln.push(line.new(s.x0, poc, xe, poc, color = pc, width = pw))
+                p.ln.push(line.new(s.x0, vah, xe, vah, color = vc, style = lstyle(vaStyle), width = vw))
+                p.ln.push(line.new(s.x0, val, xe, val, color = vc, style = lstyle(vaStyle), width = vw))
+            if (s.monthly ? moNakedPoc : s.weekly ? wkNakedPoc : nakedPoc)
+                lvls.push(Lvl.new(poc, s.name + " POC " + d, pc, line.new(xe, poc, bar_index, poc, color = color.new(pc, 15), style = lstyle(nakedStyle), width = pw)))
+            if (s.monthly ? moNakedVa : s.weekly ? wkNakedVa : nakedVa)
+                lvls.push(Lvl.new(vah, s.name + " VAH " + d, vc, line.new(xe, vah, bar_index, vah, color = color.new(vc, 15), style = lstyle(nakedStyle), width = vw)))
+                lvls.push(Lvl.new(val, s.name + " VAL " + d, vc, line.new(xe, val, bar_index, val, color = color.new(vc, 15), style = lstyle(nakedStyle), width = vw)))
+        if s.monthly
+            mprofs.push(p)
+            while mprofs.size() > moKeep
+                clearProf(mprofs.shift())
+        else if s.weekly
+            wprofs.push(p)
+            while wprofs.size() > wkKeep
+                clearProf(wprofs.shift())
+        else
+            profs.push(p)
+            while profs.size() > keepProfiles
+                clearProf(profs.shift())
+        // naked session high / low
+        if (s.monthly ? moNakedHL : s.weekly ? wkNakedHL : showNaked)
+            bool isLonHigh = s.name == "LDN"
+            lvls.push(Lvl.new(s.hi, s.name + " H " + d, s.col, line.new(s.hiX, s.hi, bar_index, s.hi, color = color.new(s.col, 15), style = lstyle(nakedStyle), width = s.monthly ? moWidth : s.weekly ? wkWidth : isLonHigh ? 2 : 1), isLonHigh))
+            lvls.push(Lvl.new(s.lo, s.name + " L " + d, s.col, line.new(s.loX, s.lo, bar_index, s.lo, color = color.new(s.col, 15), style = lstyle(nakedStyle), width = s.monthly ? moWidth : s.weekly ? wkWidth : 1), false))
+        while lvls.size() > nakedMax
+            int idx = 0
+            for j = 0 to lvls.size() - 1
+                string nm = lvls.get(j).name
+                if not str.startswith(nm, "WK") and not str.startswith(nm, "MO")
+                    idx := j
+                    break
+            Lvl old = lvls.remove(idx)
+            line.delete(old.ln)
+
+run(Sess s, bool inside, float lenMin) =>
+    s.lenMs := lenMin * 60000.0
+    if inside and not s.active
+        s.start(emDay * s.share * regMult)
+    else if not inside and s.active
+        s.finish()
+    s.update()
+
+if timeframe.isintraday and not na(emDay)
+    run(asia, asiaOn and inSes(asiaSes), sesMin(asiaSes))
+    run(lon,  lonOn  and inSes(lonSes), sesMin(lonSes))
+    run(nys,  nyOn   and inSes(nySes), sesMin(nySes))
+
+// Weekly layer: one "session" per chart week (futures week starts Sunday 18:00 ET)
+if timeframe.isintraday and not na(emDay) and wkOn
+    if timeframe.change("W") and wk.active
+        [wp, wh, wl] = drawProf(wk, Prof.new(array.new<box>(), array.new<line>()), wk.x0, 2, false)
+        wk.finish()
+        if wkPrevVa and not na(wp)
+            pwPoc := wp
+            pwVah := wh
+            pwVal := wl
+            lPwPoc := line.new(bar_index, wp, bar_index, wp, color = cWkPoc, width = wkWidth + 1)
+            lPwVah := line.new(bar_index, wh, bar_index, wh, color = cWkVa, style = lstyle(vaStyle), width = wkWidth)
+            lPwVal := line.new(bar_index, wl, bar_index, wl, color = cWkVa, style = lstyle(vaStyle), width = wkWidth)
+    if not wk.active
+        wk.start(emDay * math.sqrt(5) * wkMult * regMult)
+        wk.lenMs := 7140.0 * 60000.0
+    wk.update()
+    if not na(lPwPoc)
+        lPwPoc.set_x2(bar_index)
+        lPwVah.set_x2(bar_index)
+        lPwVal.set_x2(bar_index)
+
+// Monthly layer: one "session" per chart month
+if timeframe.isintraday and not na(emDay) and moOn
+    if timeframe.change("M") and mo.active
+        [mp, mh, ml] = drawProf(mo, Prof.new(array.new<box>(), array.new<line>()), mo.x0, 2, false)
+        mo.finish()
+        if moPrevVa and not na(mp)
+            pmPoc := mp
+            pmVah := mh
+            pmVal := ml
+            lPmPoc := line.new(bar_index, mp, bar_index, mp, color = cMoPoc, width = moWidth + 1)
+            lPmVah := line.new(bar_index, mh, bar_index, mh, color = cMoVa, style = lstyle(vaStyle), width = moWidth)
+            lPmVal := line.new(bar_index, ml, bar_index, ml, color = cMoVa, style = lstyle(vaStyle), width = moWidth)
+    if not mo.active
+        mo.start(emDay * math.sqrt(21) * moMult * regMult)
+        mo.lenMs := monthMs()
+    mo.update()
+    if not na(lPmPoc)
+        lPmPoc.set_x2(bar_index)
+        lPmVah.set_x2(bar_index)
+        lPmVal.set_x2(bar_index)
+
+// Naked levels: extend while untouched; stop and fade at first touch
+if lvls.size() > 0
+    for i = lvls.size() - 1 to 0
+        Lvl v = lvls.get(i)
+        if v.live
+            v.ln.set_x2(bar_index)
+            if high >= v.price and low <= v.price
+                bool htf = str.startswith(v.name, "WK") or str.startswith(v.name, "MO")
+                if (htf and alNakedHTF) or (not htf and alNakedSess)
+                    alert("Naked level touched: " + v.name + " " + fmt(v.price), alert.freq_once_per_bar)
+                v.live := false
+                v.ln.set_style(line.style_solid)
+                v.ln.set_color(color.new(v.col, 80))
+
+// ═════════════ NY initial balance ═════════════
+var float ibH = na
+var float ibL = na
+var int   ibT0 = na
+var int   ibX0 = na
+var bool  ibDone = false
+var bool  ibUp = false
+var bool  ibDn = false
+var line  lIbH = na
+var line  lIbL = na
+bool nyNow = nyOn and timeframe.isintraday and inSes(nySes)
+if ibOn and nyNow and not nyNow[1]
+    if not ibKeep
+        line.delete(lIbH)
+        line.delete(lIbL)
+    lIbH   := line(na)
+    lIbL   := line(na)
+    ibH    := high
+    ibL    := low
+    ibT0   := time
+    ibX0   := bar_index
+    ibDone := false
+    ibUp   := false
+    ibDn   := false
+else if ibOn and nyNow and not ibDone
+    if time < ibT0 + ibMinutes * 60000
+        ibH := math.max(ibH, high)
+        ibL := math.min(ibL, low)
+    else
+        ibDone := true
+        lIbH := line.new(ibX0, ibH, bar_index, ibH, color = cIB, style = line.style_solid, width = 2)
+        lIbL := line.new(ibX0, ibL, bar_index, ibL, color = cIB, style = line.style_solid, width = 2)
+if ibOn and ibDone and nyNow and not na(lIbH)
+    lIbH.set_x2(bar_index)
+    lIbL.set_x2(bar_index)
+    if high > ibH and not ibUp
+        ibUp := true
+        if alIb
+            alert("NY initial balance HIGH broken " + fmt(ibH) + (ibDn ? " — both sides now broken" : ""), alert.freq_once_per_bar)
+    if low < ibL and not ibDn
+        ibDn := true
+        if alIb
+            alert("NY initial balance LOW broken " + fmt(ibL) + (ibUp ? " — both sides now broken" : ""), alert.freq_once_per_bar)
+
+// ═════════════ Prior day / week ═════════════
+plot(showPD and pdH == pdH[1] ? pdH : na, "PD High",  cPD, 1, plot.style_linebr)
+plot(showPD and pdL == pdL[1] ? pdL : na, "PD Low",   cPD, 1, plot.style_linebr)
+plot(showPD and pdC == pdC[1] ? pdC : na, "PD Close", color.new(cPD, 40), 1, plot.style_linebr)
+plot(showPW and pwH == pwH[1] ? pwH : na, "PW High",  cPW, 2, plot.style_linebr)
+plot(showPW and pwL == pwL[1] ? pwL : na, "PW Low",   cPW, 2, plot.style_linebr)
+
+// ═════════════ Prior-week / prior-month value-area touch alerts ═════════════
+newTouch(float L) => not na(L) and high >= L and low <= L and not (high[1] >= L and low[1] <= L)
+bool tPwPoc = newTouch(pwPoc)
+bool tPwVah = newTouch(pwVah)
+bool tPwVal = newTouch(pwVal)
+bool tPmPoc = newTouch(pmPoc)
+bool tPmVah = newTouch(pmVah)
+bool tPmVal = newTouch(pmVal)
+if alPrevVa
+    if wkOn and wkPrevVa
+        if tPwVah
+            alert("Prior-week VAH touched " + fmt(pwVah), alert.freq_once_per_bar)
+        if tPwPoc
+            alert("Prior-week POC touched " + fmt(pwPoc), alert.freq_once_per_bar)
+        if tPwVal
+            alert("Prior-week VAL touched " + fmt(pwVal), alert.freq_once_per_bar)
+    if moOn and moPrevVa
+        if tPmVah
+            alert("Prior-month VAH touched " + fmt(pmVah), alert.freq_once_per_bar)
+        if tPmPoc
+            alert("Prior-month POC touched " + fmt(pmPoc), alert.freq_once_per_bar)
+        if tPmVal
+            alert("Prior-month VAL touched " + fmt(pmVal), alert.freq_once_per_bar)
+
+// ═════════════ Vol-Step Ranges ═════════════
+// Upgrades over the classic ATR version: (1) step size from IMPLIED vol (forward-looking) instead of trailing ATR,
+// (2) gap-aware: jumps as many steps as price actually moved in one bar instead of lagging one step per bar,
+// (3) shift alerts and right-edge labels. Same ATR behavior available in "ATR (classic)" mode.
+float vsAtr  = nz(ta.atr(vsAtrLen)) * vsAtrFac
+float vsStep = vsSource == "Implied move (VXN)" ? vsMult * emDay : vsAtr
+var float vsMid  = na
+var float vsHalf = na
+if not na(vsStep) and vsStep > 0
+    if na(vsMid)
+        vsMid  := close
+        vsHalf := vsStep / 2
+    else
+        float dv = close - vsMid
+        if math.abs(dv) > vsStep
+            int n = int(math.floor(math.abs(dv) / vsStep))
+            vsMid  := vsMid + math.sign(dv) * n * vsStep
+            vsHalf := vsStep / 2
+bool vsShift = vsMid != vsMid[1]
+if vsOn and alVs and vsShift and not na(vsMid[1])
+    alert("Vol-Step Range shifted " + (vsMid > vsMid[1] ? "UP" : "DOWN") + " → mid " + fmt(vsMid), alert.freq_once_per_bar)
+bool vsShow = vsOn and not vsShift
+pVsR2 = plot(vsShow ? vsMid + 2 * vsHalf : na, "VS Upper 2", cVsUp,  1, plot.style_linebr)
+pVsR1 = plot(vsShow ? vsMid + vsHalf     : na, "VS Upper 1", cVsUp,  1, plot.style_linebr)
+plot(vsShow ? vsMid : na,                      "VS Mid",     cVsMid, 2, plot.style_linebr)
+pVsS1 = plot(vsShow ? vsMid - vsHalf     : na, "VS Lower 1", cVsDn,  1, plot.style_linebr)
+pVsS2 = plot(vsShow ? vsMid - 2 * vsHalf : na, "VS Lower 2", cVsDn,  1, plot.style_linebr)
+fill(pVsR2, pVsR1, vsShow ? color.new(cVsUp, vsFill) : na)
+fill(pVsS1, pVsS2, vsShow ? color.new(cVsDn, vsFill) : na)
+
+// ═════════════ Last bar: live profile, labels, badge ═════════════
+var array<label> edge = array.new<label>()
+var table badge = table.new(position.top_right, 1, 1, bgcolor = cBadgeBg, frame_color = color.new(#C8794A, 60), frame_width = 1)
+
+edgeLabel(float y, string t, color c, string tip) =>
+    label.new(bar_index + labelOffset, y, t, style = label.style_label_left, color = color(na), textcolor = c, size = lsize(), tooltip = tip)
+
+if barstate.islast
+    for l in edge
+        label.delete(l)
+    edge.clear()
+    clearProf(liveProf)
+    Sess cur = nys.active ? nys : lon.active ? lon : asia
+
+    // live session profile
+    if cur.active and timeframe.isintraday
+        [lp, lh, ll] = drawProf(cur, liveProf, cur.x0, sessW(cur, bar_index), showProf)
+        if showPocVa and not na(lp)
+            liveProf.ln.push(line.new(cur.x0, lp, bar_index, lp, color = cPOC, width = pocWidth))
+            liveProf.ln.push(line.new(cur.x0, lh, bar_index, lh, color = cVAedge, style = lstyle(vaStyle)))
+            liveProf.ln.push(line.new(cur.x0, ll, bar_index, ll, color = cVAedge, style = lstyle(vaStyle)))
+            if showLabels and labSess
+                edge.push(edgeLabel(lp, cur.name + " POC (live)  " + fmt(lp), lcol(cPOC), "Developing session point of control"))
+                edge.push(edgeLabel(lh, cur.name + " VAH (live)  " + fmt(lh), lcol(cVAedge), "Developing value area high"))
+                edge.push(edgeLabel(ll, cur.name + " VAL (live)  " + fmt(ll), lcol(cVAedge), "Developing value area low"))
+
+    // developing weekly profile + all weekly labels
+    clearProf(liveWProf)
+    if wkOn and wk.active and timeframe.isintraday
+        bool rightEdge = wkProfPos == "Right edge"
+        int  wxA = rightEdge ? bar_index + wkRightOff : wk.x0
+        int  wW  = rightEdge ? wkRightW : sessW(wk, bar_index)
+        [wp, wh, wl] = drawProf(wk, liveWProf, wxA, wW, wkLiveProf)
+        if not na(wp)
+            liveWProf.ln.push(line.new(wk.x0, wp, bar_index, wp, color = cWkPoc, width = wkWidth))
+            liveWProf.ln.push(line.new(wk.x0, wh, bar_index, wh, color = cWkVa, style = lstyle(vaStyle), width = wkWidth))
+            liveWProf.ln.push(line.new(wk.x0, wl, bar_index, wl, color = cWkVa, style = lstyle(vaStyle), width = wkWidth))
+            if showLabels and labWk
+                edge.push(edgeLabel(wp, "WK POC (developing)  " + fmt(wp), lcol(cWkPoc), "This week's developing point of control"))
+                edge.push(edgeLabel(wh, "WK VAH (developing)  " + fmt(wh), lcol(cWkVa), "This week's developing value area high"))
+                edge.push(edgeLabel(wl, "WK VAL (developing)  " + fmt(wl), lcol(cWkVa), "This week's developing value area low"))
+    if showLabels and labWk and wkOn and wkPrevVa and not na(pwPoc)
+        edge.push(edgeLabel(pwPoc, "Prior-week POC  " + fmt(pwPoc), lcol(cWkPoc), "Last week's point of control — carried all week"))
+        edge.push(edgeLabel(pwVah, "Prior-week VAH  " + fmt(pwVah), lcol(cWkVa), "Last week's value area high — carried all week"))
+        edge.push(edgeLabel(pwVal, "Prior-week VAL  " + fmt(pwVal), lcol(cWkVa), "Last week's value area low — carried all week"))
+    // developing monthly profile + all monthly labels
+    clearProf(liveMProf)
+    if moOn and mo.active and timeframe.isintraday
+        bool mRight = moProfPos == "Right edge"
+        int  mxA = mRight ? bar_index + moRightOff : mo.x0
+        int  mW  = mRight ? moRightW : sessW(mo, bar_index)
+        [mp, mh, ml] = drawProf(mo, liveMProf, mxA, mW, moLiveProf)
+        if not na(mp)
+            liveMProf.ln.push(line.new(mo.x0, mp, bar_index, mp, color = cMoPoc, width = moWidth))
+            liveMProf.ln.push(line.new(mo.x0, mh, bar_index, mh, color = cMoVa, style = lstyle(vaStyle), width = moWidth))
+            liveMProf.ln.push(line.new(mo.x0, ml, bar_index, ml, color = cMoVa, style = lstyle(vaStyle), width = moWidth))
+            if showLabels and labMo
+                edge.push(edgeLabel(mp, "MO POC (developing)  " + fmt(mp), lcol(cMoPoc), "This month's developing point of control"))
+                edge.push(edgeLabel(mh, "MO VAH (developing)  " + fmt(mh), lcol(cMoVa), "This month's developing value area high"))
+                edge.push(edgeLabel(ml, "MO VAL (developing)  " + fmt(ml), lcol(cMoVa), "This month's developing value area low"))
+    if showLabels and labMo and moOn and moPrevVa and not na(pmPoc)
+        edge.push(edgeLabel(pmPoc, "Prior-month POC  " + fmt(pmPoc), lcol(cMoPoc), "Last month's point of control — carried all month"))
+        edge.push(edgeLabel(pmVah, "Prior-month VAH  " + fmt(pmVah), lcol(cMoVa), "Last month's value area high — carried all month"))
+        edge.push(edgeLabel(pmVal, "Prior-month VAL  " + fmt(pmVal), lcol(cMoVa), "Last month's value area low — carried all month"))
+    if showLabels
+        for v in lvls
+            bool isWk = str.startswith(v.name, "WK")
+            bool isMo = str.startswith(v.name, "MO")
+            bool dupPw = isWk and wkPrevVa and (v.price == pwPoc or v.price == pwVah or v.price == pwVal)
+            bool dupPm = isMo and moPrevVa and (v.price == pmPoc or v.price == pmVah or v.price == pmVal)
+            if v.live and ((isWk and labWk and not dupPw) or (isMo and labMo and not dupPm))
+                edge.push(edgeLabel(v.price, v.name + " (naked)  " + fmt(v.price), lcol(v.col), "Naked " + (isMo ? "monthly" : "weekly") + " level — not revisited since it formed"))
+    if showLabels and labVs and vsOn and not na(vsMid)
+        edge.push(edgeLabel(vsMid + 2 * vsHalf, "VS R2  " + fmt(vsMid + 2 * vsHalf), lcol(cVsUp), "Vol-Step upper 2"))
+        edge.push(edgeLabel(vsMid + vsHalf, "VS R1  " + fmt(vsMid + vsHalf), lcol(cVsUp), "Vol-Step upper 1"))
+        edge.push(edgeLabel(vsMid, "VS Mid  " + fmt(vsMid), lcol(cVsMid), "Vol-Step mid: moves only when price travels a full step"))
+        edge.push(edgeLabel(vsMid - vsHalf, "VS S1  " + fmt(vsMid - vsHalf), lcol(cVsDn), "Vol-Step lower 1"))
+        edge.push(edgeLabel(vsMid - 2 * vsHalf, "VS S2  " + fmt(vsMid - 2 * vsHalf), lcol(cVsDn), "Vol-Step lower 2"))
+
+    if showLabels and labSess and ibOn and ibDone and nyNow
+        string ibState = ibUp and ibDn ? " · both sides broken (the ~20% case)" : ibUp ? " · high broken → low likely the session low" : ibDn ? " · low broken → high likely the session high" : ""
+        edge.push(edgeLabel(ibH, "NY IB high  " + fmt(ibH) + ibState, lcol(cIB), "NY first-hour high. One side of the first hour holds as the session extreme ~80% of days."))
+        edge.push(edgeLabel(ibL, "NY IB low  " + fmt(ibL), lcol(cIB), "NY first-hour low. One side of the first hour holds as the session extreme ~80% of days."))
+    if showLabels
+        // prior day / week
+        if showPD and labCtx and not na(pdH)
+            edge.push(edgeLabel(pdH, "PDH  " + fmt(pdH), lcol(cPD), "Prior day high"))
+            edge.push(edgeLabel(pdL, "PDL  " + fmt(pdL), lcol(cPD), "Prior day low"))
+            edge.push(edgeLabel(pdC, "PDC  " + fmt(pdC), lcol(cPD), "Prior day close"))
+        if showPW and labCtx and not na(pwH)
+            edge.push(edgeLabel(pwH, "PWH  " + fmt(pwH), lcol(cPW), "Prior week high"))
+            edge.push(edgeLabel(pwL, "PWL  " + fmt(pwL), lcol(cPW), "Prior week low"))
+
+        // naked levels near price, merged when stacked
+        array<float>  cp = array.new<float>()
+        array<string> cn = array.new<string>()
+        array<color>  cc = array.new<color>()
+        array<bool>   cv = array.new<bool>()
+        for v in lvls
+            if labNaked and v.live and not str.startswith(v.name, "WK") and not str.startswith(v.name, "MO") and math.abs(v.price - close) <= nakedRange * emDay
+                cp.push(v.price)
+                cn.push(v.name + (v.prov ? " *" : ""))
+                cc.push(v.col)
+                cv.push(v.prov)
+        array<float>  gp = array.new<float>()
+        array<string> gt = array.new<string>()
+        array<color>  gc = array.new<color>()
+        array<bool>   gv = array.new<bool>()
+        if cp.size() > 0
+            array<int> ix = cp.sort_indices(order.ascending)
+            float  tol    = mergeTol * emDay
+            float  g0     = cp.get(ix.get(0))
+            string gn     = cn.get(ix.get(0))
+            color  gcol   = cc.get(ix.get(0))
+            bool   gprov  = cv.get(ix.get(0))
+            int    gcount = 1
+            float  glo    = g0
+            float  ghi    = g0
+            for k = 1 to ix.size()
+                bool  flush = k == ix.size()
+                float p     = na
+                if not flush
+                    p := cp.get(ix.get(k))
+                if not flush and p - g0 <= tol
+                    gn     := gn + " · " + cn.get(ix.get(k))
+                    gprov  := gprov or cv.get(ix.get(k))
+                    gcount += 1
+                    ghi    := p
+                else
+                    string px = glo == ghi ? fmt(glo) : fmt(glo) + "–" + fmt(ghi)
+                    gp.push((glo + ghi) / 2)
+                    gt.push((gcount > 1 ? "×" + str.tostring(gcount) + "  " : "") + gn + "  " + px)
+                    gc.push(gcount > 1 ? cStack : lcol(gcol))
+                    gv.push(gprov)
+                    if not flush
+                        g0     := p
+                        gn     := cn.get(ix.get(k))
+                        gcol   := cc.get(ix.get(k))
+                        gprov  := cv.get(ix.get(k))
+                        gcount := 1
+                        glo    := p
+                        ghi    := p
+        if gp.size() > 0
+            int split = gp.size()
+            for k = 0 to gp.size() - 1
+                if gp.get(k) > close
+                    split := k
+                    break
+            int lo = math.max(0, split - nearestN)
+            int hi = math.min(gp.size() - 1, split + nearestN - 1)
+            if hi >= lo
+                for k = lo to hi
+                    string tip = gv.get(k) ? "Includes a London high — WEAK: NY high lands within 0.1× expected move of it in 25% of 589 sessions (2-yr hourly) vs 11–22% for nearby placebo levels. The 38%/40-session result did not hold up at scale." : "Naked level(s), not yet revisited. ×N = several sessions left levels here."
+                    edge.push(edgeLabel(gp.get(k), gt.get(k), gc.get(k), tip))
+
+    // badge
+    string sesTxt = cur.active ? cur.name + " budget " + fmt(cur.budget) + " · used " + str.tostring(100.0 * (cur.hi - cur.lo) / cur.budget, "#") + "%" : "Between sessions"
+    string regTxt = expanded ? "EXPANDED regime (VIX ≥ VIX3M): ranges run ~1.4×" + (expScale ? " · budgets widened" : "") + " · size down" : "Normal range regime"
+    string emTxt  = "Daily expected move ±" + fmt(emDay) + (usingVol ? "" : " (ATR fallback)")
+    string wkTxt = wkOn and wk.active ? "Week budget " + fmt(wk.budget) + " · used " + str.tostring(100.0 * (wk.hi - wk.lo) / wk.budget, "#") + "%" : ""
+    string moTxt = moOn and mo.active ? "Month budget " + fmt(mo.budget) + " · used " + str.tostring(100.0 * (mo.hi - mo.lo) / mo.budget, "#") + "%" : ""
+    badge.cell(0, 0, sesTxt + (wkTxt != "" ? "\n" + wkTxt : "") + (moTxt != "" ? "\n" + moTxt : "") + "\n" + emTxt + "\n" + regTxt + "\nMap, not signals", text_color = expanded ? cBadgeWn : cBadgeTx, text_size = lsize(), text_halign = text.align_left)
+
+// ═════════════ Evidence behind the defaults (QQQ / NQ, Yahoo data) ═════════════
+// • Daily expected move = prior close × VXN / 100 / √252. NQ Globex day median range = 1.15× (12 yrs, n=3,209); QQQ RTH = 0.92×.
+// • Session budgets (NQ, 2 yrs hourly, n≈590 each; cross-checked on 60 days of 5m): Asia 0.43×, London 0.48×, NY 0.90× of the daily move.
+// • Fixed projection holds exactly when range ≤ k × budget (k = 1.3: Asia 71%, London 74%, NY 74%). Flaw: once range > 1.3 budgets
+//   (20–28% of sessions by the close) the fixed lines sit INSIDE the range and mean nothing.
+// • Adaptive projection (default) = max(fixed, current extreme + E(f) × budget), E = 85th-pct remaining extension per side by elapsed
+//   fraction f. Out-of-sample coverage: Asia 81% (fixed 70%), London 86% (78%), NY 90% (80%), week 84% (79%), month 88% (82%);
+//   in the cases where fixed is too tight: 62–78% vs 23–42%. Median extra width when not needed: 0.
+// • Weekly: median NQ week = 1.22× (daily move × √5), n=665 → at k = 1.3 the weekly projection holds 76%. Monthly: 1.34× (√21), n=152 → 80%.
+// • Profile POC/VA precision = ± half a math row: session ≈ ±4 pts, week ≈ ±6, month ≈ ±8 NQ points at current vol.
+// • NY first hour holds a session extreme 82% of days (Asia 35%, London 47%).
+// • Naked prior-day highs revisited 84% within 20 sessions; naked lows 67%.
+// • Backwardation (VIX ≥ VIX3M) days: NQ range 1.56× the expected move vs 1.12× otherwise (ratio 1.39, n=241 vs 2,966) → budgets widened by default.
+// • Session profiles / POC / VA are context — not tested as an edge here.
+// • Weekly/monthly budgets are calibrated (above); weekly/monthly LEVELS (POC/VA/naked) are NOT tested as an edge — context only.
+// • Vol-Step Ranges: concept from LuxAlgo Predictive Ranges (CC BY-NC-SA 4.0); independent re-implementation. At 0.5× daily move: ~1.8 shifts/day,
+//   price inside S1–R1 77% of 5m bars, 2% of shifts are multi-step gap jumps (NQ, 60 days). Not tested as an edge.
+// • Tested and REMOVED for having no edge: line fades (−0.07R, n=827), line breaks (~0R), VWAP 2σ fades,
+//   OPEX pinning, range-exhaustion fades, first-hour breakout to projection (−0.05R).

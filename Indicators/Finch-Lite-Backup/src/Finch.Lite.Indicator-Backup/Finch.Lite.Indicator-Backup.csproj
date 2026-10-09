@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    FROZEN BACKUP of Finch-Lite (taken 2026-10-08, right before the oceanVwap/priceLevels/
+    srm.pine features were added to the live indicator) — same reasoning as
+    FinchDomScalpStrategy-Backup: a working, deployable snapshot kept available to reload if the
+    new features need to be rolled back from. Not touched again after this copy.
+
+    net10.0-windows for the same reason as every other indicator project here: the installed
+    platform binds System.Runtime 10 and System.Drawing.Common 9, and net8.0-windows fails with
+    CS1705.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <AssemblyName>FinchLiteBackupIndicator</AssemblyName>
+    <RootNamespace>FinchLiteBackup</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Share)' == 'true'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <Deterministic>true</Deterministic>
+    <PathMap>$(MSBuildThisFileDirectory)..\..\=/src/</PathMap>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>$(QuantowerSdkPath)</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,466 @@
+//@version=6
+indicator("QQQ Purple Price Levels Extended", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ───────── LEVEL SETTINGS
+startLevel = input.int(600, "Start Level (QQQ)")
+endLevel   = input.int(800, "End Level (QQQ)")
+zoneWidth  = input.float(0.10, "Zone Half Width (QQQ $)", step=0.01)
+barsBack   = input.int(300, "Bars Back", minval=1)
+refreshTF  = input.timeframe("15", "Refresh Interval")
+showMid    = input.bool(true, "Show Center Line")
+showLabels = input.bool(true, "Show QQQ Price Labels")
+labelSize  = input.string("small", "Label Size", options=["tiny", "small", "normal"])
+showInfo   = input.bool(true, "Show Ratio Box")
+
+// ───────── DARK POOL SETTINGS (QQQ prices)
+gDP = "Dark Pools (QQQ)"
+dpColor   = input.color(color.rgb(80, 200, 230), "Dark Pool Color", group=gDP)
+dpOffset  = input.int(8, "Label Offset (bars right of grid labels)", minval=0, group=gDP)
+
+dp1On = input.bool(true,  "1", inline="dp1", group=gDP)
+dp1Lo = input.float(744.72, "Low",  inline="dp1", group=gDP)
+dp1Hi = input.float(745.33, "High", inline="dp1", group=gDP)
+dp1N  = input.float(1.58,  "$B",   inline="dp1", group=gDP)
+
+dp2On = input.bool(true, "2", inline="dp2", group=gDP)
+dp2Lo = input.float(0.0, "Low",  inline="dp2", group=gDP)
+dp2Hi = input.float(0.0, "High", inline="dp2", group=gDP)
+dp2N  = input.float(0.0, "$B",   inline="dp2", group=gDP)
+
+dp3On = input.bool(true, "3", inline="dp3", group=gDP)
+dp3Lo = input.float(0.0, "Low",  inline="dp3", group=gDP)
+dp3Hi = input.float(0.0, "High", inline="dp3", group=gDP)
+dp3N  = input.float(0.0, "$B",   inline="dp3", group=gDP)
+
+dp4On = input.bool(true, "4", inline="dp4", group=gDP)
+dp4Lo = input.float(0.0, "Low",  inline="dp4", group=gDP)
+dp4Hi = input.float(0.0, "High", inline="dp4", group=gDP)
+dp4N  = input.float(0.0, "$B",   inline="dp4", group=gDP)
+
+dp5On = input.bool(true, "5", inline="dp5", group=gDP)
+dp5Lo = input.float(0.0, "Low",  inline="dp5", group=gDP)
+dp5Hi = input.float(0.0, "High", inline="dp5", group=gDP)
+dp5N  = input.float(0.0, "$B",   inline="dp5", group=gDP)
+
+// Everything below is appended after the original inputs, in the same slot order as the earlier versions,
+// so values already saved on your chart stay in the right fields.
+
+bandTip = "Every added level is drawn like the purple grid: a soft band plus a solid center line. Thin = half the grid's zone width, Match Grid = same width, Off = center line only."
+unitTip = "QQQ = QQQ price, converted with the locked ratio. Chart = already in chart price (e.g. an NQ-native level), drawn as typed with no conversion."
+
+// ───────── DARK POOL LINES (single QQQ prices)
+gDL = "Dark Pool Lines (QQQ)"
+dlShow   = input.bool(true, "Show Dark Pool Lines", group=gDL)
+dlColor  = input.color(color.rgb(0, 229, 255), "Color", inline="dlfmt", group=gDL)
+dlWidth  = input.int(1, "Width", minval=1, maxval=4, inline="dlfmt", group=gDL)
+dlBand   = input.string("Thin", "Band", options=["Off", "Thin", "Match Grid"], inline="dlfmt", group=gDL, tooltip=bandTip)
+dlOffset = input.int(26, "Label Offset (bars right of grid labels)", minval=0, group=gDL)
+
+dl1On = input.bool(true, "1", inline="dl1", group=gDL)
+dl1P  = input.float(0.0, "Price", step=0.01, inline="dl1", group=gDL)
+dl1N  = input.float(0.0, "$B",    step=0.01, inline="dl1", group=gDL)
+
+dl2On = input.bool(true, "2", inline="dl2", group=gDL)
+dl2P  = input.float(0.0, "Price", step=0.01, inline="dl2", group=gDL)
+dl2N  = input.float(0.0, "$B",    step=0.01, inline="dl2", group=gDL)
+
+dl3On = input.bool(true, "3", inline="dl3", group=gDL)
+dl3P  = input.float(0.0, "Price", step=0.01, inline="dl3", group=gDL)
+dl3N  = input.float(0.0, "$B",    step=0.01, inline="dl3", group=gDL)
+
+dl4On = input.bool(true, "4", inline="dl4", group=gDL)
+dl4P  = input.float(0.0, "Price", step=0.01, inline="dl4", group=gDL)
+dl4N  = input.float(0.0, "$B",    step=0.01, inline="dl4", group=gDL)
+
+dl5On = input.bool(true, "5", inline="dl5", group=gDL)
+dl5P  = input.float(0.0, "Price", step=0.01, inline="dl5", group=gDL)
+dl5N  = input.float(0.0, "$B",    step=0.01, inline="dl5", group=gDL)
+
+// ───────── OPTION LEVELS — units per level: QQQ (converted through the ratio) or Chart (drawn as typed)
+gZG = "Option Levels: Zero Gamma / Vol Skew"
+zgOn    = input.bool(true, "Zero Gamma", inline="zg", group=gZG)
+zgP     = input.float(0.0, "", step=0.01, inline="zg", group=gZG)
+zgUnits = input.string("QQQ", "", options=["QQQ", "Chart"], inline="zg", group=gZG)
+zgColor = input.color(color.rgb(255, 214, 0), "", inline="zg", group=gZG, tooltip=unitTip)
+
+vsOn    = input.bool(true, "Vol Skew", inline="vs", group=gZG)
+vsP     = input.float(0.0, "", step=0.01, inline="vs", group=gZG)
+vsUnits = input.string("QQQ", "", options=["QQQ", "Chart"], inline="vs", group=gZG)
+vsColor = input.color(color.rgb(255, 105, 180), "", inline="vs", group=gZG, tooltip=unitTip)
+
+gxWidth  = input.int(1, "Line Width", minval=1, maxval=4, inline="gxfmt", group=gZG)
+gxOffset = input.int(8, "Label Offset", minval=0, inline="gxfmt", group=gZG, tooltip="Width and label offset (bars right of the grid labels) apply to every option level: zero gamma, vol skew, call wall, put wall, MVC.")
+
+gWL = "Option Levels: Walls / MVC"
+cwOn    = input.bool(true, "Call Wall", inline="cw", group=gWL)
+cwP     = input.float(0.0, "", step=0.01, inline="cw", group=gWL)
+cwUnits = input.string("QQQ", "", options=["QQQ", "Chart"], inline="cw", group=gWL)
+cwColor = input.color(color.rgb(0, 230, 118), "", inline="cw", group=gWL, tooltip=unitTip)
+
+pwOn    = input.bool(true, "Put Wall", inline="pw", group=gWL)
+pwP     = input.float(0.0, "", step=0.01, inline="pw", group=gWL)
+pwUnits = input.string("QQQ", "", options=["QQQ", "Chart"], inline="pw", group=gWL)
+pwColor = input.color(color.rgb(242, 54, 69), "", inline="pw", group=gWL, tooltip=unitTip)
+
+mvOn    = input.bool(true, "MVC", inline="mv", group=gWL)
+mvP     = input.float(0.0, "", step=0.01, inline="mv", group=gWL)
+mvUnits = input.string("QQQ", "", options=["QQQ", "Chart"], inline="mv", group=gWL)
+mvColor = input.color(color.rgb(255, 255, 255), "", inline="mv", group=gWL, tooltip=unitTip)
+
+gxBand = input.string("Thin", "Band (all option levels)", options=["Off", "Thin", "Match Grid"], group=gWL, tooltip=bandTip)
+
+// ───────── LAYOUT
+gLY = "Layout"
+spanPct  = input.int(50, "Line Length (% of visible chart)", minval=5, maxval=100, step=5, group=gLY, tooltip="How far the grid, dark pools and option levels run across the bars you can see. 100 = full width.")
+spanSide = input.string("Left", "Lines Start From", options=["Left", "Right"], group=gLY, tooltip="Left: lines run from the left edge, labels stay at the left. Right: lines run to the right edge and on into the empty space, labels sit where the lines start.")
+
+// ───────── COPY / PASTE LEVELS
+gSH = "Copy / Paste Levels"
+shareTip = "Paste a Levels Code here and it replaces every level typed in the fields above (the purple grid stays). Leave it empty to use the fields. Your own code is printed to Pine Logs (this indicator's three-dot menu on the chart > Pine Logs) and can be shown on the chart below. You can also type levels straight in, e.g. ZERO GAMMA 742.37 | CALL WALL 750 | PUT WALL 735 | MVC 750 | VOL SKEW 738 | DP ZONE 744.72-745.33 1.58B | DP LINE 745.10 0.85B. Put @ in front of a price that is already in chart price (no QQQ conversion). The on/off boxes above still hide a level type."
+shareIn  = input.text_area("", "Levels Code", tooltip=shareTip, group=gSH, display=display.none)
+showCode = input.bool(false, "Show my Levels Code on the chart", group=gSH)
+
+// ───────── BOXES — display only: levels, labels, saved values and the Levels Code are untouched
+gBX = "Boxes"
+showGridBox = input.bool(true, "Purple QQQ boxes", group=gBX, tooltip="Off = each strike keeps its thin purple center line (if Show Center Line is on) and its number, no box.")
+showPoolBox = input.bool(true, "Dark pool zone boxes", group=gBX, tooltip="Off = each zone is drawn as two thin lines at its low and high instead of a filled box.")
+showBands   = input.bool(true, "Soft bands on dark pool lines & option levels", group=gBX, tooltip="Off = center line only, same as setting Band to Off in both sections.")
+
+purple = color.rgb(170, 80, 255)
+lblSz  = labelSize == "tiny" ? size.tiny : labelSize == "normal" ? size.normal : size.small
+
+// ───────── LOCKED QQQ → CHART RATIO (non-repainting, refreshes each interval)
+qqqTicker    = ticker.new("NASDAQ", "QQQ", session.extended)
+[qqqC, qqqT] = request.security(qqqTicker,        refreshTF, [close[1], time[1]], lookahead=barmerge.lookahead_on)
+[chtC, chtT] = request.security(syminfo.tickerid, refreshTF, [close[1], time[1]], lookahead=barmerge.lookahead_on)
+
+// exact match — str.contains also matched TQQQ / SQQQ / QQQM and forced a wrong 1.0 ratio there
+onQQQ = syminfo.ticker == "QQQ"
+var float ratio  = na
+var int   ratioT = na
+if onQQQ
+    ratio  := 1.0
+    ratioT := chtT
+else if not na(qqqC) and qqqT == chtT
+    ratio  := chtC / qqqC
+    ratioT := chtT
+
+// ───────── VISIBLE WINDOW — times of the bars on screen, so "50%" means half the bars you see
+// (session gaps and weekends don't skew it)
+var array<int> visT = array.new<int>()
+if time >= chart.left_visible_bar_time and time <= chart.right_visible_bar_time
+    if visT.size() == 0 or visT.last() != time
+        visT.push(time)
+
+// time of the k-th visible bar counted from the start of the lines
+colTime(int startPos, int k, int x1, int barMs) =>
+    p = startPos + k
+    int t = x1 + k * barMs
+    if p >= 0 and p < visT.size()
+        t := visT.get(p)
+    t
+
+// ───────── LEVEL MODEL — the fields and a pasted Levels Code both become a list of these
+type Level
+    string kind     // DZ dark pool zone · DL dark pool line · ZG · VS · CW · PW · MVC
+    float  lo
+    float  hi
+    float  n        // dark pool $B
+    bool   isChart  // true = already in chart price, no QQQ conversion
+
+kindName(string k) =>
+    k == "ZG" ? "ZERO GAMMA" : k == "VS" ? "VOL SKEW" : k == "CW" ? "CALL WALL" : k == "PW" ? "PUT WALL" : k == "MVC" ? "MVC" : k == "DL" ? "DP LINE" : "DP ZONE"
+
+kindColor(string k) =>
+    k == "ZG" ? zgColor : k == "VS" ? vsColor : k == "CW" ? cwColor : k == "PW" ? pwColor : k == "MVC" ? mvColor : k == "DL" ? dlColor : dpColor
+
+// the on/off boxes in the option sections also hide that level type when it comes from a pasted code
+kindOn(string k) =>
+    k == "ZG" ? zgOn : k == "VS" ? vsOn : k == "CW" ? cwOn : k == "PW" ? pwOn : k == "MVC" ? mvOn : true
+
+// words → level type (accepts full names or short keys: ZG, VS, CW, PW, MVC, DP)
+kindOf(string key) =>
+    str.startswith(key, "ZG") or str.contains(key, "ZERO") or str.contains(key, "FLIP") ? "ZG" :
+     str.startswith(key, "VS") or str.contains(key, "SKEW") ? "VS" :
+     str.startswith(key, "CW") or str.contains(key, "CALL") ? "CW" :
+     str.startswith(key, "PW") or str.contains(key, "PUT") ? "PW" :
+     str.contains(key, "MVC") ? "MVC" :
+     str.startswith(key, "DP") or str.contains(key, "DARK") ? "DP" : ""
+
+addLvl(array<Level> a, bool on, string kind, float lo, float hi, float n, bool isChart) =>
+    if on and lo > 0 and hi > 0
+        a.push(Level.new(kind, math.min(lo, hi), math.max(lo, hi), n, isChart))
+    a
+
+fieldLevels() =>
+    array<Level> a = array.new<Level>()
+    addLvl(a, dp1On, "DZ", dp1Lo, dp1Hi, dp1N, false)
+    addLvl(a, dp2On, "DZ", dp2Lo, dp2Hi, dp2N, false)
+    addLvl(a, dp3On, "DZ", dp3Lo, dp3Hi, dp3N, false)
+    addLvl(a, dp4On, "DZ", dp4Lo, dp4Hi, dp4N, false)
+    addLvl(a, dp5On, "DZ", dp5Lo, dp5Hi, dp5N, false)
+    addLvl(a, dl1On, "DL", dl1P, dl1P, dl1N, false)
+    addLvl(a, dl2On, "DL", dl2P, dl2P, dl2N, false)
+    addLvl(a, dl3On, "DL", dl3P, dl3P, dl3N, false)
+    addLvl(a, dl4On, "DL", dl4P, dl4P, dl4N, false)
+    addLvl(a, dl5On, "DL", dl5P, dl5P, dl5N, false)
+    addLvl(a, zgOn, "ZG",  zgP, zgP, 0.0, zgUnits == "Chart")
+    addLvl(a, vsOn, "VS",  vsP, vsP, 0.0, vsUnits == "Chart")
+    addLvl(a, cwOn, "CW",  cwP, cwP, 0.0, cwUnits == "Chart")
+    addLvl(a, pwOn, "PW",  pwP, pwP, 0.0, pwUnits == "Chart")
+    addLvl(a, mvOn, "MVC", mvP, mvP, 0.0, mvUnits == "Chart")
+    a
+
+// Levels Code reader. Entries split on | ; , or new lines. Each entry: a name, a price (or low-high), optional $B.
+// Anything before a "]" is dropped, so a line copied from Pine Logs with its timestamp still reads.
+parseCode(string raw) =>
+    array<Level> out = array.new<Level>()
+    s   = str.upper(raw)
+    cut = str.pos(s, "]")
+    if not na(cut)
+        s := str.substring(s, cut + 1)
+    s := str.replace_all(s, "\n", ";")
+    s := str.replace_all(s, "|", ";")
+    s := str.replace_all(s, ",", ";")
+    s := str.replace_all(s, ":", " ")
+    s := str.replace_all(s, "=", " ")
+    s := str.replace_all(s, "$", "")
+    entries = str.split(s, ";")
+    for e in entries
+        key     = ""
+        lo      = float(na)
+        hi      = float(na)
+        n       = 0.0
+        isChart = false
+        rng     = false
+        toks    = str.split(e, " ")
+        for t0 in toks
+            t = t0
+            if str.startswith(t, "@")
+                isChart := true
+                t := str.substring(t, 1)
+            if t == ""
+                continue
+            v    = str.tonumber(t)
+            bnum = str.endswith(t, "B") and str.length(t) > 1 ? str.tonumber(str.substring(t, 0, str.length(t) - 1)) : float(na)
+            if not na(bnum)
+                n := bnum
+            else if t == "-" or t == "TO"
+                rng := true
+            else if na(v) and str.contains(t, "-")
+                parts = str.split(t, "-")
+                if parts.size() == 2
+                    pa = str.tonumber(parts.get(0))
+                    pb = str.tonumber(parts.get(1))
+                    if not na(pa) and not na(pb)
+                        lo := pa
+                        hi := pb
+            else if not na(v)
+                if na(lo)
+                    lo := v
+                    hi := v
+                else if rng
+                    hi  := v
+                    rng := false
+                else
+                    n := v
+            else
+                key := key == "" ? t : key + " " + t
+        kind = kindOf(key)
+        if kind != "" and not na(lo) and not na(hi) and lo > 0 and hi > 0
+            k = kind == "DP" ? (hi != lo ? "DZ" : "DL") : kind
+            out.push(Level.new(k, math.min(lo, hi), math.max(lo, hi), n, isChart))
+    out
+
+// one level → its Levels Code entry (reads back through parseCode unchanged)
+codeEntry(Level lv) =>
+    pre  = lv.isChart ? "@" : ""
+    nTxt = lv.n > 0 ? " " + str.tostring(lv.n, "0.##") + "B" : ""
+    lv.kind == "DZ" ? "DP ZONE " + pre + str.tostring(lv.lo, "#.00") + "-" + str.tostring(lv.hi, "#.00") + nTxt :
+     lv.kind == "DL" ? "DP LINE " + pre + str.tostring(lv.lo, "#.00") + nTxt :
+     kindName(lv.kind) + " " + pre + str.tostring(lv.lo, "#.00")
+
+// ───────── DRAWING HELPERS — plain text labels (no boxes), lines from x1 to x2
+makeText(int t, float y, string txt, color c) =>
+    label.new(t, y, txt,
+         xloc      = xloc.bar_time,
+         style     = label.style_label_left,
+         color     = color.new(color.black, 100),
+         textcolor = c,
+         size      = lblSz,
+         textalign = text.align_left)
+
+// same build as the purple grid: soft band + solid center line
+// Any band value other than Off / Match Grid (incl. a stale "Dashed" from an older version) draws Thin.
+bandHalf(string mode) =>
+    not showBands or mode == "Off" ? 0.0 : mode == "Match Grid" ? zoneWidth : zoneWidth * 0.5
+
+makeBandLine(float y, float half, color c, int w, int x1, int x2, string ext) =>
+    if half > 0
+        box.new(x1, y + half, x2, y - half,
+             xloc         = xloc.bar_time,
+             extend       = ext,
+             bgcolor      = color.new(c, 85),
+             border_color = color.new(c, 100),
+             border_width = 1)
+    line.new(x1, y, x2, y,
+         xloc   = xloc.bar_time,
+         extend = ext,
+         color  = c,
+         width  = w)
+
+// ───────── GRID LEVEL
+makeLevel(int qqqPrice, float level, float half, int x1, int x2, string ext, int labelT) =>
+    if showGridBox
+        box.new(x1, level + half, x2, level - half,
+             xloc         = xloc.bar_time,
+             extend       = ext,
+             bgcolor      = color.new(purple, 85),
+             border_color = color.new(purple, 30),
+             border_width = 1)
+    if showMid
+        line.new(x1, level, x2, level,
+             xloc   = xloc.bar_time,
+             extend = ext,
+             color  = color.new(purple, 60),
+             width  = 1)
+    if showLabels
+        makeText(labelT, level, str.tostring(qqqPrice), color.white)
+
+// ───────── DARK POOL ZONE
+makePool(Level lv, float r, int x1, int x2, string ext, int poolT) =>
+    pLo = lv.isChart ? lv.lo : lv.lo * r
+    pHi = lv.isChart ? lv.hi : lv.hi * r
+    if showPoolBox
+        box.new(x1, pHi, x2, pLo,
+             xloc         = xloc.bar_time,
+             extend       = ext,
+             bgcolor      = color.new(dpColor, 75),
+             border_color = color.new(dpColor, 20),
+             border_width = 1)
+    if not showPoolBox
+        line.new(x1, pHi, x2, pHi, xloc = xloc.bar_time, extend = ext, color = color.new(dpColor, 20), width = 1)
+        line.new(x1, pLo, x2, pLo, xloc = xloc.bar_time, extend = ext, color = color.new(dpColor, 20), width = 1)
+    makeText(poolT, (pLo + pHi) / 2, "DARK POOL" + (lv.n > 0 ? " " + str.tostring(lv.n, "0.##") + "B" : ""), dpColor)
+
+// ───────── DRAW
+var table info    = table.new(position.top_right, 1, 2)
+var table codeTbl = table.new(position.bottom_left, 1, 1)
+varip bool codeLogged = false
+
+if barstate.islast and not na(ratio)
+    for b in box.all
+        b.delete()
+    for l in line.all
+        l.delete()
+    for lb in label.all
+        lb.delete()
+
+    // how far the lines run: spanPct of the visible bars, from the left edge or ending at the right edge
+    barMs = timeframe.in_seconds() * 1000
+    nVis  = visT.size()
+    int x1 = time - barsBack * barMs
+    int x2 = time
+    int sp = 0
+    if nVis >= 2
+        spanN = math.max(1, math.round((nVis - 1) * spanPct / 100.0))
+        sp := spanSide == "Left" ? 0 : nVis - 1 - spanN
+        x1 := visT.get(sp)
+        x2 := visT.get(sp + spanN)
+    ext = spanSide == "Right" ? extend.right : extend.none
+
+    gridT = colTime(sp, 0, x1, barMs)
+    poolT = colTime(sp, dpOffset, x1, barMs)
+    dlT   = colTime(sp, dlOffset, x1, barMs)
+    gxT   = colTime(sp, gxOffset, x1, barMs)
+
+    for price = startLevel to endLevel
+        makeLevel(price, price * ratio, zoneWidth * ratio, x1, x2, ext, gridT)
+
+    // active levels: a pasted Levels Code replaces the fields; empty (or unreadable) box = the fields
+    pasted = parseCode(shareIn)
+    levels = pasted.size() > 0 ? pasted : fieldLevels()
+
+    // dark pool zones, after the grid so they sit on top of it
+    for lv in levels
+        if lv.kind == "DZ"
+            makePool(lv, ratio, x1, x2, ext, poolT)
+
+    // dark pool lines
+    if dlShow
+        for lv in levels
+            if lv.kind == "DL"
+                y = lv.isChart ? lv.lo : lv.lo * ratio
+                makeBandLine(y, bandHalf(dlBand) * ratio, dlColor, dlWidth, x1, x2, ext)
+                makeText(dlT, y, "DP " + str.tostring(lv.lo, "#.00") + (lv.n > 0 ? " · " + str.tostring(lv.n, "0.##") + "B" : ""), dlColor)
+
+    // option levels last: on top of everything, and the last objects the 500-drawing cap would ever trim.
+    // Fixed order, later = drawn on top when two levels share a price.
+    oY   = array.new<float>()
+    oTag = array.new<string>()
+    oPx  = array.new<string>()
+    oCol = array.new<color>()
+    for k in array.from("CW", "PW", "MVC", "VS", "ZG")
+        if kindOn(k)
+            for lv in levels
+                if lv.kind == k
+                    y = lv.isChart ? lv.lo : lv.lo * ratio
+                    oY.push(y)
+                    oTag.push(kindName(k))
+                    oPx.push(str.tostring(lv.lo, "#.00"))
+                    oCol.push(kindColor(k))
+                    makeBandLine(y, bandHalf(gxBand) * ratio, kindColor(k), gxWidth, x1, x2, ext)
+
+    // one label per price: levels within $0.05 QQQ share a label, colored like the line on top.
+    // Same price -> "CALL WALL · MVC 750.00"; slightly different prices keep their own numbers.
+    tol  = 0.05 * ratio
+    nOpt = oY.size()
+    used = array.new<bool>(nOpt, false)
+    for [i, y] in oY
+        if not used.get(i)
+            names = oTag.get(i)
+            full  = oTag.get(i) + " " + oPx.get(i)
+            same  = true
+            topCl = oCol.get(i)
+            j = i + 1
+            while j < nOpt
+                if not used.get(j) and math.abs(oY.get(j) - y) <= tol
+                    names += " · " + oTag.get(j)
+                    full  += " · " + oTag.get(j) + " " + oPx.get(j)
+                    same  := same and oPx.get(j) == oPx.get(i)
+                    topCl := oCol.get(j)
+                    used.set(j, true)
+                j += 1
+            makeText(gxT, y, same ? names + " " + oPx.get(i) : full, topCl)
+
+    // ───────── LEVELS CODE (share): one line for Pine Logs, one entry per line for the chart
+    code  = ""
+    codeL = ""
+    for lv in levels
+        ent = codeEntry(lv)
+        code  := code  == "" ? ent : code  + " | " + ent
+        codeL := codeL == "" ? ent : codeL + "\n" + ent
+    if not codeLogged and code != ""
+        log.info("{0}", code)
+        codeLogged := true
+
+    if showCode and codeL != ""
+        table.cell(codeTbl, 0, 0, "LEVELS CODE\n" + codeL,
+             text_color = color.white, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(color.black, 30))
+    else
+        table.clear(codeTbl, 0, 0)
+
+    // ───────── INFO BOX (+ paste status, so a friend can see the code was read)
+    if showInfo
+        table.cell(info, 0, 0,
+             "QQQ×" + str.tostring(ratio, "#.####") + "  @ " + str.format_time(ratioT, "HH:mm", "America/New_York") + " ET",
+             text_color = purple, text_size = size.small, bgcolor = color.new(color.black, 30))
+    else
+        table.clear(info, 0, 0)
+    hasPaste = str.length(str.replace_all(str.replace_all(shareIn, " ", ""), "\n", "")) > 0
+    if hasPaste
+        table.cell(info, 0, 1,
+             pasted.size() > 0 ? "LEVELS CODE: " + str.tostring(pasted.size()) + " levels loaded" : "LEVELS CODE NOT RECOGNIZED",
+             text_color = pasted.size() > 0 ? purple : color.orange, text_size = size.small, bgcolor = color.new(color.black, 30))
+    else
+        table.clear(info, 0, 1)

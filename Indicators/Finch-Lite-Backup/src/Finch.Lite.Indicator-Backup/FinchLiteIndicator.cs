@@ -7,25 +7,7 @@ using System.Threading;
 using TradingPlatform.BusinessLayer;
 using Qt = TradingPlatform.BusinessLayer;
 
-namespace FinchLite;
-
-/// <summary>VWAP session preset — matches oceanVwap.pine's own four fixed presets plus Custom.</summary>
-public enum VwapSessionPreset
-{
-    Rth,
-    Globex,
-    Asia,
-    London,
-    Custom,
-}
-
-/// <summary>Band width source — true volume-weighted standard deviation (the source script's own
-/// "institutional standard"), or a fixed percent of VWAP per multiplier.</summary>
-public enum VwapBandMode
-{
-    StdDev,
-    Percent,
-}
+namespace FinchLiteBackup;
 
 /// <summary>
 /// Finch-Lite: a deliberately minimal, single-purpose indicator, built completely fresh — not a
@@ -49,7 +31,7 @@ public enum VwapBandMode
 ///
 /// Draws only. Places no orders, reads no account.
 /// </summary>
-public sealed class FinchLiteIndicator : Qt.Indicator
+public sealed class FinchLiteBackupIndicator : Qt.Indicator
 {
     // ---- lifecycle scaffolding --------------------------------------------------------------
 
@@ -459,108 +441,6 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     [InputParameter("POC: 5m/15m history lookback (days)", 85, 1, 90, 1, 0)]
     public int PocLookbackDays { get; set; } = 5;
 
-    // ---- VWAP + bands — ported from the operator's own oceanVwap.pine (2026-10-08: "i use the
-    // oceanVwap.pine... and would like my indicator updated to reflect it"). See VwapEngine's own
-    // doc comment for the tick-vs-bar precision design and the seeding-gap caveat it carries.
-
-    [InputParameter("VWAP: enable", 90)]
-    public bool VwapEnabled { get; set; } = true;
-
-    [InputParameter("VWAP: session", 91, variants: new object[]
-    {
-        "RTH 09:30-16:00 ET", VwapSessionPreset.Rth,
-        "Globex 18:00-17:00 ET", VwapSessionPreset.Globex,
-        "Asia 18:00-03:00 ET", VwapSessionPreset.Asia,
-        "London 03:00-09:30 ET", VwapSessionPreset.London,
-        "Custom", VwapSessionPreset.Custom,
-    })]
-    public VwapSessionPreset VwapSession { get; set; } = VwapSessionPreset.Rth;
-
-    [InputParameter("VWAP: custom session start hour (ET)", 92, 0, 23, 1, 0)]
-    public int VwapCustomStartHour { get; set; } = 9;
-
-    [InputParameter("VWAP: custom session start minute (ET)", 93, 0, 59, 1, 0)]
-    public int VwapCustomStartMinute { get; set; } = 30;
-
-    [InputParameter("VWAP: custom session end hour (ET)", 94, 0, 23, 1, 0)]
-    public int VwapCustomEndHour { get; set; } = 16;
-
-    [InputParameter("VWAP: custom session end minute (ET)", 95, 0, 59, 1, 0)]
-    public int VwapCustomEndMinute { get; set; } = 0;
-
-    [InputParameter("VWAP: band mode", 96, variants: new object[]
-    {
-        "Std Dev", VwapBandMode.StdDev,
-        "Percent", VwapBandMode.Percent,
-    })]
-    public VwapBandMode VwapBandModeSetting { get; set; } = VwapBandMode.StdDev;
-
-    [InputParameter("VWAP: band multiplier 1", 97, 0, 10, 0.25, 2)]
-    public double VwapMult1 { get; set; } = 1.0;
-
-    [InputParameter("VWAP: band multiplier 2", 98, 0, 10, 0.25, 2)]
-    public double VwapMult2 { get; set; } = 2.0;
-
-    [InputParameter("VWAP: band multiplier 3", 99, 0, 10, 0.25, 2)]
-    public double VwapMult3 { get; set; } = 3.0;
-
-    [InputParameter("VWAP: percent per x1 (Percent mode)", 100, 0.01, 10, 0.01, 2)]
-    public double VwapPercentUnit { get; set; } = 0.25;
-
-    [InputParameter("VWAP: show prior-session reference line", 101)]
-    public bool VwapShowPriorSession { get; set; } = true;
-
-    [InputParameter("VWAP: show band rejection signals", 102)]
-    public bool VwapShowRejections { get; set; } = true;
-
-    [InputParameter("VWAP: rejection band (1-3)", 103, 1, 3, 1, 0)]
-    public int VwapRejectionBandIndex { get; set; } = 2;
-
-    [InputParameter("VWAP: bull colour", 104)]
-    public Color VwapBullColor { get; set; } = Color.FromArgb(0x2E, 0xC4, 0xB6);
-
-    [InputParameter("VWAP: bear colour", 105)]
-    public Color VwapBearColor { get; set; } = Color.FromArgb(0xD0, 0x8A, 0x4E);
-
-    [InputParameter("VWAP: neutral colour", 106)]
-    public Color VwapNeutralColor { get; set; } = Color.FromArgb(0xAA, 0xB4, 0xBE);
-
-    [InputParameter("VWAP: upper band 1 colour", 107)]
-    public Color VwapUpper1Color { get; set; } = Color.FromArgb(0xE8, 0xC3, 0xA0);
-
-    [InputParameter("VWAP: upper band 2 colour", 108)]
-    public Color VwapUpper2Color { get; set; } = Color.FromArgb(0xD0, 0x8A, 0x4E);
-
-    [InputParameter("VWAP: upper band 3 colour", 109)]
-    public Color VwapUpper3Color { get; set; } = Color.FromArgb(0x9A, 0x54, 0x26);
-
-    [InputParameter("VWAP: lower band 1 colour", 110)]
-    public Color VwapLower1Color { get; set; } = Color.FromArgb(0x9E, 0xE6, 0xDE);
-
-    [InputParameter("VWAP: lower band 2 colour", 111)]
-    public Color VwapLower2Color { get; set; } = Color.FromArgb(0x2E, 0xC4, 0xB6);
-
-    [InputParameter("VWAP: lower band 3 colour", 112)]
-    public Color VwapLower3Color { get; set; } = Color.FromArgb(0x16, 0x7D, 0x74);
-
-    [InputParameter("VWAP: prior-session colour", 113)]
-    public Color VwapPriorSessionColor { get; set; } = Color.FromArgb(0xB0, 0xBE, 0xC5);
-
-    /// <summary>Only needs enough bars to seed "since session start" on attach, not a long
-    /// trading history — see VwapEngine's own doc comment on why the live-tick portion doesn't
-    /// need historical backfill at all.</summary>
-    [InputParameter("VWAP: history lookback (days, for seeding on attach)", 114, 1, 10, 1, 0)]
-    public int VwapLookbackDays { get; set; } = 2;
-
-    private readonly VwapEngine vwapEngine = new();
-    private readonly VwapOverlay vwapOverlay = new();
-    private volatile VwapDrawable vwapDrawable = VwapDrawable.Empty;
-    private HistoricalData? vwapHistory;
-    private int vwapBarsSeen;
-    private bool wasInVwapSession;
-    private readonly List<VwapRejection> vwapRejections = new();
-    private readonly ConcurrentQueue<(double Price, double Size)> vwapTickQueue = new();
-
     /// <summary>
     /// Constructed lazily in <see cref="TryStartPoc"/>, not here — same reason
     /// <see cref="ob15mEngine"/>/<see cref="ob1hEngine"/> are lazy: an eager field initializer
@@ -588,14 +468,16 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     private readonly PocOverlay pocOverlay = new();
     private volatile PocDrawable pocDrawable = PocDrawable.Empty;
 
-    public FinchLiteIndicator()
+    public FinchLiteBackupIndicator()
     {
-        this.Name = "Finch-Lite";
+        this.Name = "Finch-Lite-Backup";
         this.Description =
-            "Minimal, single-purpose indicator built from scratch (2026-09-22) to stay fast — "
-            + "one feature at a time, nothing running that isn't currently shown. First feature: "
-            + "large resting bid/ask orders, pulled from the platform's own depth-of-market "
-            + "snapshot. Draws only, places no orders.";
+            "FROZEN BACKUP (2026-10-08), taken right before the oceanVwap/priceLevels/srm.pine "
+            + "features were added to the live Finch-Lite. Minimal, single-purpose indicator "
+            + "built from scratch (2026-09-22) to stay fast — one feature at a time, nothing "
+            + "running that isn't currently shown. First feature: large resting bid/ask orders, "
+            + "pulled from the platform's own depth-of-market snapshot. Draws only, places no "
+            + "orders.";
         this.SeparateWindow = false;
     }
 
@@ -684,7 +566,6 @@ public sealed class FinchLiteIndicator : Qt.Indicator
 
             this.TryStartOrderBlocks(symbol);
             this.TryStartPoc(symbol);
-            this.TryStartVwap(symbol);
 
             var interval = Math.Max(this.PollIntervalMs, 50);
             this.pollTimer = new Timer(this.OnPollTimer, null, 0, interval);
@@ -781,26 +662,6 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         }
     }
 
-    /// <summary>Best-effort, same reasoning as TryStartOrderBlocks/TryStartPoc — a connector
-    /// unable to supply 1-minute history for seeding should not take DOM/tape reading down with
-    /// it; VwapEngine just starts from whatever live ticks arrive forward, same as PocEngine's
-    /// own accepted limitation.</summary>
-    private void TryStartVwap(Qt.Symbol symbol)
-    {
-        if (!this.VwapEnabled || this.vwapHistory is not null) return;
-
-        try
-        {
-            var lookback = DateTime.UtcNow.AddDays(-Math.Max(1, this.VwapLookbackDays));
-            this.vwapHistory = symbol.GetHistory(Period.MIN1, symbol.HistoryType, lookback);
-            this.vwapBarsSeen = 0;
-        }
-        catch (Exception ex)
-        {
-            this.overlayFault = $"VWAP unavailable: {ex.GetType().Name}: {ex.Message}";
-        }
-    }
-
     /// <summary>
     /// §10-style discipline: no work on the market-data thread beyond a comparison and an
     /// enqueue. The queue is drained on the poll timer, which already runs periodically for the
@@ -810,9 +671,6 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     {
         if (last is null)
             return;
-
-        if (last.Size > 0 && this.VwapEnabled)
-            this.vwapTickQueue.Enqueue((last.Price, last.Size));
 
         // POC counts every trade's own volume toward its own price regardless of which side was
         // the aggressor, so this queues unconditionally rather than after the classification
@@ -923,15 +781,6 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.pocTickQueue.Clear();
         this.pocDrawable = PocDrawable.Empty;
 
-        this.vwapEngine.Reset();
-        this.vwapHistory?.Dispose();
-        this.vwapHistory = null;
-        this.vwapBarsSeen = 0;
-        this.wasInVwapSession = false;
-        this.vwapTickQueue.Clear();
-        this.vwapRejections.Clear();
-        this.vwapDrawable = VwapDrawable.Empty;
-
         this.deltaTickQueue.Clear();
         this.deltaPending.Clear();
         this.deltaChartBarsSeen = -1;
@@ -993,15 +842,6 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         catch (Exception ex)
         {
             this.overlayFault = $"POC failed: {ex.GetType().Name}: {ex.Message}";
-        }
-
-        try
-        {
-            this.DrainVwap();
-        }
-        catch (Exception ex)
-        {
-            this.overlayFault = $"VWAP failed: {ex.GetType().Name}: {ex.Message}";
         }
 
         try
@@ -1503,120 +1343,6 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.pocDrawable = new PocDrawable(points.ToArray());
     }
 
-    private static readonly TimeZoneInfo VwapSessionZone = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
-
-    /// <summary>Minute-precision, midnight-wraparound-safe window check — same pattern already
-    /// used across the Strategies side of this repo (oceansStackStrategy/mesOrbStrategy's own
-    /// `IsInWindow`), needed here because Asia/Globex both cross midnight.</summary>
-    private static bool IsInVwapWindow(DateTime local, int startHour, int startMinute, int endHour, int endMinute)
-    {
-        var startTotal = (startHour * 60) + startMinute;
-        var endTotal = (endHour * 60) + endMinute;
-        var nowTotal = (local.Hour * 60) + local.Minute;
-
-        if (startTotal == endTotal) return true;
-        return startTotal < endTotal
-            ? nowTotal >= startTotal && nowTotal < endTotal
-            : nowTotal >= startTotal || nowTotal < endTotal;
-    }
-
-    private bool IsInVwapSession(DateTime barEt) => this.VwapSession switch
-    {
-        VwapSessionPreset.Rth => IsInVwapWindow(barEt, 9, 30, 16, 0),
-        VwapSessionPreset.Globex => IsInVwapWindow(barEt, 18, 0, 17, 0),
-        VwapSessionPreset.Asia => IsInVwapWindow(barEt, 18, 0, 3, 0),
-        VwapSessionPreset.London => IsInVwapWindow(barEt, 3, 0, 9, 30),
-        _ => IsInVwapWindow(barEt, this.VwapCustomStartHour, this.VwapCustomStartMinute, this.VwapCustomEndHour, this.VwapCustomEndMinute),
-    };
-
-    /// <summary>Source script's own rejection rule: a bar wicks through the configured band and
-    /// closes back inside with an opposite-colour body.</summary>
-    private void CheckVwapRejection(DateTime timeUtc, double high, double low, double close, double open)
-    {
-        if (!this.VwapShowRejections || this.vwapEngine.Vwap is not { } vwap || this.vwapEngine.StdDev is not { } sd) return;
-
-        var mult = this.VwapRejectionBandIndex switch { 1 => this.VwapMult1, 3 => this.VwapMult3, _ => this.VwapMult2 };
-        if (mult <= 0) return;
-
-        var unit = this.VwapBandModeSetting == VwapBandMode.StdDev ? sd : vwap * this.VwapPercentUnit / 100.0;
-        var upperBand = vwap + (unit * mult);
-        var lowerBand = vwap - (unit * mult);
-
-        if (high >= upperBand && close < upperBand && close < open)
-            this.vwapRejections.Add(new VwapRejection(timeUtc, high, IsUpperRejection: true));
-
-        if (low <= lowerBand && close > lowerBand && close > open)
-            this.vwapRejections.Add(new VwapRejection(timeUtc, low, IsUpperRejection: false));
-
-        const int maxKept = 50;
-        if (this.vwapRejections.Count > maxKept)
-            this.vwapRejections.RemoveRange(0, this.vwapRejections.Count - maxKept);
-    }
-
-    private void DrainVwap()
-    {
-        if (!this.VwapEnabled) return;
-
-        if (this.vwapHistory is { } h && h.Count > 1)
-        {
-            var closedUpTo = h.Count - 1;
-
-            for (var i = this.vwapBarsSeen; i < closedUpTo; i++)
-            {
-                if (h[i, SeekOriginHistory.Begin] is not HistoryItemBar item) continue;
-
-                var barEt = TimeZoneInfo.ConvertTimeFromUtc(item.TimeLeft, VwapSessionZone);
-                var inSession = this.IsInVwapSession(barEt);
-
-                if (inSession && !this.wasInVwapSession)
-                    this.vwapEngine.StartSession(item.TimeLeft);
-
-                if (inSession)
-                {
-                    var hlc3 = (item.High + item.Low + item.Close) / 3.0;
-                    this.vwapEngine.SeedFromBar(hlc3, item.Volume);
-                    this.CheckVwapRejection(item.TimeLeft, item.High, item.Low, item.Close, item.Open);
-                }
-
-                this.wasInVwapSession = inSession;
-            }
-
-            this.vwapBarsSeen = closedUpTo;
-        }
-
-        while (this.vwapTickQueue.TryDequeue(out var tick))
-            this.vwapEngine.FeedTrade(tick.Price, tick.Size);
-
-        this.RebuildVwapDrawable();
-    }
-
-    private void RebuildVwapDrawable()
-    {
-        if (!this.vwapEngine.HasSession || this.vwapEngine.Vwap is not { } vwap)
-        {
-            this.vwapDrawable = new VwapDrawable(null, this.vwapRejections.ToArray());
-            return;
-        }
-
-        var sd = this.vwapEngine.StdDev ?? 0;
-        var unit = this.VwapBandModeSetting == VwapBandMode.StdDev ? sd : vwap * this.VwapPercentUnit / 100.0;
-
-        double? Upper(double mult) => mult > 0 ? vwap + (unit * mult) : null;
-        double? Lower(double mult) => mult > 0 ? vwap - (unit * mult) : null;
-
-        var last = this.symbol?.Last ?? vwap;
-        var isBull = last > vwap;
-        var isBear = last < vwap;
-
-        var session = new VwapDraw(
-            this.vwapEngine.SessionStartUtc, vwap, isBull, isBear,
-            Upper(this.VwapMult1), Upper(this.VwapMult2), Upper(this.VwapMult3),
-            Lower(this.VwapMult1), Lower(this.VwapMult2), Lower(this.VwapMult3),
-            this.VwapShowPriorSession ? this.vwapEngine.PriorVwap : null);
-
-        this.vwapDrawable = new VwapDrawable(session, this.vwapRejections.ToArray());
-    }
-
     private void ReportPollFault(string reason)
     {
         if (string.Equals(this.lastPollFault, reason, StringComparison.Ordinal))
@@ -1755,25 +1481,6 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             }
         }
 
-        if (this.VwapEnabled)
-        {
-            try
-            {
-                this.vwapOverlay.Draw(
-                    graphics, window, this.vwapDrawable,
-                    new VwapOverlay.Options(
-                        this.VwapBullColor, this.VwapBearColor, this.VwapNeutralColor,
-                        this.VwapUpper1Color, this.VwapUpper2Color, this.VwapUpper3Color,
-                        this.VwapLower1Color, this.VwapLower2Color, this.VwapLower3Color,
-                        this.VwapPriorSessionColor),
-                    registry);
-            }
-            catch (Exception ex)
-            {
-                this.overlayFault = $"The VWAP overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
-            }
-        }
-
         if (this.DeltaPanelEnabled)
         {
             try
@@ -1811,8 +1518,6 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.ob1hHistory?.Dispose();
         this.poc15mHistory?.Dispose();
         this.poc5mHistory?.Dispose();
-        this.vwapHistory?.Dispose();
-        this.vwapOverlay.Dispose();
         this.faultFont.Dispose();
         this.faultBrush.Dispose();
         this.faultBack.Dispose();
