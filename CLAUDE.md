@@ -1956,6 +1956,72 @@ VXN/VIX/VIX3M, adaptive completion-projection curves, session volume profiles wi
 naked levels, NY initial balance, Vol-Step ranges) still has not been started — it goes into this
 SAME `LevelsMap` indicator as a later pass, not Finch-Lite and not a third project.
 
+#### FEATURE, 2026-10-09/10 — live GEX (Zero Gamma, Call Wall, Put Wall, Magnet, Vol Skew)
+
+The operator, frustrated with manually re-pasting levels that "update all the time": first asked
+for a paste-based auto-fill (built, see above), then asked whether the indicator could "pull from
+a site or something" instead. Provided a Massive API key — checked its actual docs (not just the
+key) and found Massive's options tier does NOT expose the derived analytics wanted (Zero Gamma/
+Call Wall/Put Wall/Vol Skew aren't raw market data, they're calculated from the options chain);
+confirmed live with a real test call returning `NOT_AUTHORIZED` on the free tier regardless.
+Operator then linked `github.com/itsfabtrading/gex-multi` asking if it could be used — checked its
+license (Apache-2.0 main file + MIT vendored `cboe_data.py`/`gamma_exposure.py` from
+GMestreM/gex_data) and its data source: CBOE's own free, unauthenticated public CDN, NOT a paid
+API. Operator, once this was clear: "thats why i posted that github link will that work for free
+data" — confirmed via `AskUserQuestion` (before this clarification, "stick with Massive" had been
+the stated choice; superseded).
+
+**Confirmed live** (2026-10-10): `https://cdn.cboe.com/api/global/delayed_quotes/options/
+{SYMBOL}.json` — no API key, no auth header, just a real browser User-Agent (a bare curl without
+one gets a 307 redirect loop). Real response for QQQ carried 11,518 contracts plus the
+underlying's own live `current_price`. Per-contract `delta`/`gamma`/`iv`/`open_interest` are
+already computed by CBOE directly, but come back as exactly `0.0` for illiquid/deep ITM-OTM
+contracts (not actually zero, just not computed) — `CboeOptionsClient` skips any contract with
+`open_interest <= 0 || iv <= 0` rather than letting a false zero corrupt the sum; true gamma for
+such contracts is negligible anyway. Strike/expiration/call-or-put are NOT separate JSON fields —
+only encoded in the option's own OCC-format symbol string (`"QQQ261009C00450000"`) — `OccSymbol`
+decodes it by parsing the FIXED-WIDTH 15-character suffix (date+type+strike) from the end of the
+string backward, since the root ticker's own length varies.
+
+**New files**: `GexEngine.cs` (the math — Black-Scholes gamma, dollar-GEX aggregation by strike,
+interpolated zero-crossing for Zero Gamma, Call/Put Wall as max/min net GEX strike, Magnet as max
+gross-gamma strike, a simple ~5%-OTM put-vs-call IV read for Vol Skew, all duplicated for a
+0DTE-only sub-slice), `CboeOptionsClient.cs` (the fetch + OCC symbol decode). METHODOLOGY,
+independently reimplemented from gex-multi's own publicly-documented approach (standard
+"SqueezeMetrics convention" dollar gamma, used across most retail GEX dashboards) — NOT a port of
+their Python source, same "credit the idea, write your own code" convention this codebase already
+uses for Vol-Step Ranges in `srm.pine`. Expect this to be directionally useful, not a precise match
+to any paid service's own numbers — real services layer proprietary adjustments this doesn't
+attempt. "MVC" still has no public definition anywhere in gex-multi's own metric list or general
+GEX literature — left out rather than guessed at.
+
+**Found and fixed while wiring this in**: `volatile` can't apply to a nullable STRUCT
+(`GexResult?` was a `record struct` — CS0677). `GexResult` changed to a `sealed record class`
+(reference type), matching the "volatile drawable" pattern this whole codebase already uses
+elsewhere, which requires one. Separately: the Vol Skew readout (a percentage, not a price level,
+so it can't be a chart line) was originally routed through `overlayFault` — which this indicator
+never actually draws anywhere, unlike Finch-Lite's own `OnPaintChart`. Would have been silently
+invisible. Added a dedicated `statusText` field, kept deliberately separate from `overlayFault` so
+a routine status update can never overwrite a real error (or vice versa), and added the missing
+fault/status text rendering to `OnPaintChart` that this indicator had never had at all.
+
+**On its own, slower timer** (`GexPollIntervalSeconds`, default 60s) — separate from the main
+1-second poll, since an 11,000+ contract chain fetch is heavier than a redraw and open interest
+itself only updates once a day, not worth polling every second.
+
+**API key handling**: the operator pasted the Massive key directly in chat — flagged plainly
+(now in conversation history, worth rotating if that matters) and it was never written into any
+source file; CBOE needs no key at all, so this ultimately became moot for this specific feature,
+but the practice note stands for anything that DOES end up needing a credential later.
+
+**Verified 2026-10-10**: `dotnet build LevelsMap.Indicator.csproj -c Release
+-p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.6\bin\TradingPlatform.BusinessLayer.dll"`
+— 0 errors. Deployed to the same path. **NOT YET confirmed rendering correctly on a live chart** —
+the CBOE fetch itself was tested directly via curl (real data confirmed), but the full pipeline
+(fetch → GexEngine → drawable → paint) has not been watched running live yet. `GexEnabled` defaults
+OFF; `GexUnderlying` should match whatever `LevelsUnitSetting` is already set to (QQQ or SPY) for
+the live levels to land on the right place on the chart.
+
 ---
 
 ### ORB + Session Levels (`Indicators/OrbLevels/`) — added 2026-10-06

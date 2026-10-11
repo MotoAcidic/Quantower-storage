@@ -56,6 +56,17 @@ public sealed class LevelsMapIndicator : Qt.Indicator
     private Qt.Symbol? spySymbol;
     private string? overlayFault;
 
+    /// <summary>Informational (not an error) — e.g. the live Vol Skew readout, which isn't a
+    /// price level to draw as a line. Kept SEPARATE from <see cref="overlayFault"/> so a routine
+    /// status update can never silently overwrite a real fault, or vice versa — both render, one
+    /// above the other.</summary>
+    private string? statusText;
+
+    private readonly Font faultFont = new(FontFamily.GenericSansSerif, 8f, FontStyle.Bold);
+    private readonly SolidBrush faultBrush = new(Color.FromArgb(0xFF, 0xC1, 0x07));
+    private readonly SolidBrush statusBrush = new(Color.FromArgb(0xB0, 0xBE, 0xC5));
+    private readonly SolidBrush faultBack = new(Color.FromArgb(190, 16, 18, 24));
+
     [InputParameter("Poll interval (ms)", 1, 100, 5000, 50, 0)]
     public int PollIntervalMs { get; set; } = 1000;
 
@@ -190,6 +201,41 @@ public sealed class LevelsMapIndicator : Qt.Indicator
     [InputParameter("Dark pool line 3: $B notional", 68, 0, 100000, 0.01, 2)]
     public double DpLine3Notional { get; set; }
 
+    // ---- live GEX (Zero Gamma / Call Wall / Put Wall / Magnet / Vol Skew) — operator's own ask,
+    // 2026-10-09: free CBOE data (github.com/itsfabtrading/gex-multi's own public endpoint),
+    // computed locally via GexEngine rather than paying for Massive's options tier. See
+    // GexEngine's own doc comment for the methodology/attribution.
+
+    [InputParameter("Live GEX: enabled", 70)]
+    public bool GexEnabled { get; set; }
+
+    [InputParameter("Live GEX: underlying ticker (e.g. QQQ, SPY)", 71)]
+    public string GexUnderlying { get; set; } = "QQQ";
+
+    [InputParameter("Live GEX: max days to expiry included", 72, 1, 365, 1, 0)]
+    public int GexMaxDaysToExpiry { get; set; } = 45;
+
+    [InputParameter("Live GEX: refresh interval (seconds)", 73, 15, 3600, 15, 0)]
+    public int GexPollIntervalSeconds { get; set; } = 60;
+
+    [InputParameter("Live GEX: risk-free rate (for Black-Scholes fallback)", 74, 0, 0.2, 0.001, 3)]
+    public double GexRiskFreeRate { get; set; } = 0.05;
+
+    [InputParameter("Live GEX: show 0DTE-only sublevels", 75)]
+    public bool GexShowZeroDte { get; set; } = true;
+
+    [InputParameter("Live GEX: Zero Gamma colour", 76)]
+    public Color GexZeroGammaColor { get; set; } = Color.FromArgb(0xFF, 0xD6, 0x00);
+
+    [InputParameter("Live GEX: Call Wall colour", 77)]
+    public Color GexCallWallColor { get; set; } = Color.FromArgb(0x00, 0xE6, 0x76);
+
+    [InputParameter("Live GEX: Put Wall colour", 78)]
+    public Color GexPutWallColor { get; set; } = Color.FromArgb(0xF2, 0x36, 0x45);
+
+    [InputParameter("Live GEX: Magnet colour", 79)]
+    public Color GexMagnetColor { get; set; } = Color.FromArgb(0xB0, 0x80, 0xFF);
+
     public LevelsMapIndicator()
     {
         this.Name = "Levels Map";
@@ -245,6 +291,13 @@ public sealed class LevelsMapIndicator : Qt.Indicator
 
             var interval = Math.Max(this.PollIntervalMs, 50);
             this.pollTimer = new Timer(this.OnPollTimer, null, 0, interval);
+
+            if (this.GexEnabled)
+            {
+                var gexInterval = Math.Max(this.GexPollIntervalSeconds, 15) * 1000;
+                this.gexTimer = new Timer(this.OnGexTimer, null, 0, gexInterval);
+            }
+
             return true;
         }
         catch (Exception ex)
@@ -258,8 +311,38 @@ public sealed class LevelsMapIndicator : Qt.Indicator
     {
         this.retryTimer?.Dispose();
         this.pollTimer?.Dispose();
+        this.gexTimer?.Dispose();
         this.overlay.Dispose();
+        this.faultFont.Dispose();
+        this.faultBrush.Dispose();
+        this.statusBrush.Dispose();
+        this.faultBack.Dispose();
         base.Dispose();
+    }
+
+    // ---- live GEX fetch/compute (its own, slower timer — options chain fetches are heavier than
+    // the main poll and don't need sub-second freshness; open interest itself only updates once a
+    // day) ------------------------------------------------------------------------------------
+
+    private Timer? gexTimer;
+    private volatile GexResult? gexResult;
+    private double gexSpot;
+
+    private void OnGexTimer(object? state)
+    {
+        try
+        {
+            var underlying = this.GexUnderlying?.Trim();
+            if (string.IsNullOrEmpty(underlying)) return;
+
+            var chain = CboeOptionsClient.FetchChain(underlying, Math.Max(1, this.GexMaxDaysToExpiry));
+            this.gexSpot = chain.Spot;
+            this.gexResult = GexEngine.Compute(chain.Contracts, chain.Spot, chain.AsOfUtc, this.GexRiskFreeRate);
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = $"Live GEX fetch failed: {ex.GetType().Name}: {ex.Message}";
+        }
     }
 
     // ---- poll / ratio --------------------------------------------------------------------------
@@ -325,8 +408,48 @@ public sealed class LevelsMapIndicator : Qt.Indicator
             this.BuildFromFields(r, half, lines, zones);
         }
 
+        if (this.GexEnabled)
+            this.AddGexLines(half, lines);
+
         if (ratio is not null) this.overlayFault = null;
         this.drawable = new LevelsDrawable(lines.ToArray(), zones.ToArray());
+    }
+
+    /// <summary>GEX levels are already computed in the underlying's own real price (CBOE's
+    /// `current_price` for the SAME ticker the chain was fetched for) — unlike the manual
+    /// fields/pasted code, these do NOT go through the QQQ/SPY→chart ratio a second time; they
+    /// already resolve to a usable chart-relative distance via the chain's own spot, converted
+    /// through the SAME ratio path as everything else by construction (GexUnderlying should match
+    /// LevelsUnitSetting's own QQQ/SPY choice for this to land in the right place on the chart).</summary>
+    private void AddGexLines(double half, List<LevelLineDraw> lines)
+    {
+        var result = this.gexResult;
+        if (result is not { } r) return;
+
+        var ratio = this.currentRatio ?? 1.0;
+
+        void Add(double? price, Color color, string name)
+        {
+            if (price is not { } p) return;
+            lines.Add(new LevelLineDraw(p * ratio, half, color, $"{name} {p:0.##}"));
+        }
+
+        Add(r.FullChain.ZeroGamma, this.GexZeroGammaColor, "ZERO GAMMA");
+        Add(r.FullChain.CallWall, this.GexCallWallColor, "CALL WALL");
+        Add(r.FullChain.PutWall, this.GexPutWallColor, "PUT WALL");
+        Add(r.FullChain.Magnet, this.GexMagnetColor, "MAGNET");
+
+        if (this.GexShowZeroDte)
+        {
+            Add(r.ZeroDte.ZeroGamma, this.GexZeroGammaColor, "0DTE ZERO GAMMA");
+            Add(r.ZeroDte.CallWall, this.GexCallWallColor, "0DTE CALL WALL");
+            Add(r.ZeroDte.PutWall, this.GexPutWallColor, "0DTE PUT WALL");
+            Add(r.ZeroDte.Magnet, this.GexMagnetColor, "0DTE MAGNET");
+        }
+
+        this.statusText = r.VolSkew is { } skew
+            ? $"Vol Skew (live, {this.GexUnderlying}): {skew * 100:+0.##;-0.##}%"
+            : null;
     }
 
     /// <summary>Operator's own ask: "is there a way to auto fill these levels instead of me doing
@@ -427,6 +550,26 @@ public sealed class LevelsMapIndicator : Qt.Indicator
         catch (Exception ex)
         {
             this.overlayFault = $"LevelsMap overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
+        }
+
+        var pane = window.ClientRectangle;
+        var y = pane.Top + 4f;
+
+        if (this.overlayFault is { Length: > 0 } fault)
+        {
+            var size = graphics.MeasureString(fault, this.faultFont);
+            var rect = new RectangleF(pane.Left + 4f, y, size.Width + 8f, size.Height + 4f);
+            graphics.FillRectangle(this.faultBack, rect);
+            graphics.DrawString(fault, this.faultFont, this.faultBrush, rect.Left + 4f, rect.Top + 2f);
+            y += rect.Height + 2f;
+        }
+
+        if (this.statusText is { Length: > 0 } status)
+        {
+            var size = graphics.MeasureString(status, this.faultFont);
+            var rect = new RectangleF(pane.Left + 4f, y, size.Width + 8f, size.Height + 4f);
+            graphics.FillRectangle(this.faultBack, rect);
+            graphics.DrawString(status, this.faultFont, this.statusBrush, rect.Left + 4f, rect.Top + 2f);
         }
     }
 }
