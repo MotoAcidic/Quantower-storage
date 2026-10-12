@@ -1885,6 +1885,17 @@ v1.147.5 and will need the same bump the next time any of them rebuild. Deployed
 on a live chart** — remove and re-attach (or restart Quantower) to pick up the change, same
 caveat as every other indicator redeploy this week.
 
+**FEATURE, 2026-10-11 — per-band show/hide**: operator's own ask, "also on my finch lite i want to
+be cable to hide some of the vwap bands if i want." The band MULTIPLIER sliders (`VwapMult1/2/3`)
+already hide a band when set to 0, but that conflates "hide it" with "change its distance" — set it
+to 0 to hide, you lose whatever multiplier you had dialed in. Added three independent bool toggles,
+`VwapShowBand1/2/3` (InputParameter indices 115-117, default true, right after the existing
+`VwapLookbackDays` at 114), checked in `RebuildVwapDrawable()`'s own `Upper`/`Lower` local functions
+alongside the existing `mult > 0` check — a band draws only when both its toggle is on AND its
+multiplier is nonzero. Purely a visibility gate; doesn't touch `VwapEngine`'s own math at all.
+**Verified 2026-10-11**: same build command as above — 0 errors. Deployed to the same path. NOT yet
+confirmed on a live chart — same remove-and-reattach caveat.
+
 #### `priceLevels.pine` and `srm.pine` moved to their own indicator — `LevelsMap`
 
 The operator, after the VWAP addition above: "for those two lets built it into a seperate
@@ -2021,6 +2032,113 @@ the CBOE fetch itself was tested directly via curl (real data confirmed), but th
 (fetch → GexEngine → drawable → paint) has not been watched running live yet. `GexEnabled` defaults
 OFF; `GexUnderlying` should match whatever `LevelsUnitSetting` is already set to (QQQ or SPY) for
 the live levels to land on the right place on the chart.
+
+**2026-10-11 — root-caused "why are none of the levels populated from this api from that github
+link i sent you"**: `gexTimer` was only ever started inside `TryInitialise()`, which runs exactly
+ONCE per successful attach. `GexEnabled` defaults OFF, so the normal workflow is attach first, then
+flip "Live GEX: enabled" on in the settings panel afterward — and nothing in the file ever re-ran
+`TryInitialise()` or otherwise started the timer in response to that LATER settings change.
+`OnGexTimer` (the only thing that ever sets `gexResult`) would simply never fire, forever, with no
+error shown — matching the report exactly. Fixed by moving the start/stop decision into a new
+`SyncGexTimer()`, called from the main `OnPollTimer` (already running every ~1s): starts the timer
+if `GexEnabled` is on and it isn't running yet, tears it down (and clears `gexResult`) if switched
+back off, and restarts it if `GexPollIntervalSeconds` changes while running. `TryInitialise()` no
+longer starts `gexTimer` directly — it's fully reactive now, so a settings-panel toggle takes effect
+within one poll tick with no reattach needed. **Verified 2026-10-11**: same build command as above
+— 0 errors. Deployed to the same path. Still NOT yet watched confirming live chart draws (that
+needs the operator's own CBOE fetch to actually succeed for their underlying/symbol pair) — if
+nothing still shows after this fix, the next thing to check is whatever `overlayFault`/`statusText`
+now renders in the top-left of the chart pane (added in the 2026-10-10 entry above), since that
+will say either a fetch error or "waiting for a live {unit} price" if the QQQ/SPY ratio itself
+hasn't resolved.
+
+**2026-10-11, second bug on the same report**: operator followed up — "im not seeing any gex
+levels or anything regarding levels other than vwap" — i.e. NOTHING from this indicator was
+drawing, not just GEX. Root cause: `RebuildDrawable()` had an early `return` that fired whenever
+`LevelsUnitSetting` wasn't Chart and the QQQ/SPY ratio hadn't resolved — and that return happened
+BEFORE building manual fields, pasted Levels Code, OR GEX lines. One unresolved dependency (a ratio
+only even needed for QQQ/SPY-unit levels) was silently blanking the ENTIRE indicator, including
+levels that don't depend on it at all. Fixed: every source now always builds, falling back to a 1:1
+ratio when the real one isn't ready yet; the ratio-missing state moved to its own non-blocking
+`ratioFault` status line instead of hiding everything. Also split the GEX fetch error out of the
+shared `overlayFault` field into its own `gexFault` — `RebuildDrawable` runs on its own ~1s timer
+and was stomping a just-set GEX fetch error back to `null` almost immediately, which would have
+made a PERSISTENT fetch failure effectively invisible on screen. `OnPaintChart` now stacks up to
+four independent status lines (`overlayFault`, `gexFault`, `ratioFault`, `statusText`) instead of
+two. **Verified 2026-10-11**: same build command as above — 0 errors. Deployed to the same path.
+Remaining unknowns that can't be checked from code alone, still waiting on the operator: whether
+the indicator is actually attached to a chart at all, whether `GexEnabled` is actually turned on,
+and what `LevelsUnitSetting`/`QqqSymbolInput`/`SpySymbolInput` are set to.
+
+**2026-10-11, third bug — the real one, found from a screenshot**: operator pasted `DP ZONE
+750.61-751.39 ...` with "Levels are quoted in" set to "Chart's own price" on an MNQ chart trading
+~31,177. 31,177 ÷ 750.61 ≈ 41.5, a clean, consistent ratio across the whole paste — the pasted
+levels are QQQ-quoted, not MNQ-quoted, so with no conversion applied they were drawing thousands of
+points below anything visible. First diagnosis: switch "Levels are quoted in" to QQQ and point
+"Reference: QQQ symbol" at the real QQQ ETF (it had MNQ typed into it, which was never going to
+resolve a useful ratio either way). Operator's reply: **"i dont have qqq from my prop firm data
+feed"** — Rithmic (and prop-firm futures feeds generally) don't carry equity/ETF symbols at all, so
+no amount of retyping that field was ever going to work; the whole "supply a live QQQ/SPY Symbol"
+design was broken by assumption for this operator's setup specifically.
+
+**Fix: dropped the broker-symbol requirement entirely.** `QqqSymbolInput`/`SpySymbolInput`
+InputParameters removed. The ratio's reference price now comes from the SAME free, no-auth CBOE
+endpoint already used for live GEX (`CboeOptionsClient.FetchChain`, which already returns the
+underlying's own `current_price` alongside its option chain) — no broker feed subscription needed
+for QQQ/SPY at all, since CBOE's public CDN carries it already. New `SyncReferenceSpotTimer()` /
+`OnReferenceSpotTimer()` (own slower timer, default 30s, new `ReferencePollIntervalSeconds`
+InputParameter at index 7) — same reactive start/stop-on-settings-change shape as `SyncGexTimer`,
+for the same reason (must react to `LevelsUnitSetting` changing on an already-running instance).
+Reuses `FetchChain` itself (with a 1-day expiry filter to keep the client-side parse cheap) rather
+than writing a second CBOE-parsing code path, since CBOE's CDN has no price-only endpoint anyway —
+the full chain comes back either way. `ComputeRatio()` now reads `this.referenceSpot` instead of a
+`Qt.Symbol.Last`. Another `volatile`-on-nullable-struct hit (CS0677, `double?` this time) — same
+fix as `GexResult` before it: just drop `volatile` on this one field (loose tolerance, matching
+`gexSpot`'s own existing non-volatile `double` right above it). **Verified 2026-10-11**: same build
+command as above — 0 errors. Deployed to the same path.
+
+**2026-10-12 — levels visibly drifting**: operator, after getting QQQ-unit conversion working —
+"the zero gamma and dark pools keep moving though is that normal." They weren't supposed to:
+`currentRatio` was being recomputed every ~1s poll tick as `chart.Last / referenceSpot`, but
+`chart.Last` updates every real-time tick while `referenceSpot` (the CBOE fetch) only refreshes
+once per `ReferencePollIntervalSeconds` (30s default) — so every single MNQ tick nudged the ratio,
+and every pasted level with it, even though the real QQQ price hadn't moved at all. Fixed by
+sampling BOTH prices at the same instant, inside `OnReferenceSpotTimer` itself, only when a fresh
+CBOE price actually lands — `currentRatio` is now set there directly and held perfectly fixed
+between refreshes, instead of being re-derived every tick from two time-mismatched prices. Removed
+the now-dead `ComputeRatio()` (its logic moved into `OnReferenceSpotTimer`); `OnPollTimer` just
+pins `currentRatio` to 1.0 for Chart-unit and otherwise leaves it alone between refreshes.
+**Verified 2026-10-12**: same build command as above — 0 errors. Deployed to the same path.
+
+**FEATURE, 2026-10-12 — dark pool zone box↔lines toggle**: operator shared their TradingView
+reference layout — "this is how may trading view is were i can hide the purple boxes for the dark
+pools and just makes the line this is what i want." Found the exact feature already in the source
+script: `priceLevels.pine`'s own `showPoolBox` (`makePool`, line ~334) — off draws two thin lines at
+the zone's low/high instead of a filled box, same "DARK POOL" label at the midpoint either way.
+Ported directly: `LevelZoneDraw` (`LevelsOverlay.cs`) gained a `ShowBox` field (default true);
+`DrawZone` now branches between the existing fill+border box and two plain `DrawLine` calls at the
+zone's top/bottom Y, label unchanged in both cases. New `DpZoneShowBox` InputParameter (index 38,
+right before the existing `DpZoneColor` at 39), wired into both places a dark-pool `LevelZoneDraw`
+gets built (the pasted-code path and the manual-fields path). The operator's follow-up — "it then
+highlights the white dark pools" — is still ambiguous (possibly describing the same box→line
+behavior, possibly a separate ask for the line/label colour to change to white once collapsed);
+left as-is (still the normal `DpZoneColor`) pending clarification rather than guessing at a colour
+change. **Verified 2026-10-12**: same build command as above — 0 errors. Deployed to the same path.
+
+**FEATURE, same day, same thread — thick lines instead of boxes, everywhere**: operator's actual
+screenshot showed the translucent "box" they meant wasn't the dark-pool ZONE fill (already fixed
+above) but the `BandHalfWidth` soft-fill band that EVERY single-price `LevelLineDraw` draws (Zero
+Gamma, Vol Skew, Call Wall, Put Wall, MVC, dark pool lines all share it) — "its doing the same for
+skew and zero gamma i just want the lines and have them as thick lines instead of boxes." Setting
+"Band half-width" to 0 already removes that fill (pre-existing, `if (line.HalfWidth > 0)` in
+`LevelsOverlay.DrawLine`) — no code change needed for that half. What WAS missing: the line itself
+was hardcoded to a fixed 1.5px everywhere, no way to make it heavier once the fill is gone. Added a
+`lineThickness` parameter threaded through `LevelsOverlay.Draw` → `DrawZone`/`DrawLine` (replacing
+the hardcoded 1f/1.5f on every `DrawLine` call for a level line or a lines-mode zone edge — the
+filled-box border stays at its own fixed 1f, unaffected), and a new `LineThickness` InputParameter
+(index 8, default 3.0px, right after `BandHalfWidth`). **Verified 2026-10-12**: same build command
+as above — 0 errors. Deployed to the same path. To get the operator's actual desired look: set
+"Band half-width" to 0 (kills every soft fill) and raise "Line thickness" as wanted.
 
 ---
 

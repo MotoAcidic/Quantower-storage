@@ -552,6 +552,18 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     [InputParameter("VWAP: history lookback (days, for seeding on attach)", 114, 1, 10, 1, 0)]
     public int VwapLookbackDays { get; set; } = 2;
 
+    /// <summary>Operator's own ask (2026-10-11): "i want to be able to hide some of the vwap bands
+    /// if i want." Kept SEPARATE from the band multiplier sliders (which already hide a band when
+    /// set to 0) so toggling visibility doesn't lose/overwrite whatever multiplier was dialed in.</summary>
+    [InputParameter("VWAP: show band 1", 115)]
+    public bool VwapShowBand1 { get; set; } = true;
+
+    [InputParameter("VWAP: show band 2", 116)]
+    public bool VwapShowBand2 { get; set; } = true;
+
+    [InputParameter("VWAP: show band 3", 117)]
+    public bool VwapShowBand3 { get; set; } = true;
+
     private readonly VwapEngine vwapEngine = new();
     private readonly VwapOverlay vwapOverlay = new();
     private volatile VwapDrawable vwapDrawable = VwapDrawable.Empty;
@@ -1601,8 +1613,8 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         var sd = this.vwapEngine.StdDev ?? 0;
         var unit = this.VwapBandModeSetting == VwapBandMode.StdDev ? sd : vwap * this.VwapPercentUnit / 100.0;
 
-        double? Upper(double mult) => mult > 0 ? vwap + (unit * mult) : null;
-        double? Lower(double mult) => mult > 0 ? vwap - (unit * mult) : null;
+        double? Upper(bool show, double mult) => show && mult > 0 ? vwap + (unit * mult) : null;
+        double? Lower(bool show, double mult) => show && mult > 0 ? vwap - (unit * mult) : null;
 
         var last = this.symbol?.Last ?? vwap;
         var isBull = last > vwap;
@@ -1610,8 +1622,8 @@ public sealed class FinchLiteIndicator : Qt.Indicator
 
         var session = new VwapDraw(
             this.vwapEngine.SessionStartUtc, vwap, isBull, isBear,
-            Upper(this.VwapMult1), Upper(this.VwapMult2), Upper(this.VwapMult3),
-            Lower(this.VwapMult1), Lower(this.VwapMult2), Lower(this.VwapMult3),
+            Upper(this.VwapShowBand1, this.VwapMult1), Upper(this.VwapShowBand2, this.VwapMult2), Upper(this.VwapShowBand3, this.VwapMult3),
+            Lower(this.VwapShowBand1, this.VwapMult1), Lower(this.VwapShowBand2, this.VwapMult2), Lower(this.VwapShowBand3, this.VwapMult3),
             this.VwapShowPriorSession ? this.vwapEngine.PriorVwap : null);
 
         this.vwapDrawable = new VwapDrawable(session, this.vwapRejections.ToArray());

@@ -10,9 +10,11 @@ namespace LevelsMap;
 /// `makeBandLine`.</summary>
 internal readonly record struct LevelLineDraw(double Price, double HalfWidth, Color Color, string Label);
 
-/// <summary>One dark pool zone (a low-high range) — a filled box + a label, same shape as the
-/// source script's own `makePool`.</summary>
-internal readonly record struct LevelZoneDraw(double Low, double High, Color Color, string Label);
+/// <summary>One dark pool zone (a low-high range) — same shape as the source script's own
+/// `makePool`, including its `showPoolBox` toggle: a filled box when <paramref name="ShowBox"/> is
+/// true, or two thin lines at <see cref="Low"/>/<see cref="High"/> with no fill when false — either
+/// way, one label at the zone's midpoint.</summary>
+internal readonly record struct LevelZoneDraw(double Low, double High, Color Color, string Label, bool ShowBox = true);
 
 /// <summary>Immutable paint snapshot: the poll writes it, the paint reads it.</summary>
 internal sealed record LevelsDrawable(LevelLineDraw[] Lines, LevelZoneDraw[] Zones)
@@ -32,7 +34,7 @@ internal sealed class LevelsOverlay : IDisposable
     private readonly Dictionary<int, SolidBrush> labelBrushes = new();
     private bool disposed;
 
-    public void Draw(Graphics graphics, IChartWindow window, LevelsDrawable drawable, List<RectangleF> labelRegistry)
+    public void Draw(Graphics graphics, IChartWindow window, LevelsDrawable drawable, List<RectangleF> labelRegistry, float lineThickness)
     {
         if (this.disposed) return;
 
@@ -46,10 +48,10 @@ internal sealed class LevelsOverlay : IDisposable
         try
         {
             foreach (var zone in drawable.Zones)
-                this.DrawZone(graphics, converter, pane, zone, labelRegistry);
+                this.DrawZone(graphics, converter, pane, zone, labelRegistry, lineThickness);
 
             foreach (var line in drawable.Lines)
-                this.DrawLine(graphics, converter, pane, line, labelRegistry);
+                this.DrawLine(graphics, converter, pane, line, labelRegistry, lineThickness);
         }
         finally
         {
@@ -57,22 +59,30 @@ internal sealed class LevelsOverlay : IDisposable
         }
     }
 
-    private void DrawZone(Graphics graphics, IChartWindowCoordinatesConverter converter, RectangleF pane, LevelZoneDraw zone, List<RectangleF> labelRegistry)
+    private void DrawZone(Graphics graphics, IChartWindowCoordinatesConverter converter, RectangleF pane, LevelZoneDraw zone, List<RectangleF> labelRegistry, float lineThickness)
     {
         if (!TryY(converter, zone.High, pane.Top, pane.Bottom, out var topY)) return;
         if (!TryY(converter, zone.Low, pane.Top, pane.Bottom, out var botY)) return;
 
-        var top = Math.Min(topY, botY);
-        var height = Math.Max(Math.Abs(botY - topY), 1f);
-        var rect = new RectangleF(pane.Left, top, pane.Width, height);
+        if (zone.ShowBox)
+        {
+            var top = Math.Min(topY, botY);
+            var height = Math.Max(Math.Abs(botY - topY), 1f);
+            var rect = new RectangleF(pane.Left, top, pane.Width, height);
 
-        graphics.FillRectangle(this.FillBrush(zone.Color), rect);
-        graphics.DrawRectangle(this.LinePen(zone.Color, 1f), rect.X, rect.Y, rect.Width, rect.Height);
+            graphics.FillRectangle(this.FillBrush(zone.Color), rect);
+            graphics.DrawRectangle(this.LinePen(zone.Color, 1f), rect.X, rect.Y, rect.Width, rect.Height);
+        }
+        else
+        {
+            graphics.DrawLine(this.LinePen(zone.Color, lineThickness), pane.Left, topY, pane.Right, topY);
+            graphics.DrawLine(this.LinePen(zone.Color, lineThickness), pane.Left, botY, pane.Right, botY);
+        }
 
         this.DrawLabel(graphics, pane, (topY + botY) / 2f, zone.Label, zone.Color, labelRegistry);
     }
 
-    private void DrawLine(Graphics graphics, IChartWindowCoordinatesConverter converter, RectangleF pane, LevelLineDraw line, List<RectangleF> labelRegistry)
+    private void DrawLine(Graphics graphics, IChartWindowCoordinatesConverter converter, RectangleF pane, LevelLineDraw line, List<RectangleF> labelRegistry, float lineThickness)
     {
         if (!TryY(converter, line.Price, pane.Top, pane.Bottom, out var y)) return;
 
@@ -85,7 +95,7 @@ internal sealed class LevelsOverlay : IDisposable
             graphics.FillRectangle(this.FillBrush(line.Color), new RectangleF(pane.Left, top, pane.Width, height));
         }
 
-        graphics.DrawLine(this.LinePen(line.Color, 1.5f), pane.Left, y, pane.Right, y);
+        graphics.DrawLine(this.LinePen(line.Color, lineThickness), pane.Left, y, pane.Right, y);
         this.DrawLabel(graphics, pane, y, line.Label, line.Color, labelRegistry);
     }
 

@@ -35,12 +35,13 @@ public enum LevelsUnit
 /// `srm.pine` (Session Range Map) is its own separate effort, not started yet — see this file's
 /// own Dispose/paint structure for where it would plug in once that pass starts.
 ///
-/// NEW TERRITORY FOR AN INDICATOR, UNVERIFIED: pulling a SECOND symbol's live price (QQQ and/or
-/// SPY) from inside an Indicator. Every existing indicator in this codebase (Finch-Lite, ORB-IX,
-/// OrbLevels) only ever reads `this.Symbol` — the chart's own attached instrument. A Strategy has
-/// already done this successfully (oceansStackStrategy's own QQQ cross-check), but no Indicator
-/// has. Wrapped in its own try/catch, degrading to "ratio unavailable, Chart-unit levels only"
-/// rather than failing the whole indicator if it doesn't resolve the way a Strategy's does.
+/// RATIO SOURCE, changed 2026-10-11: originally pulled QQQ/SPY's own live price from a second
+/// Quantower `Symbol` the operator supplied — but the operator's own prop-firm futures feed
+/// (Rithmic) doesn't carry equity/ETF symbols like QQQ or SPY at all ("i dont have qqq from my
+/// prop firm data feed"), so that symbol could never resolve no matter what was typed into it.
+/// Switched to the SAME free, no-auth CBOE endpoint already used for live GEX (`CboeOptionsClient`)
+/// — it returns QQQ's/SPY's own `current_price` directly from CBOE's own CDN, with no broker feed
+/// subscription required at all. See <see cref="SyncReferenceSpotTimer"/>/<see cref="OnReferenceSpotTimer"/>.
 ///
 /// Draws only. Places no orders, reads no account.
 /// </summary>
@@ -52,8 +53,6 @@ public sealed class LevelsMapIndicator : Qt.Indicator
     private Timer? retryTimer;
     private Timer? pollTimer;
     private Qt.Symbol? symbol;
-    private Qt.Symbol? qqqSymbol;
-    private Qt.Symbol? spySymbol;
     private string? overlayFault;
 
     /// <summary>Informational (not an error) — e.g. the live Vol Skew readout, which isn't a
@@ -70,12 +69,6 @@ public sealed class LevelsMapIndicator : Qt.Indicator
     [InputParameter("Poll interval (ms)", 1, 100, 5000, 50, 0)]
     public int PollIntervalMs { get; set; } = 1000;
 
-    [InputParameter("Reference: QQQ symbol (for QQQ-unit levels)", 2)]
-    public Qt.Symbol? QqqSymbolInput { get; set; }
-
-    [InputParameter("Reference: SPY symbol (for SPY-unit levels)", 3)]
-    public Qt.Symbol? SpySymbolInput { get; set; }
-
     [InputParameter("Levels are quoted in", 4, variants: new object[]
     {
         "Chart's own price (no conversion)", LevelsUnit.Chart,
@@ -83,6 +76,12 @@ public sealed class LevelsMapIndicator : Qt.Indicator
         "SPY", LevelsUnit.Spy,
     })]
     public LevelsUnit LevelsUnitSetting { get; set; } = LevelsUnit.Chart;
+
+    /// <summary>How often the QQQ/SPY reference price (needed only when <see cref="LevelsUnitSetting"/>
+    /// isn't Chart) is refetched from CBOE — a slower, independent timer since this is a network
+    /// call, not something that needs sub-second freshness.</summary>
+    [InputParameter("Reference price: refresh interval (seconds)", 7, 15, 3600, 15, 0)]
+    public int ReferencePollIntervalSeconds { get; set; } = 30;
 
     /// <summary>Operator's own ask (2026-10-08): "is there a way to auto fill these levels
     /// instead of me doing them one by one." Paste a friend's/service's Levels Code here — same
@@ -95,6 +94,13 @@ public sealed class LevelsMapIndicator : Qt.Indicator
 
     [InputParameter("Band half-width (chart points)", 5, 0, 50, 0.25, 2)]
     public double BandHalfWidth { get; set; } = 0.5;
+
+    /// <summary>Operator's own ask (2026-10-12): "i just want the lines and have them as thick
+    /// lines instead of boxes." Set "Band half-width" above to 0 to remove the soft fill entirely
+    /// (every single-price level AND a dark-pool zone collapsed to lines already skips the fill
+    /// when its half-width is 0) — this controls the weight of the solid line/s that remain.</summary>
+    [InputParameter("Line thickness (px)", 8, 0.5, 10, 0.5, 1)]
+    public double LineThickness { get; set; } = 3.0;
 
     // ---- option levels (single price each) ------------------------------------------------------
 
@@ -144,6 +150,13 @@ public sealed class LevelsMapIndicator : Qt.Indicator
     public Color MvcColor { get; set; } = Color.White;
 
     // ---- dark pool zones (low-high range + $B notional) -------------------------------------------
+
+    /// <summary>Operator's own ask (2026-10-12), from their TradingView reference: "i can hide the
+    /// purple boxes for the dark pools and just make the line." Ported from `priceLevels.pine`'s
+    /// own `showPoolBox` — off draws two thin lines at the zone's low/high instead of a filled box,
+    /// same "DARK POOL" label at the midpoint either way.</summary>
+    [InputParameter("Dark pool zones: show as filled box (off = two thin lines instead)", 38)]
+    public bool DpZoneShowBox { get; set; } = true;
 
     [InputParameter("Dark pool zone colour", 39)]
     public Color DpZoneColor { get; set; } = Color.FromArgb(0x50, 0xC8, 0xE6);
@@ -270,9 +283,9 @@ public sealed class LevelsMapIndicator : Qt.Indicator
         }
     }
 
-    /// <summary>Only hard precondition is the chart's own symbol being attached. QQQ/SPY
-    /// resolution (needed only when LevelsUnitSetting isn't Chart) is best-effort — see the class
-    /// doc comment's "NEW TERRITORY" note.</summary>
+    /// <summary>Only hard precondition is the chart's own symbol being attached. The QQQ/SPY
+    /// reference price (needed only when LevelsUnitSetting isn't Chart) comes from CBOE, not a
+    /// broker symbol — see the class doc comment's "RATIO SOURCE" note.</summary>
     private bool TryInitialise()
     {
         try
@@ -286,17 +299,12 @@ public sealed class LevelsMapIndicator : Qt.Indicator
 
             this.overlayFault = null;
             this.symbol = symbol;
-            this.qqqSymbol = this.QqqSymbolInput;
-            this.spySymbol = this.SpySymbolInput;
 
             var interval = Math.Max(this.PollIntervalMs, 50);
             this.pollTimer = new Timer(this.OnPollTimer, null, 0, interval);
 
-            if (this.GexEnabled)
-            {
-                var gexInterval = Math.Max(this.GexPollIntervalSeconds, 15) * 1000;
-                this.gexTimer = new Timer(this.OnGexTimer, null, 0, gexInterval);
-            }
+            // gexTimer / refSpotTimer are started/stopped reactively from OnPollTimer's own
+            // Sync*Timer() calls, not here — see those methods' doc comments for why.
 
             return true;
         }
@@ -312,6 +320,7 @@ public sealed class LevelsMapIndicator : Qt.Indicator
         this.retryTimer?.Dispose();
         this.pollTimer?.Dispose();
         this.gexTimer?.Dispose();
+        this.refSpotTimer?.Dispose();
         this.overlay.Dispose();
         this.faultFont.Dispose();
         this.faultBrush.Dispose();
@@ -328,36 +337,52 @@ public sealed class LevelsMapIndicator : Qt.Indicator
     private volatile GexResult? gexResult;
     private double gexSpot;
 
+    /// <summary>Own field, deliberately NOT <see cref="overlayFault"/> — <see cref="RebuildDrawable"/>
+    /// runs on a separate ~1s timer and used to stomp a GEX fetch error back to null almost
+    /// immediately after this set it, making a persistent fetch failure invisible in practice.</summary>
+    private string? gexFault;
+
+    /// <summary>Non-blocking — set only while <see cref="RebuildDrawable"/>'s own ratio dependency
+    /// hasn't resolved yet; see that method's doc comment for the bug this replaced.</summary>
+    private string? ratioFault;
+
     private void OnGexTimer(object? state)
     {
         try
         {
             var underlying = this.GexUnderlying?.Trim();
-            if (string.IsNullOrEmpty(underlying)) return;
+            if (string.IsNullOrEmpty(underlying))
+            {
+                this.gexFault = "Live GEX: underlying ticker is empty.";
+                return;
+            }
 
             var chain = CboeOptionsClient.FetchChain(underlying, Math.Max(1, this.GexMaxDaysToExpiry));
             this.gexSpot = chain.Spot;
             this.gexResult = GexEngine.Compute(chain.Contracts, chain.Spot, chain.AsOfUtc, this.GexRiskFreeRate);
+            this.gexFault = null;
         }
         catch (Exception ex)
         {
-            this.overlayFault = $"Live GEX fetch failed: {ex.GetType().Name}: {ex.Message}";
+            this.gexFault = $"Live GEX fetch failed: {ex.GetType().Name}: {ex.Message}";
         }
     }
 
     // ---- poll / ratio --------------------------------------------------------------------------
 
-    /// <summary>Live ratio: chart price ÷ reference price. Null (and every QQQ/SPY-unit level
-    /// simply doesn't draw) whenever the reference symbol isn't set, hasn't resolved, or has no
-    /// live price yet — same "degrade, don't crash" discipline as every other best-effort fetch
-    /// in this codebase.</summary>
+    /// <summary>Null (every QQQ/SPY-unit level simply doesn't draw) until the first successful
+    /// CBOE reference fetch. For Chart-unit, fixed at 1.0. For QQQ/SPY-unit, set ONLY inside
+    /// <see cref="OnReferenceSpotTimer"/> — see that method's doc comment for why this must NOT be
+    /// recomputed every poll tick.</summary>
     private double? currentRatio;
 
     private void OnPollTimer(object? state)
     {
         try
         {
-            this.currentRatio = this.ComputeRatio();
+            this.SyncGexTimer();
+            this.SyncReferenceSpotTimer();
+            if (this.LevelsUnitSetting == LevelsUnit.Chart) this.currentRatio = 1.0;
             this.RebuildDrawable();
         }
         catch (Exception ex)
@@ -366,32 +391,132 @@ public sealed class LevelsMapIndicator : Qt.Indicator
         }
     }
 
-    private double? ComputeRatio()
+    // ---- QQQ/SPY reference price, for the ratio only — its own slower CBOE-backed timer, same
+    // reactive start/stop shape as SyncGexTimer below (and for the same reason: this must react to
+    // LevelsUnitSetting changing on an already-running instance, not just at attach time). See the
+    // class doc comment's "RATIO SOURCE" note for why this isn't a broker Symbol anymore.
+
+    private Timer? refSpotTimer;
+    private int refSpotTimerIntervalMs;
+    private double? referenceSpot; // double? can't be volatile (CS0677) — same tolerance as gexSpot above
+    private string? refSpotFault;
+
+    private void SyncReferenceSpotTimer()
     {
-        if (this.LevelsUnitSetting == LevelsUnit.Chart || this.symbol is null) return 1.0;
+        if (this.LevelsUnitSetting == LevelsUnit.Chart)
+        {
+            if (this.refSpotTimer is null) return;
+            this.refSpotTimer.Dispose();
+            this.refSpotTimer = null;
+            this.referenceSpot = null;
+            this.refSpotFault = null;
+            return;
+        }
 
-        var reference = this.LevelsUnitSetting == LevelsUnit.Qqq ? this.qqqSymbol : this.spySymbol;
-        if (reference is null) return null;
+        var wantedInterval = Math.Max(this.ReferencePollIntervalSeconds, 15) * 1000;
+        if (this.refSpotTimer is not null && this.refSpotTimerIntervalMs == wantedInterval) return;
 
-        var refPrice = reference.Last;
-        var chartPrice = this.symbol.Last;
-        if (refPrice <= 0 || chartPrice <= 0 || double.IsNaN(refPrice) || double.IsNaN(chartPrice)) return null;
+        this.refSpotTimer?.Dispose();
+        this.refSpotTimerIntervalMs = wantedInterval;
+        this.refSpotTimer = new Timer(this.OnReferenceSpotTimer, null, 0, wantedInterval);
+    }
 
-        return chartPrice / refPrice;
+    /// <summary>Reuses <see cref="CboeOptionsClient.FetchChain"/> rather than a dedicated
+    /// price-only endpoint — CBOE's CDN doesn't expose one, it returns the full chain either way,
+    /// so a 1-day expiry filter just keeps the CLIENT-side parse cheap (almost every contract gets
+    /// skipped immediately on the expiration check) without a second code path to maintain.
+    ///
+    /// Operator report, 2026-10-12: "the zero gamma and dark pools keep moving though is that
+    /// normal" — they were NOT supposed to drift, but <see cref="currentRatio"/> used to be
+    /// recomputed every ~1s poll tick as `this.symbol.Last / this.referenceSpot`: the chart's own
+    /// price updates every tick while `referenceSpot` only refreshes once per
+    /// <see cref="ReferencePollIntervalSeconds"/> (default 30s), so every single MNQ tick nudged
+    /// the ratio — and with it every pasted level — even though nothing about the real QQQ price
+    /// had changed. Fixed by sampling BOTH prices at the SAME instant, right here, only when a
+    /// fresh reference price actually arrives, and holding that ratio perfectly fixed until the
+    /// next refresh instead of re-deriving it from two time-mismatched prices every tick.</summary>
+    private void OnReferenceSpotTimer(object? state)
+    {
+        try
+        {
+            var ticker = this.LevelsUnitSetting switch
+            {
+                LevelsUnit.Qqq => "QQQ",
+                LevelsUnit.Spy => "SPY",
+                _ => null,
+            };
+            if (ticker is null) return;
+
+            var chain = CboeOptionsClient.FetchChain(ticker, 1);
+            if (chain.Spot <= 0)
+            {
+                this.refSpotFault = $"CBOE returned no usable {ticker} price.";
+                return;
+            }
+
+            var chartPrice = this.symbol?.Last ?? 0;
+            if (chartPrice <= 0 || double.IsNaN(chartPrice))
+            {
+                this.refSpotFault = "Waiting for a live chart price to pair with the reference fetch.";
+                return;
+            }
+
+            this.referenceSpot = chain.Spot;
+            this.currentRatio = chartPrice / chain.Spot;
+            this.refSpotFault = null;
+        }
+        catch (Exception ex)
+        {
+            this.refSpotFault = $"Reference price ({this.LevelsUnitSetting}) fetch failed: {ex.GetType().Name}: {ex.Message}";
+        }
+    }
+
+    /// <summary>`TryInitialise()` only starts <see cref="gexTimer"/> if `GexEnabled` was already
+    /// true AT ATTACH TIME — flipping "Live GEX: enabled" on later via the settings panel on an
+    /// already-running instance never re-runs `TryInitialise()`, so the timer would otherwise never
+    /// start and `gexResult` would stay null forever (root cause of "why are none of the levels
+    /// populated", 2026-10-11). Called every poll tick (already ~1s) so a later settings change is
+    /// picked up within one poll interval, same self-healing/reactive discipline used elsewhere in
+    /// this codebase. Also tears the timer down if the setting is switched back off, and restarts
+    /// it if the refresh-interval setting changes while running.</summary>
+    private int gexTimerIntervalMs;
+
+    private void SyncGexTimer()
+    {
+        if (!this.GexEnabled)
+        {
+            if (this.gexTimer is null) return;
+            this.gexTimer.Dispose();
+            this.gexTimer = null;
+            this.gexResult = null;
+            return;
+        }
+
+        var wantedInterval = Math.Max(this.GexPollIntervalSeconds, 15) * 1000;
+        if (this.gexTimer is not null && this.gexTimerIntervalMs == wantedInterval) return;
+
+        this.gexTimer?.Dispose();
+        this.gexTimerIntervalMs = wantedInterval;
+        this.gexTimer = new Timer(this.OnGexTimer, null, 0, wantedInterval);
     }
 
     private readonly LevelsOverlay overlay = new();
     private volatile LevelsDrawable drawable = LevelsDrawable.Empty;
 
+    /// <summary>Operator report, 2026-10-11: "im not seeing any gex levels or anything regarding
+    /// levels other than vwap" — i.e. NOTHING from this indicator drew, not just GEX. Root cause:
+    /// this method used to `return` BEFORE building anything (manual fields, pasted code, AND GEX)
+    /// whenever `LevelsUnitSetting` wasn't Chart and the QQQ/SPY ratio hadn't resolved yet — one
+    /// unresolved dependency silently blanked the entire indicator. Now every source always builds
+    /// (falling back to a 1:1 ratio when the real one isn't available yet), and the ratio-missing
+    /// state surfaces as its own non-blocking status line instead of hiding everything.</summary>
     private void RebuildDrawable()
     {
         var ratio = this.currentRatio;
-        if (ratio is null && this.LevelsUnitSetting != LevelsUnit.Chart)
-        {
-            this.overlayFault = $"Waiting for a live {this.LevelsUnitSetting} price to compute the ratio...";
-            this.drawable = LevelsDrawable.Empty;
-            return;
-        }
+        var ratioMissing = ratio is null && this.LevelsUnitSetting != LevelsUnit.Chart;
+        this.ratioFault = ratioMissing
+            ? $"Waiting for a live {this.LevelsUnitSetting} price to compute the ratio — levels below use a 1:1 fallback until it resolves."
+            : null;
 
         var r = ratio ?? 1.0;
         var half = this.BandHalfWidth * r;
@@ -411,7 +536,6 @@ public sealed class LevelsMapIndicator : Qt.Indicator
         if (this.GexEnabled)
             this.AddGexLines(half, lines);
 
-        if (ratio is not null) this.overlayFault = null;
         this.drawable = new LevelsDrawable(lines.ToArray(), zones.ToArray());
     }
 
@@ -486,7 +610,7 @@ public sealed class LevelsMapIndicator : Qt.Indicator
             if (lv.Kind == "DZ")
             {
                 var label = lv.Notional > 0 ? $"{name} {lv.Notional:0.##}B" : name;
-                zones.Add(new LevelZoneDraw(lv.Lo * r, lv.Hi * r, color, label));
+                zones.Add(new LevelZoneDraw(lv.Lo * r, lv.Hi * r, color, label, this.DpZoneShowBox));
             }
             else
             {
@@ -523,7 +647,7 @@ public sealed class LevelsMapIndicator : Qt.Indicator
             var a = Math.Min(lo, hi) * r;
             var b = Math.Max(lo, hi) * r;
             var label = notional > 0 ? $"DARK POOL {notional:0.##}B" : "DARK POOL";
-            zones.Add(new LevelZoneDraw(a, b, this.DpZoneColor, label));
+            zones.Add(new LevelZoneDraw(a, b, this.DpZoneColor, label, this.DpZoneShowBox));
         }
 
         AddZone(this.DpZone1Enabled, this.DpZone1Low, this.DpZone1High, this.DpZone1Notional);
@@ -545,7 +669,7 @@ public sealed class LevelsMapIndicator : Qt.Indicator
 
         try
         {
-            this.overlay.Draw(graphics, window, this.drawable, registry);
+            this.overlay.Draw(graphics, window, this.drawable, registry, (float)this.LineThickness);
         }
         catch (Exception ex)
         {
@@ -555,21 +679,20 @@ public sealed class LevelsMapIndicator : Qt.Indicator
         var pane = window.ClientRectangle;
         var y = pane.Top + 4f;
 
-        if (this.overlayFault is { Length: > 0 } fault)
+        void DrawLine(string? text, SolidBrush brush)
         {
-            var size = graphics.MeasureString(fault, this.faultFont);
+            if (text is not { Length: > 0 }) return;
+            var size = graphics.MeasureString(text, this.faultFont);
             var rect = new RectangleF(pane.Left + 4f, y, size.Width + 8f, size.Height + 4f);
             graphics.FillRectangle(this.faultBack, rect);
-            graphics.DrawString(fault, this.faultFont, this.faultBrush, rect.Left + 4f, rect.Top + 2f);
+            graphics.DrawString(text, this.faultFont, brush, rect.Left + 4f, rect.Top + 2f);
             y += rect.Height + 2f;
         }
 
-        if (this.statusText is { Length: > 0 } status)
-        {
-            var size = graphics.MeasureString(status, this.faultFont);
-            var rect = new RectangleF(pane.Left + 4f, y, size.Width + 8f, size.Height + 4f);
-            graphics.FillRectangle(this.faultBack, rect);
-            graphics.DrawString(status, this.faultFont, this.statusBrush, rect.Left + 4f, rect.Top + 2f);
-        }
+        DrawLine(this.overlayFault, this.faultBrush);
+        DrawLine(this.gexFault, this.faultBrush);
+        DrawLine(this.refSpotFault, this.faultBrush);
+        DrawLine(this.ratioFault, this.statusBrush);
+        DrawLine(this.statusText, this.statusBrush);
     }
 }
