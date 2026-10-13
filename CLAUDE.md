@@ -1896,6 +1896,128 @@ multiplier is nonzero. Purely a visibility gate; doesn't touch `VwapEngine`'s ow
 **Verified 2026-10-11**: same build command as above — 0 errors. Deployed to the same path. NOT yet
 confirmed on a live chart — same remove-and-reattach caveat.
 
+#### FEATURE, 2026-10-12 — Session Range Map ported INTO Finch-Lite (reverses the 2026-10-08 plan)
+
+The operator, after updating `srm.pine` with "amazing things... for the poc for the session and
+sessions budgets and what not and higher time frame poc": **"please add this into the finch-lite"**
+— explicitly reversing the earlier plan (below) to keep `srm.pine` out of Finch-Lite in its own
+`LevelsMap` indicator. Followed the newer, explicit instruction.
+
+**Scope is a big script (~875 lines)**: volatility-implied session/weekly/monthly range budgets,
+adaptive completion projection, session/weekly/monthly volume profiles with POC/VAH/VAL, naked
+levels, NY initial balance, Vol-Step Ranges, alerts, a status badge. Treated as a PHASED port
+rather than attempting all of it at once, matching this project's own "one feature at a time,
+verified before the next" house rule. **PHASE 1 (this entry), built**: volatility-implied session/
+weekly/monthly budgets with the adaptive completion projection, plus session/weekly/monthly
+POC/VAH/VAL as LINES (not yet the full profile histogram-box visualization) — the three things the
+operator named directly. **NOT in this pass**: Vol-Step Ranges, NY initial balance, naked-level
+tracking/stacking/merge labels, alerts, the status badge table, prior-day/week plain H/L/C lines,
+the full profile histogram boxes, and custom/editable session windows (Asia/London/NY use the
+source script's own DEFAULT hours only for now).
+
+**Volatility data source — same prop-firm-feed problem as QQQ/SPY, same fix**: `srm.pine` needs
+live VXN/VIX/VIX3M, which a futures/prop-firm feed (Rithmic) doesn't carry any more than it carries
+QQQ/SPY. Tested CBOE's public CDN before writing any code (same discipline as the `LevelsMap` GEX
+work): the options-chain endpoint 403s on `VIX3M`/`VXN` (no listed options on those), but a
+SEPARATE, lighter CBOE endpoint works for all three —
+`https://cdn.cboe.com/api/global/delayed_quotes/quotes/_{SYMBOL}.json` (underscore-prefixed index
+ticker, e.g. `_VIX`, `_VIX3M`, `_VXN`; same real-browser-User-Agent requirement as the options
+endpoint) — confirmed live via curl, returns `current_price`/`prev_day_close` directly, no options
+parsing needed. New `CboeIndexClient.cs`, deliberately a SEPARATE small file from `LevelsMap`'s own
+`CboeOptionsClient.cs` (different project, different endpoint shape, no established cross-project
+`<Compile Include>` in this direction — "small, independently-readable" over a premature shared
+client). Polled on its own ~60s timer (`SyncSrmVolTimer`/`OnSrmVolTimer`), same reactive
+start/stop-on-settings-change shape as `LevelsMap`'s own `SyncGexTimer` (a later "SRM: enable"
+toggle takes effect without a reattach). Prior day close + ATR(14) fallback come from a dedicated
+daily `HistoricalData` fetch (`TryStartSrm`, `SrmDailyLookbackDays` default 40 days),
+recomputed fresh each poll rather than kept as incremental rolling state (cheap at this size).
+
+**New files** (`Indicators/Finch-Lite/src/Finch.Lite.Indicator/`): `CboeIndexClient.cs` (the quotes
+fetch), `SrmEngine.cs` (`SrmPeriod` — ported from `srm.pine`'s own `Sess` type and its
+`start`/`update`/`finish` methods, including the EXACT adaptive-projection calibration tables as
+literal arrays in `SrmAdaptiveCurves`; `SrmEngine` orchestrates Asia/London/NY/Week/Month),
+`SrmOverlay.cs` (drawing — adapted from `OrbLevels`' own `OrbBoxOverlay` for the time→X / price→Y
+conversion helpers, generalized to one kind-tagged `SrmLineDraw` type covering budget/projection/
+POC/VAH/VAL since SRM has five line roles sharing one draw path rather than ORB's box+rays shape).
+
+**Deliberate approximations, stated plainly**: week-boundary detection uses ISO-8601 (week, year)
+change between consecutive bars' own ET calendar dates, not the source script's exact Sunday 18:00
+ET futures-week anchor — a few hours' difference around Sunday evening that doesn't meaningfully
+move a budget spanning multiple days. Volume-by-price binning distributes each CLOSED CHART BAR's
+own volume evenly across the bins its high-low range spans — this is NOT a simplification forced by
+Finch-Lite's own lack of tick backfill, it is EXACTLY what `srm.pine` itself does too (it has no
+tick-level access inside an indicator either). Session/week/month state only advances on CLOSED
+bars, same already-established lag as every other structural feature in this file (order blocks,
+IFVG, POC) — not a new limitation introduced here.
+
+**~40 new InputParameters** (indices 120-159): per-session enable/share, completion-projection
+mode/multiplier, expanded-regime widening, weekly/monthly budget multipliers, profile row
+resolution, value-area %, POC/VAH/VAL show toggles, colours per session/week/month/POC/VA, and the
+volatility ticker/poll-interval/daily-lookback settings.
+
+**Verified 2026-10-12**: `dotnet build Finch.Lite.Indicator.csproj -c Release -p:Share=true
+-p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.6\bin\TradingPlatform.BusinessLayer.dll"`
+— 0 errors, 0 warnings on the first build after one fix (a `ref int` vs `ref int?` mismatch on the
+monthly-period key field). Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\Finch-Lite\FinchLiteIndicator.dll`. **NOT YET confirmed
+rendering correctly on a live chart** — needs a restart to pick up the new DLL, then time for both
+a session to be live (Asia/London/NY) and the volatility timer to land a first successful CBOE
+fetch before anything should appear; the whole budget/projection/POC pipeline (CBOE fetch → daily
+ATR/prior-close → emDay → SrmEngine → drawable → paint) has not been watched running live yet.
+
+**Verified LIVE 2026-10-12**: operator confirmed the Phase 1 build above — "those look good right
+now lets finish this." Rest of `srm.pine` built in the same session:
+
+- **Naked (untested) levels**: every session/weekly/monthly Finish() now pushes its own high and
+  low into `SrmEngine.NakedLevels` (`SrmNakedLevel`), extended forward until a later bar's high/low
+  actually trades through the price, then frozen/faded at the touch bar — ported from the source
+  script's own `Lvl` type. NOT ported: its stacking/merge-into-one-label behavior for several
+  nearby naked levels — each draws on its own here.
+- **NY initial balance**: first-hour high/low (`SrmEngine.UpdateInitialBalance`), frozen once
+  `SrmIbMinutes` elapses, then watches for the first break each side for the rest of the NY session
+  — direct port of the source script's own IB block, including its "~80% of days one side holds"
+  framing in the label.
+- **Vol-Step Ranges — IMPLIED-MOVE MODE ONLY**: the source script's "ATR (classic)" mode needs its
+  own separate ATR off CHART bars (not the daily series already fetched for `emDay`) — deferred
+  rather than standing up a second ATR pipeline for a mode that isn't even the operator's own
+  default. Drawn full-pane-width (`SrmLineDraw.FullWidth`), matching how the source script's own
+  `plot()` actually renders it (a continuous series, not a bounded `line.new`).
+- **Full profile histogram**: `SrmPeriod.GetHistogramRows` groups the fine-resolution volume bins
+  into at most `SrmProfileMaxRows` boxes for drawing (math stays at full bin resolution — only the
+  box COUNT is capped), same split the source script's own `drawProf` makes. New
+  `SrmProfileBoxDraw`/`SrmOverlay.DrawBox` — box width is proportional to that row's own volume
+  relative to the busiest row in the same profile.
+- **Prior day/week H/L/C**: PDH/PDL/PDC straight from the daily history already held for ATR; PWH/
+  PWL from the Week period's own `LastFinished.High/Low` (added alongside the existing
+  `LastFinished.Poc/Vah/Val`).
+- **Status badge**: top-right text summary (current session budget-used %, week/month budget-used
+  %, daily expected move, regime, any live volatility-fetch fault) — `DrawSrmBadge`, simpler than
+  the source script's own `table` since GDI+ text doesn't need a grid abstraction for a few lines.
+- **Alerts explicitly NOT ported**: grepped this entire codebase for a real Quantower indicator-side
+  alert/notification API before starting — found none (only internal "alert" naming inside
+  `OrbIx`'s own unrelated Flow feature, not a platform API). Rather than guess at an unverified SDK
+  surface, alert-worthy moments (budget spent, naked level touched, IB broken) just show up as
+  colour/label changes on the lines themselves instead of a real alert.
+- Still NOT ported: naked-level stacking/merge labels, custom/editable session windows (still the
+  source script's own DEFAULT Asia/London/NY hours only).
+
+**~15 more InputParameters** (indices 160-174): naked-level/profile-histogram show toggles, profile
+max rows, IB enable/length/colour, Vol-Step enable/size/three colours, prior-context show/colours,
+badge show toggle.
+
+**Verified 2026-10-12**: same build command as above — 0 errors, 0 warnings, one fix needed (missing
+`using TradingPlatform.BusinessLayer.Chart;` for `IChartWindow` in the new badge-drawing method).
+Deployed to the same path.
+
+**2026-10-12, same day — "i liked it better when it was just the lines and not these massive
+volume profile bars"**: `SrmShowProfileHistogram` defaulted to `true`, so the histogram showed up
+immediately and dominated the chart. Flipped the default to `false` — operator can still turn it on
+per-instance if wanted, but lines-only is now what a fresh attach gets. Also removed
+`srmDailyBarsSeen`, a dead field the compiler flagged (CS0414) once this rebuild ran clean enough to
+surface it — `TryComputeDailyVolInputs` recomputes prior-close/ATR fresh from the whole daily series
+every poll, so no bar cursor into that series was ever actually read. **Verified 2026-10-12**: same
+build command as above — 0 errors, 0 warnings (CS0414 gone). Deployed to the same path.
+
 #### `priceLevels.pine` and `srm.pine` moved to their own indicator — `LevelsMap`
 
 The operator, after the VWAP addition above: "for those two lets built it into a seperate

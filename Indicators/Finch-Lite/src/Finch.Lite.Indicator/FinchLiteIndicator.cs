@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Linq;
 using System.Threading;
 using TradingPlatform.BusinessLayer;
+using TradingPlatform.BusinessLayer.Chart;
 using Qt = TradingPlatform.BusinessLayer;
 
 namespace FinchLite;
@@ -564,6 +565,176 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     [InputParameter("VWAP: show band 3", 117)]
     public bool VwapShowBand3 { get; set; } = true;
 
+    // ---- Session Range Map — ported from the operator's own srm.pine (2026-10-12: "i have updated
+    // the srm.pine... please add this into the finch-lite"). PHASE 1: volatility-implied session/
+    // weekly/monthly budgets + adaptive completion projection + session/HTF POC/VAH/VAL as lines.
+    // See SrmEngine.cs's own class doc comment for exactly what's deferred to a later pass.
+
+    [InputParameter("SRM: enable", 120)]
+    public bool SrmEnabled { get; set; } = true;
+
+    [InputParameter("SRM: implied-vol ticker (VXN for NQ/MNQ/QQQ, VIX for ES/MES/SPY)", 121)]
+    public string SrmVolTicker { get; set; } = "VXN";
+
+    [InputParameter("SRM: Asia session enable", 122)]
+    public bool SrmAsiaEnabled { get; set; } = true;
+
+    [InputParameter("SRM: Asia budget share (x daily expected move)", 123, 0.05, 3, 0.01, 2)]
+    public double SrmAsiaShare { get; set; } = 0.43;
+
+    [InputParameter("SRM: London session enable", 124)]
+    public bool SrmLondonEnabled { get; set; } = true;
+
+    [InputParameter("SRM: London budget share (x daily expected move)", 125, 0.05, 3, 0.01, 2)]
+    public double SrmLondonShare { get; set; } = 0.48;
+
+    [InputParameter("SRM: NY session enable", 126)]
+    public bool SrmNyEnabled { get; set; } = true;
+
+    [InputParameter("SRM: NY budget share (x daily expected move)", 127, 0.05, 3, 0.01, 2)]
+    public double SrmNyShare { get; set; } = 0.90;
+
+    [InputParameter("SRM: completion projection (x session budget)", 128, 0.5, 5, 0.1, 1)]
+    public double SrmKProj { get; set; } = 1.3;
+
+    [InputParameter("SRM: adaptive projection enable (off = fixed line)", 129)]
+    public bool SrmAdaptiveProjection { get; set; } = true;
+
+    [InputParameter("SRM: adaptive allowance multiplier", 130, 0.1, 3, 0.05, 2)]
+    public double SrmExtMult { get; set; } = 1.0;
+
+    [InputParameter("SRM: widen budgets in EXPANDED regime (VIX >= VIX3M)", 131)]
+    public bool SrmExpandedScaleEnabled { get; set; } = true;
+
+    [InputParameter("SRM: EXPANDED budget multiplier", 132, 1, 3, 0.01, 2)]
+    public double SrmExpandedMultiplier { get; set; } = 1.39;
+
+    [InputParameter("SRM: weekly layer enable", 133)]
+    public bool SrmWeeklyEnabled { get; set; } = true;
+
+    [InputParameter("SRM: weekly budget (x weekly expected move)", 134, 0.3, 3, 0.01, 2)]
+    public double SrmWeeklyBudgetMult { get; set; } = 1.22;
+
+    [InputParameter("SRM: weekly completion projection", 135, 0.5, 5, 0.1, 1)]
+    public double SrmWeekKProj { get; set; } = 1.3;
+
+    [InputParameter("SRM: monthly layer enable", 136)]
+    public bool SrmMonthlyEnabled { get; set; } = true;
+
+    [InputParameter("SRM: monthly budget (x monthly expected move)", 137, 0.3, 3, 0.01, 2)]
+    public double SrmMonthlyBudgetMult { get; set; } = 1.34;
+
+    [InputParameter("SRM: monthly completion projection", 138, 0.5, 5, 0.1, 1)]
+    public double SrmMonthKProj { get; set; } = 1.3;
+
+    [InputParameter("SRM: session profile math resolution (rows per budget)", 139, 6, 200, 1, 0)]
+    public int SrmSessionRows { get; set; } = 48;
+
+    [InputParameter("SRM: weekly profile math resolution (rows per budget)", 140, 12, 300, 1, 0)]
+    public int SrmWeekRows { get; set; } = 96;
+
+    [InputParameter("SRM: monthly profile math resolution (rows per budget)", 141, 12, 400, 1, 0)]
+    public int SrmMonthRows { get; set; } = 160;
+
+    [InputParameter("SRM: value area %", 142, 50, 95, 1, 0)]
+    public double SrmValueAreaPercent { get; set; } = 70;
+
+    [InputParameter("SRM: show session POC / VAH / VAL", 143)]
+    public bool SrmShowSessionPoc { get; set; } = true;
+
+    [InputParameter("SRM: show weekly POC / VAH / VAL", 144)]
+    public bool SrmShowWeeklyPoc { get; set; } = true;
+
+    [InputParameter("SRM: show monthly POC / VAH / VAL", 145)]
+    public bool SrmShowMonthlyPoc { get; set; } = true;
+
+    [InputParameter("SRM: volatility refresh interval (seconds)", 146, 15, 3600, 15, 0)]
+    public int SrmVolPollIntervalSeconds { get; set; } = 60;
+
+    [InputParameter("SRM: Asia colour", 147)]
+    public Color SrmAsiaColor { get; set; } = Color.FromArgb(0x7D, 0x8A, 0x99);
+
+    [InputParameter("SRM: London colour", 148)]
+    public Color SrmLondonColor { get; set; } = Color.FromArgb(0xC8, 0x79, 0x4A);
+
+    [InputParameter("SRM: NY colour", 149)]
+    public Color SrmNyColor { get; set; } = Color.FromArgb(0xE3, 0xC9, 0xA8);
+
+    [InputParameter("SRM: weekly colour", 150)]
+    public Color SrmWeekColor { get; set; } = Color.FromArgb(0x9D, 0xB4, 0xB6);
+
+    [InputParameter("SRM: monthly colour", 151)]
+    public Color SrmMonthColor { get; set; } = Color.FromArgb(0xE8, 0xDF, 0xCC);
+
+    [InputParameter("SRM: completion-projection colour", 152)]
+    public Color SrmProjColor { get; set; } = Color.FromArgb(0x6F, 0xBF, 0xB3);
+
+    [InputParameter("SRM: session POC colour", 153)]
+    public Color SrmPocColor { get; set; } = Color.FromArgb(0xE0, 0x8A, 0x5A);
+
+    [InputParameter("SRM: session VAH / VAL colour", 154)]
+    public Color SrmVaColor { get; set; } = Color.FromArgb(0x2A, 0x9D, 0x8F);
+
+    [InputParameter("SRM: weekly POC colour", 155)]
+    public Color SrmWeekPocColor { get; set; } = Color.FromArgb(0xB5, 0x53, 0x2E);
+
+    [InputParameter("SRM: weekly VAH / VAL colour", 156)]
+    public Color SrmWeekVaColor { get; set; } = Color.FromArgb(0x1F, 0x8A, 0x7E);
+
+    [InputParameter("SRM: monthly POC colour", 157)]
+    public Color SrmMonthPocColor { get; set; } = Color.FromArgb(0xD9, 0x73, 0x3F);
+
+    [InputParameter("SRM: monthly VAH / VAL colour", 158)]
+    public Color SrmMonthVaColor { get; set; } = Color.FromArgb(0x5F, 0xB8, 0xA8);
+
+    [InputParameter("SRM: daily history lookback (days, for prior close / ATR)", 159, 5, 90, 1, 0)]
+    public int SrmDailyLookbackDays { get; set; } = 40;
+
+    [InputParameter("SRM: show naked (untested) session/HTF levels", 160)]
+    public bool SrmShowNakedLevels { get; set; } = true;
+
+    [InputParameter("SRM: show profile histogram fill", 161)]
+    public bool SrmShowProfileHistogram { get; set; } = false;
+
+    [InputParameter("SRM: profile max drawn rows (display only)", 162, 10, 120, 1, 0)]
+    public int SrmProfileMaxRows { get; set; } = 40;
+
+    [InputParameter("SRM: NY initial balance enable", 163)]
+    public bool SrmIbEnabled { get; set; } = true;
+
+    [InputParameter("SRM: NY initial balance length (minutes)", 164, 5, 180, 1, 0)]
+    public int SrmIbMinutes { get; set; } = 60;
+
+    [InputParameter("SRM: NY initial balance colour", 165)]
+    public Color SrmIbColor { get; set; } = Color.FromArgb(0xB8, 0xA8, 0x8A);
+
+    [InputParameter("SRM: Vol-Step Ranges enable", 166)]
+    public bool SrmVolStepEnabled { get; set; } = true;
+
+    [InputParameter("SRM: Vol-Step size (x daily expected move)", 167, 0.05, 3, 0.05, 2)]
+    public double SrmVolStepMult { get; set; } = 0.5;
+
+    [InputParameter("SRM: Vol-Step upper colour", 168)]
+    public Color SrmVolStepUpColor { get; set; } = Color.FromArgb(0xC9, 0x7B, 0x63);
+
+    [InputParameter("SRM: Vol-Step mid colour", 169)]
+    public Color SrmVolStepMidColor { get; set; } = Color.FromArgb(0x8C, 0x9A, 0xA8);
+
+    [InputParameter("SRM: Vol-Step lower colour", 170)]
+    public Color SrmVolStepDnColor { get; set; } = Color.FromArgb(0x3E, 0x9C, 0x8F);
+
+    [InputParameter("SRM: show prior day / week high / low / close", 171)]
+    public bool SrmShowPriorContext { get; set; } = true;
+
+    [InputParameter("SRM: prior day colour", 172)]
+    public Color SrmPriorDayColor { get; set; } = Color.FromArgb(0xA7, 0xAE, 0xB7);
+
+    [InputParameter("SRM: prior week colour", 173)]
+    public Color SrmPriorWeekColor { get; set; } = Color.FromArgb(0xC3, 0xC9, 0xD1);
+
+    [InputParameter("SRM: show status badge", 174)]
+    public bool SrmShowBadge { get; set; } = true;
+
     private readonly VwapEngine vwapEngine = new();
     private readonly VwapOverlay vwapOverlay = new();
     private volatile VwapDrawable vwapDrawable = VwapDrawable.Empty;
@@ -572,6 +743,19 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     private bool wasInVwapSession;
     private readonly List<VwapRejection> vwapRejections = new();
     private readonly ConcurrentQueue<(double Price, double Size)> vwapTickQueue = new();
+
+    // ---- Session Range Map fields --------------------------------------------------------------
+    private readonly SrmEngine srmEngine = new();
+    private readonly SrmOverlay srmOverlay = new();
+    private volatile SrmDrawable srmDrawable = SrmDrawable.Empty;
+    private int srmChartBarsSeen = -1;
+    private HistoricalData? srmDailyHistory;
+    private Timer? srmVolTimer;
+    private int srmVolTimerIntervalMs;
+    private double? srmVolLast;
+    private double? srmVixLast;
+    private double? srmVix3mLast;
+    private string? srmVolFault;
 
     /// <summary>
     /// Constructed lazily in <see cref="TryStartPoc"/>, not here — same reason
@@ -697,6 +881,7 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             this.TryStartOrderBlocks(symbol);
             this.TryStartPoc(symbol);
             this.TryStartVwap(symbol);
+            this.TryStartSrm(symbol);
 
             var interval = Math.Max(this.PollIntervalMs, 50);
             this.pollTimer = new Timer(this.OnPollTimer, null, 0, interval);
@@ -810,6 +995,26 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         catch (Exception ex)
         {
             this.overlayFault = $"VWAP unavailable: {ex.GetType().Name}: {ex.Message}";
+        }
+    }
+
+    /// <summary>Best-effort, same reasoning as TryStartVwap — a connector unable to supply daily
+    /// history for the prior-close/ATR fallback should not take DOM/tape reading down with it. The
+    /// vol-quote timer itself is started/stopped reactively from <see cref="OnPollTimer"/>'s own
+    /// <see cref="SyncSrmVolTimer"/>, same self-healing reasoning as `LevelsMap`'s own
+    /// `SyncGexTimer` (a later settings-panel toggle must not require a reattach to take effect).</summary>
+    private void TryStartSrm(Qt.Symbol symbol)
+    {
+        if (!this.SrmEnabled || this.srmDailyHistory is not null) return;
+
+        try
+        {
+            var lookback = DateTime.UtcNow.AddDays(-Math.Max(5, this.SrmDailyLookbackDays));
+            this.srmDailyHistory = symbol.GetHistory(Period.DAY1, symbol.HistoryType, lookback);
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = $"SRM daily history unavailable: {ex.GetType().Name}: {ex.Message}";
         }
     }
 
@@ -944,6 +1149,18 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.vwapRejections.Clear();
         this.vwapDrawable = VwapDrawable.Empty;
 
+        this.srmVolTimer?.Dispose();
+        this.srmVolTimer = null;
+        this.srmDailyHistory?.Dispose();
+        this.srmDailyHistory = null;
+        this.srmChartBarsSeen = -1;
+        this.srmVolLast = null;
+        this.srmVixLast = null;
+        this.srmVix3mLast = null;
+        this.srmVolFault = null;
+        this.srmEngine.Reset();
+        this.srmDrawable = SrmDrawable.Empty;
+
         this.deltaTickQueue.Clear();
         this.deltaPending.Clear();
         this.deltaChartBarsSeen = -1;
@@ -1014,6 +1231,16 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         catch (Exception ex)
         {
             this.overlayFault = $"VWAP failed: {ex.GetType().Name}: {ex.Message}";
+        }
+
+        try
+        {
+            this.SyncSrmVolTimer();
+            this.DrainSrm();
+        }
+        catch (Exception ex)
+        {
+            this.overlayFault = $"SRM failed: {ex.GetType().Name}: {ex.Message}";
         }
 
         try
@@ -1629,6 +1856,254 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.vwapDrawable = new VwapDrawable(session, this.vwapRejections.ToArray());
     }
 
+    // ---- Session Range Map: volatility fetch, bar feed, drawable rebuild ----------------------
+
+    /// <summary>Reactive start/stop for the SRM volatility-quote timer — same self-healing shape as
+    /// `LevelsMap`'s own `SyncGexTimer`/`SyncReferenceSpotTimer`: a later "SRM: enable" toggle via
+    /// the settings panel must take effect without a reattach.</summary>
+    private void SyncSrmVolTimer()
+    {
+        if (!this.SrmEnabled)
+        {
+            if (this.srmVolTimer is null) return;
+            this.srmVolTimer.Dispose();
+            this.srmVolTimer = null;
+            return;
+        }
+
+        var wantedInterval = Math.Max(this.SrmVolPollIntervalSeconds, 15) * 1000;
+        if (this.srmVolTimer is not null && this.srmVolTimerIntervalMs == wantedInterval) return;
+
+        this.srmVolTimer?.Dispose();
+        this.srmVolTimerIntervalMs = wantedInterval;
+        this.srmVolTimer = new Timer(this.OnSrmVolTimer, null, 0, wantedInterval);
+    }
+
+    /// <summary>VIX/VIX3M are always fetched (expanded-regime detection); the operator's own chosen
+    /// implied-move ticker (default VXN) is fetched separately and may duplicate the VIX fetch for
+    /// an ES/MES/SPY chart set to "VIX" — harmless, same literal duplication `srm.pine` itself has
+    /// between `volSym`/`vixSym` defaults.</summary>
+    private void OnSrmVolTimer(object? state)
+    {
+        try
+        {
+            var ticker = string.IsNullOrWhiteSpace(this.SrmVolTicker) ? "VXN" : this.SrmVolTicker.Trim().ToUpperInvariant();
+            this.srmVolLast = CboeIndexClient.FetchQuote(ticker).CurrentPrice;
+            this.srmVixLast = CboeIndexClient.FetchQuote("VIX").CurrentPrice;
+            this.srmVix3mLast = CboeIndexClient.FetchQuote("VIX3M").CurrentPrice;
+            this.srmVolFault = null;
+        }
+        catch (Exception ex)
+        {
+            this.srmVolFault = $"SRM volatility fetch failed: {ex.GetType().Name}: {ex.Message}";
+        }
+    }
+
+    /// <summary>Prior day close + ATR(14), recomputed fresh from the whole held daily series each
+    /// call — cheap (the lookback is a few dozen bars), so no incremental rolling-window state is
+    /// worth the complexity.</summary>
+    private static bool TryComputeDailyVolInputs(HistoricalData daily, out double priorClose, out double atr14)
+    {
+        priorClose = 0;
+        atr14 = 0;
+
+        var closedUpTo = daily.Count - 1; // exclude the still-forming day
+        if (closedUpTo < 1) return false;
+        if (daily[closedUpTo - 1, SeekOriginHistory.Begin] is not HistoryItemBar priorBar) return false;
+
+        priorClose = priorBar.Close;
+
+        var trs = new List<double>();
+        var start = Math.Max(1, closedUpTo - 14);
+        for (var i = start; i < closedUpTo; i++)
+        {
+            if (daily[i, SeekOriginHistory.Begin] is not HistoryItemBar bar) continue;
+            if (daily[i - 1, SeekOriginHistory.Begin] is not HistoryItemBar prevBar) continue;
+
+            var tr = Math.Max(bar.High - bar.Low, Math.Max(Math.Abs(bar.High - prevBar.Close), Math.Abs(bar.Low - prevBar.Close)));
+            trs.Add(tr);
+        }
+
+        if (trs.Count > 0) atr14 = trs.Average();
+        return true;
+    }
+
+    private void DrainSrm()
+    {
+        if (!this.SrmEnabled) return;
+
+        double? priorClose = null;
+        var atrFallback = 0d;
+        if (this.srmDailyHistory is { Count: > 1 } daily && TryComputeDailyVolInputs(daily, out var pc, out var atr))
+        {
+            priorClose = pc;
+            atrFallback = atr;
+        }
+
+        this.srmEngine.SetVolatility(priorClose, this.srmVolLast, this.srmVixLast, this.srmVix3mLast, atrFallback);
+
+        var chartData = this.HistoricalData;
+        if (chartData is not { Count: > 1 }) return;
+
+        var closedUpTo = chartData.Count - 1;
+        if (this.srmChartBarsSeen < 0)
+            this.srmChartBarsSeen = Math.Max(0, closedUpTo - MaxInitialChartBacklogBars);
+
+        var tickSize = this.symbol?.TickSize ?? 0d;
+        var settings = new SrmSettings(
+            this.SrmAsiaEnabled, this.SrmAsiaShare,
+            this.SrmLondonEnabled, this.SrmLondonShare,
+            this.SrmNyEnabled, this.SrmNyShare,
+            this.SrmWeeklyEnabled, this.SrmWeeklyBudgetMult, this.SrmWeekKProj, this.SrmWeekRows,
+            this.SrmMonthlyEnabled, this.SrmMonthlyBudgetMult, this.SrmMonthKProj, this.SrmMonthRows,
+            this.SrmKProj, this.SrmAdaptiveProjection, this.SrmExtMult,
+            this.SrmExpandedScaleEnabled, this.SrmExpandedMultiplier,
+            this.SrmSessionRows, this.SrmValueAreaPercent,
+            this.SrmIbEnabled, this.SrmIbMinutes,
+            this.SrmVolStepEnabled, this.SrmVolStepMult);
+
+        var changed = false;
+        for (var i = this.srmChartBarsSeen; i < closedUpTo; i++)
+        {
+            if (chartData[i, SeekOriginHistory.Begin] is not HistoryItemBar item) continue;
+            this.srmEngine.FeedBar(item.TimeLeft, item.TimeLeft, item.Open, item.High, item.Low, item.Volume, tickSize, settings);
+            changed = true;
+        }
+
+        this.srmChartBarsSeen = closedUpTo;
+
+        if (changed)
+            this.RebuildSrmDrawable();
+    }
+
+    private void RebuildSrmDrawable()
+    {
+        var now = DateTime.UtcNow;
+        var lines = new List<SrmLineDraw>();
+        var boxes = new List<SrmProfileBoxDraw>();
+
+        void AddSession(SrmPeriod period, Color color, bool showPoc)
+        {
+            if (!period.Active) return;
+
+            var x2 = now > period.StartUtc ? now : period.StartUtc.AddSeconds(1);
+
+            lines.Add(new SrmLineDraw(period.StartUtc, x2, period.OpenPrice + period.BudgetPts, SrmLineKind.Budget, color, $"{period.Name} +budget  {period.OpenPrice + period.BudgetPts:0.##}"));
+            lines.Add(new SrmLineDraw(period.StartUtc, x2, period.OpenPrice - period.BudgetPts, SrmLineKind.Budget, color, $"{period.Name} -budget  {period.OpenPrice - period.BudgetPts:0.##}"));
+            lines.Add(new SrmLineDraw(period.StartUtc, x2, period.ProjUp, SrmLineKind.Projection, this.SrmProjColor, $"{period.Name} proj top  {period.ProjUp:0.##}"));
+            lines.Add(new SrmLineDraw(period.StartUtc, x2, period.ProjDn, SrmLineKind.Projection, this.SrmProjColor, $"{period.Name} proj bottom  {period.ProjDn:0.##}"));
+
+            if (!showPoc) return;
+
+            var (poc, vah, val) = period.ComputeProfile(this.SrmValueAreaPercent);
+            var (pocColor, vaColor) = period.Kind switch
+            {
+                SrmPeriodKind.Week => (this.SrmWeekPocColor, this.SrmWeekVaColor),
+                SrmPeriodKind.Month => (this.SrmMonthPocColor, this.SrmMonthVaColor),
+                _ => (this.SrmPocColor, this.SrmVaColor),
+            };
+
+            if (poc is { } p) lines.Add(new SrmLineDraw(period.StartUtc, x2, p, SrmLineKind.Poc, pocColor, $"{period.Name} POC (live)  {p:0.##}"));
+            if (vah is { } h) lines.Add(new SrmLineDraw(period.StartUtc, x2, h, SrmLineKind.Vah, vaColor, $"{period.Name} VAH (live)  {h:0.##}"));
+            if (val is { } l) lines.Add(new SrmLineDraw(period.StartUtc, x2, l, SrmLineKind.Val, vaColor, $"{period.Name} VAL (live)  {l:0.##}"));
+
+            if (!this.SrmShowProfileHistogram) return;
+
+            foreach (var row in period.GetHistogramRows(this.SrmValueAreaPercent, this.SrmProfileMaxRows))
+            {
+                var rowColor = row.IsPoc ? pocColor : row.InValueArea ? vaColor : color;
+                boxes.Add(new SrmProfileBoxDraw(period.StartUtc, x2, row.Lo, row.Hi, row.RelativeVolume, rowColor));
+            }
+        }
+
+        void AddFinishedHtf(SrmPeriod period, Color pocColor, Color vaColor, string prefix, bool show)
+        {
+            if (!show) return;
+
+            if (period.LastFinished.Poc is { } poc)
+                lines.Add(new SrmLineDraw(period.StartUtc, now, poc, SrmLineKind.Poc, pocColor, $"{prefix} POC  {poc:0.##}"));
+            if (period.LastFinished.Vah is { } vah)
+                lines.Add(new SrmLineDraw(period.StartUtc, now, vah, SrmLineKind.Vah, vaColor, $"{prefix} VAH  {vah:0.##}"));
+            if (period.LastFinished.Val is { } val)
+                lines.Add(new SrmLineDraw(period.StartUtc, now, val, SrmLineKind.Val, vaColor, $"{prefix} VAL  {val:0.##}"));
+        }
+
+        AddSession(this.srmEngine.Asia, this.SrmAsiaColor, this.SrmShowSessionPoc);
+        AddSession(this.srmEngine.London, this.SrmLondonColor, this.SrmShowSessionPoc);
+        AddSession(this.srmEngine.Ny, this.SrmNyColor, this.SrmShowSessionPoc);
+        AddSession(this.srmEngine.Week, this.SrmWeekColor, this.SrmShowWeeklyPoc);
+        AddSession(this.srmEngine.Month, this.SrmMonthColor, this.SrmShowMonthlyPoc);
+
+        AddFinishedHtf(this.srmEngine.Week, this.SrmWeekPocColor, this.SrmWeekVaColor, "Prior-week", this.SrmShowWeeklyPoc);
+        AddFinishedHtf(this.srmEngine.Month, this.SrmMonthPocColor, this.SrmMonthVaColor, "Prior-month", this.SrmShowMonthlyPoc);
+
+        if (this.SrmShowNakedLevels)
+        {
+            foreach (var lvl in this.srmEngine.NakedLevels)
+            {
+                if (lvl.TouchedUtc is { } touched && touched < now.AddDays(-1)) continue; // stop drawing a long-stale touched level
+
+                var color = lvl.PeriodKind switch
+                {
+                    SrmPeriodKind.Asia => this.SrmAsiaColor,
+                    SrmPeriodKind.London => this.SrmLondonColor,
+                    SrmPeriodKind.Ny => this.SrmNyColor,
+                    SrmPeriodKind.Week => this.SrmWeekColor,
+                    _ => this.SrmMonthColor,
+                };
+                if (lvl.TouchedUtc is { } t) color = Color.FromArgb(90, color);
+
+                var x1 = lvl.StartUtc;
+                var x2 = lvl.TouchedUtc ?? now;
+                if (x2 <= x1) x2 = x1.AddSeconds(1);
+
+                var side = lvl.IsHigh ? "H" : "L";
+                lines.Add(new SrmLineDraw(x1, x2, lvl.Price, SrmLineKind.Naked, color, $"{this.srmEngine.PeriodFor(lvl.PeriodKind).Name} {side} (naked)  {lvl.Price:0.##}"));
+            }
+        }
+
+        if (this.SrmIbEnabled && this.srmEngine.IbHigh is { } ibH && this.srmEngine.IbLow is { } ibL)
+        {
+            var nowOrSoon = now;
+            var ibX1 = this.srmEngine.Ny.StartUtc;
+            var state = this.srmEngine.IbBrokenUp && this.srmEngine.IbBrokenDn ? " (both sides broken)"
+                : this.srmEngine.IbBrokenUp ? " (high broken)"
+                : this.srmEngine.IbBrokenDn ? " (low broken)" : "";
+            lines.Add(new SrmLineDraw(ibX1, nowOrSoon, ibH, SrmLineKind.InitialBalance, this.SrmIbColor, $"NY IB high  {ibH:0.##}{state}"));
+            lines.Add(new SrmLineDraw(ibX1, nowOrSoon, ibL, SrmLineKind.InitialBalance, this.SrmIbColor, $"NY IB low  {ibL:0.##}"));
+        }
+
+        if (this.SrmVolStepEnabled && this.srmEngine.VsMid is { } vsMid && this.srmEngine.VsHalf is { } vsHalf)
+        {
+            lines.Add(new SrmLineDraw(default, default, vsMid + (2 * vsHalf), SrmLineKind.VolStep, this.SrmVolStepUpColor, $"VS R2  {vsMid + (2 * vsHalf):0.##}", FullWidth: true));
+            lines.Add(new SrmLineDraw(default, default, vsMid + vsHalf, SrmLineKind.VolStep, this.SrmVolStepUpColor, $"VS R1  {vsMid + vsHalf:0.##}", FullWidth: true));
+            lines.Add(new SrmLineDraw(default, default, vsMid, SrmLineKind.VolStep, this.SrmVolStepMidColor, $"VS Mid  {vsMid:0.##}", FullWidth: true));
+            lines.Add(new SrmLineDraw(default, default, vsMid - vsHalf, SrmLineKind.VolStep, this.SrmVolStepDnColor, $"VS S1  {vsMid - vsHalf:0.##}", FullWidth: true));
+            lines.Add(new SrmLineDraw(default, default, vsMid - (2 * vsHalf), SrmLineKind.VolStep, this.SrmVolStepDnColor, $"VS S2  {vsMid - (2 * vsHalf):0.##}", FullWidth: true));
+        }
+
+        if (this.SrmShowPriorContext && this.srmDailyHistory is { Count: > 1 } daily)
+        {
+            var closedUpTo = daily.Count - 1;
+            if (closedUpTo >= 1 && daily[closedUpTo - 1, SeekOriginHistory.Begin] is HistoryItemBar pd)
+            {
+                var x1 = now.AddDays(-1);
+                lines.Add(new SrmLineDraw(x1, now, pd.High, SrmLineKind.Naked, this.SrmPriorDayColor, $"PDH  {pd.High:0.##}"));
+                lines.Add(new SrmLineDraw(x1, now, pd.Low, SrmLineKind.Naked, this.SrmPriorDayColor, $"PDL  {pd.Low:0.##}"));
+                lines.Add(new SrmLineDraw(x1, now, pd.Close, SrmLineKind.Naked, Color.FromArgb(160, this.SrmPriorDayColor), $"PDC  {pd.Close:0.##}"));
+            }
+
+            if (this.srmEngine.Week.LastFinished.High is { } pwH && this.srmEngine.Week.LastFinished.Low is { } pwL)
+            {
+                var x1 = now.AddDays(-7);
+                lines.Add(new SrmLineDraw(x1, now, pwH, SrmLineKind.Naked, this.SrmPriorWeekColor, $"PWH  {pwH:0.##}"));
+                lines.Add(new SrmLineDraw(x1, now, pwL, SrmLineKind.Naked, this.SrmPriorWeekColor, $"PWL  {pwL:0.##}"));
+            }
+        }
+
+        this.srmDrawable = new SrmDrawable(lines.ToArray(), boxes.ToArray());
+    }
+
     private void ReportPollFault(string reason)
     {
         if (string.Equals(this.lastPollFault, reason, StringComparison.Ordinal))
@@ -1643,6 +2118,10 @@ public sealed class FinchLiteIndicator : Qt.Indicator
     private readonly Font faultFont = new(FontFamily.GenericSansSerif, 8f, FontStyle.Bold);
     private readonly SolidBrush faultBrush = new(Color.FromArgb(0xFF, 0xC1, 0x07));
     private readonly SolidBrush faultBack = new(Color.FromArgb(190, 16, 18, 24));
+    private readonly Font srmBadgeFont = new(FontFamily.GenericSansSerif, 8f, FontStyle.Regular);
+    private readonly SolidBrush srmBadgeBrush = new(Color.FromArgb(0xC9, 0xCE, 0xD6));
+    private readonly SolidBrush srmBadgeWarnBrush = new(Color.FromArgb(0xE0, 0x7A, 0x5F));
+    private readonly SolidBrush srmBadgeBack = new(Color.FromArgb(230, 16, 18, 24));
 
     public override void OnPaintChart(PaintChartEventArgs args)
     {
@@ -1661,6 +2140,18 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             var rect = new RectangleF(pane.Left + 4f, pane.Top + 24f, size.Width + 8f, size.Height + 4f);
             graphics.FillRectangle(this.faultBack, rect);
             graphics.DrawString(fault, this.faultFont, this.faultBrush, rect.Left + 4f, rect.Top + 2f);
+        }
+
+        if (this.SrmEnabled && this.SrmShowBadge)
+        {
+            try
+            {
+                this.DrawSrmBadge(graphics, window);
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = $"The SRM badge failed to draw: {ex.GetType().Name}: {ex.Message}";
+            }
         }
 
         // ONE shared registry for every overlay's labels below, so a resting-order label and a
@@ -1786,6 +2277,18 @@ public sealed class FinchLiteIndicator : Qt.Indicator
             }
         }
 
+        if (this.SrmEnabled)
+        {
+            try
+            {
+                this.srmOverlay.Draw(graphics, window, this.srmDrawable, registry);
+            }
+            catch (Exception ex)
+            {
+                this.overlayFault = $"The SRM overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
+            }
+        }
+
         if (this.DeltaPanelEnabled)
         {
             try
@@ -1802,6 +2305,35 @@ public sealed class FinchLiteIndicator : Qt.Indicator
                 this.overlayFault = $"The delta panel overlay failed to draw: {ex.GetType().Name}: {ex.Message}";
             }
         }
+    }
+
+    /// <summary>Top-right summary — ported from `srm.pine`'s own status `table`. Simpler than the
+    /// source script's own table (one cell, no per-row grid lines) since GDI+ text rendering
+    /// doesn't need Pine's table abstraction to lay out a handful of lines.</summary>
+    private void DrawSrmBadge(Graphics graphics, IChartWindow window)
+    {
+        var pane = window.ClientRectangle;
+
+        string SessionLine(SrmPeriod p) => p.Active
+            ? $"{p.Name} budget {p.BudgetPts:0.##} · used {100.0 * (p.High - p.Low) / Math.Max(p.BudgetPts, 1e-9):0}%"
+            : "";
+
+        var cur = this.srmEngine.Ny.Active ? this.srmEngine.Ny : this.srmEngine.London.Active ? this.srmEngine.London : this.srmEngine.Asia.Active ? this.srmEngine.Asia : null;
+
+        var sb = new List<string>();
+        sb.Add(cur is not null ? SessionLine(cur) : "Between sessions");
+        if (this.srmEngine.Week.Active) sb.Add(SessionLine(this.srmEngine.Week));
+        if (this.srmEngine.Month.Active) sb.Add(SessionLine(this.srmEngine.Month));
+        sb.Add(this.srmEngine.EmDay is { } em ? $"Daily expected move ±{em:0.##}" : "Daily expected move: waiting for volatility data");
+        sb.Add(this.srmEngine.Expanded ? "EXPANDED regime (VIX >= VIX3M) · budgets widened" : "Normal range regime");
+        if (this.srmVolFault is { Length: > 0 } vf) sb.Add(vf);
+
+        var text = string.Join("\n", sb);
+        var size = graphics.MeasureString(text, this.srmBadgeFont);
+        var rect = new RectangleF(pane.Right - size.Width - 14f, pane.Top + 4f, size.Width + 10f, size.Height + 6f);
+
+        graphics.FillRectangle(this.srmBadgeBack, rect);
+        graphics.DrawString(text, this.srmBadgeFont, this.srmVolFault is { Length: > 0 } ? this.srmBadgeWarnBrush : this.srmBadgeBrush, rect.Left + 5f, rect.Top + 3f);
     }
 
     public override void Dispose()
@@ -1825,6 +2357,13 @@ public sealed class FinchLiteIndicator : Qt.Indicator
         this.poc5mHistory?.Dispose();
         this.vwapHistory?.Dispose();
         this.vwapOverlay.Dispose();
+        this.srmVolTimer?.Dispose();
+        this.srmDailyHistory?.Dispose();
+        this.srmOverlay.Dispose();
+        this.srmBadgeFont.Dispose();
+        this.srmBadgeBrush.Dispose();
+        this.srmBadgeWarnBrush.Dispose();
+        this.srmBadgeBack.Dispose();
         this.faultFont.Dispose();
         this.faultBrush.Dispose();
         this.faultBack.Dispose();

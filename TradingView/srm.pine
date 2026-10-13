@@ -1,11 +1,16 @@
 //@version=6
-// Session Range Map v9 (release candidate) — NY initial balance · adaptive (time-aware) completion projection · v7 math audit: fresh VXN, recalibrated budgets (2-yr NQ), finer profile math (Ocean palette: charcoal · copper · teal · silver; avoids GEX red/green/yellow and your purple QQQ / cyan dark-pool colors) — Asia / London / New York + Weekly + Monthly layers · alerts · per-layer label switches · Vol-Step Ranges
+// Session Range Map v9 (1-minute drawing fix) — NY initial balance · adaptive (time-aware) completion projection · v7 math audit: fresh VXN, recalibrated budgets (2-yr NQ), finer profile math (Ocean palette: charcoal · copper · teal · silver; avoids GEX red/green/yellow and your purple QQQ / cyan dark-pool colors) — Asia / London / New York + Weekly + Monthly layers · alerts · per-layer label switches · Vol-Step Ranges
 // Vol-Step Ranges: idea inspired by LuxAlgo's "Predictive Ranges" (CC BY-NC-SA 4.0); independent implementation, not their code.
 // Range budgets · completion projections · session volume profiles (POC / VAH / VAL) · naked levels · labels · full color control
 // A range MAP, not a signal tool. Evidence for the defaults is at the bottom.
-indicator("Session Range Map", "SRM", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+indicator("Session Range Map — 1m Fixed", "SRM 1m Fixed", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// Hidden output: satisfies the indicator output requirement without changing visuals.
+plot(close, title = "SRM internal output", display = display.none)
 
 string TZ = "America/New_York"
+// Timestamp-based drawing coordinates support long periods on 1-minute charts.
+int barMs = int(timeframe.in_seconds() * 1000)
 
 // ═════════════ Inputs ═════════════
 grpV = "Volatility source"
@@ -252,7 +257,7 @@ var array<Prof> profs    = array.new<Prof>()
 var Prof        liveProf = Prof.new(array.new<box>(), array.new<line>())
 
 mkLabel(int x, float y, color c, bool on) =>
-    showLabels and on ? label.new(x, y, "", style = label.style_label_left, color = color(na), textcolor = lcol(c), size = lsize()) : label(na)
+    showLabels and on ? label.new(x, y, "", xloc = xloc.bar_time, style = label.style_label_left, color = color(na), textcolor = lcol(c), size = lsize()) : label(na)
 
 setLabel(label lb, int x, float y, string t) =>
     if not na(lb)
@@ -309,9 +314,9 @@ monthMs() =>
     int nm = month == 12 ? 1 : month + 1
     float(timestamp(TZ, ny, nm, 1, 0, 0) - timestamp(TZ, year, month, 1, 0, 0))
 
-sessW(Sess s, int xEnd) => math.max(2, int(math.round((xEnd - s.x0) * profWidth)))
+sessW(Sess s, int xEnd) => math.max(2 * barMs, int(math.round((xEnd - s.x0) * profWidth)))
 
-// Builds the profile into p (boxes anchored at xA, w bars wide) and returns [POC, VAH, VAL]
+// Builds the profile into p (timestamp anchor xA, width w in milliseconds) and returns [POC, VAH, VAL]
 drawProf(Sess s, Prof p, int xA, int w, bool drawBoxes) =>
     float poc = na
     float vah = na
@@ -365,12 +370,12 @@ drawProf(Sess s, Prof p, int xA, int w, bool drawBoxes) =>
                     float sv = 0.0
                     for j = i0 to i1
                         sv += vs.get(j)
-                    int   len = math.max(1, int(math.round(w * sv / gmx)))
+                    int   len = math.max(barMs, int(math.round(w * sv / gmx)))
                     float bot = s.o + ks.get(i0) * s.bin
                     float top = s.o + (ks.get(i1) + 1) * s.bin
                     int   im  = int(math.floor((i0 + i1) / 2.0))
                     color c   = (pi >= i0 and pi <= i1) ? (s.monthly ? cMoPoc : s.weekly ? cWkPoc : cPOC) : (im >= a and im <= b) ? cVA : cRow
-                    p.bx.push(box.new(xA, top, xA + len, bot, border_color = color(na), border_width = 0, bgcolor = c))
+                    p.bx.push(box.new(xA, top, xA + len, bot, xloc = xloc.bar_time, border_color = color(na), border_width = 0, bgcolor = c))
     [poc, vah, val]
 
 // ═════════════ Session logic ═════════════
@@ -380,9 +385,9 @@ method start(Sess s, float budgetPts) =>
     s.o      := open
     s.hi     := high
     s.lo     := low
-    s.hiX    := bar_index
-    s.loX    := bar_index
-    s.x0     := bar_index
+    s.hiX    := time
+    s.loX    := time
+    s.x0     := time
     s.t0     := time
     s.budget := budgetPts
     int rows = s.monthly ? moRows : s.weekly ? wkRows : rowsPerBudget
@@ -396,24 +401,24 @@ method start(Sess s, float budgetPts) =>
     int   lw = s.monthly ? moWidth : s.weekly ? wkWidth : budgetWidth
     bool  labOn = s.monthly ? labMo : s.weekly ? labWk : labSess
     if (s.monthly ? moBudget : s.weekly ? wkBudget : showBudget)
-        s.bUp  := line.new(bar_index, open + budgetPts, bar_index, open + budgetPts, color = color.new(s.col, 30), style = lstyle(budgetStyle), width = lw)
-        s.bDn  := line.new(bar_index, open - budgetPts, bar_index, open - budgetPts, color = color.new(s.col, 30), style = lstyle(budgetStyle), width = lw)
-        s.lbUp := mkLabel(bar_index, open + budgetPts, s.col, labOn)
-        s.lbDn := mkLabel(bar_index, open - budgetPts, s.col, labOn)
+        s.bUp  := line.new(time, open + budgetPts, time, open + budgetPts, xloc = xloc.bar_time, color = color.new(s.col, 30), style = lstyle(budgetStyle), width = lw)
+        s.bDn  := line.new(time, open - budgetPts, time, open - budgetPts, xloc = xloc.bar_time, color = color.new(s.col, 30), style = lstyle(budgetStyle), width = lw)
+        s.lbUp := mkLabel(time, open + budgetPts, s.col, labOn)
+        s.lbDn := mkLabel(time, open - budgetPts, s.col, labOn)
     if (s.monthly ? moProjOn : s.weekly ? wkProjOn : showProj)
-        s.pUp  := line.new(bar_index, low + kk * budgetPts, bar_index, low + kk * budgetPts, color = cProj, style = lstyle(projStyle), width = projWidth)
-        s.pDn  := line.new(bar_index, high - kk * budgetPts, bar_index, high - kk * budgetPts, color = cProj, style = lstyle(projStyle), width = projWidth)
-        s.lpUp := mkLabel(bar_index, low + kk * budgetPts, cProj, labOn)
-        s.lpDn := mkLabel(bar_index, high - kk * budgetPts, cProj, labOn)
+        s.pUp  := line.new(time, low + kk * budgetPts, time, low + kk * budgetPts, xloc = xloc.bar_time, color = cProj, style = lstyle(projStyle), width = projWidth)
+        s.pDn  := line.new(time, high - kk * budgetPts, time, high - kk * budgetPts, xloc = xloc.bar_time, color = cProj, style = lstyle(projStyle), width = projWidth)
+        s.lpUp := mkLabel(time, low + kk * budgetPts, cProj, labOn)
+        s.lpDn := mkLabel(time, high - kk * budgetPts, cProj, labOn)
 
 method update(Sess s) =>
     if s.active
         if high > s.hi
             s.hi  := high
-            s.hiX := bar_index
+            s.hiX := time
         if low < s.lo
             s.lo  := low
-            s.loX := bar_index
+            s.loX := time
         if volume > 0 and s.bin > 0
             int b0 = int(math.floor((low - s.o) / s.bin))
             int b1 = int(math.floor((high - s.o) / s.bin))
@@ -429,20 +434,20 @@ method update(Sess s) =>
             up := math.max(up, s.hi + e)
             dn := math.min(dn, s.lo - e)
         if not na(s.bUp)
-            s.bUp.set_x2(bar_index)
-            s.bDn.set_x2(bar_index)
+            s.bUp.set_x2(time)
+            s.bDn.set_x2(time)
         if not na(s.pUp)
             s.pUp.set_xy1(s.x0, up)
-            s.pUp.set_xy2(bar_index, up)
+            s.pUp.set_xy2(time, up)
             s.pDn.set_xy1(s.x0, dn)
-            s.pDn.set_xy2(bar_index, dn)
+            s.pDn.set_xy2(time, dn)
         float used = s.budget > 0 ? 100.0 * (s.hi - s.lo) / s.budget : na
         if not s.spent and used >= 100
             s.spent := true
             if alBudget
                 alert(s.name + " range budget spent (" + str.tostring(used, "#") + "%) — late extensions are short; stop chasing", alert.freq_once_per_bar)
         if barstate.islast
-            int xr = bar_index + labelOffset
+            int xr = time + labelOffset * barMs
             string u = "  ·  used " + str.tostring(used, "#") + "%" + (s.spent ? " · SPENT" : "")
             setLabel(s.lbUp, xr, s.o + s.budget, s.name + " +budget  " + fmt(s.o + s.budget) + u)
             setLabel(s.lbDn, xr, s.o - s.budget, s.name + " −budget  " + fmt(s.o - s.budget))
@@ -465,7 +470,7 @@ method finish(Sess s) =>
             line.delete(s.bUp)
             line.delete(s.bDn)
         string d  = str.format_time(time, "MM/dd", TZ)
-        int    xe = bar_index - 1
+        int    xe = time[1]
         // session profile + POC / VA
         Prof p = Prof.new(array.new<box>(), array.new<line>())
         [poc, vah, val] = drawProf(s, p, s.x0, sessW(s, xe), s.monthly ? moProfOn : s.weekly ? wkProfOn : showProf)
@@ -475,14 +480,14 @@ method finish(Sess s) =>
         int   vw  = s.monthly ? moWidth : s.weekly ? wkWidth : 1
         if not na(poc)
             if (s.monthly ? moPocVa : s.weekly ? wkPocVa : showPocVa)
-                p.ln.push(line.new(s.x0, poc, xe, poc, color = pc, width = pw))
-                p.ln.push(line.new(s.x0, vah, xe, vah, color = vc, style = lstyle(vaStyle), width = vw))
-                p.ln.push(line.new(s.x0, val, xe, val, color = vc, style = lstyle(vaStyle), width = vw))
+                p.ln.push(line.new(s.x0, poc, xe, poc, xloc = xloc.bar_time, color = pc, width = pw))
+                p.ln.push(line.new(s.x0, vah, xe, vah, xloc = xloc.bar_time, color = vc, style = lstyle(vaStyle), width = vw))
+                p.ln.push(line.new(s.x0, val, xe, val, xloc = xloc.bar_time, color = vc, style = lstyle(vaStyle), width = vw))
             if (s.monthly ? moNakedPoc : s.weekly ? wkNakedPoc : nakedPoc)
-                lvls.push(Lvl.new(poc, s.name + " POC " + d, pc, line.new(xe, poc, bar_index, poc, color = color.new(pc, 15), style = lstyle(nakedStyle), width = pw)))
+                lvls.push(Lvl.new(poc, s.name + " POC " + d, pc, line.new(xe, poc, time, poc, xloc = xloc.bar_time, color = color.new(pc, 15), style = lstyle(nakedStyle), width = pw)))
             if (s.monthly ? moNakedVa : s.weekly ? wkNakedVa : nakedVa)
-                lvls.push(Lvl.new(vah, s.name + " VAH " + d, vc, line.new(xe, vah, bar_index, vah, color = color.new(vc, 15), style = lstyle(nakedStyle), width = vw)))
-                lvls.push(Lvl.new(val, s.name + " VAL " + d, vc, line.new(xe, val, bar_index, val, color = color.new(vc, 15), style = lstyle(nakedStyle), width = vw)))
+                lvls.push(Lvl.new(vah, s.name + " VAH " + d, vc, line.new(xe, vah, time, vah, xloc = xloc.bar_time, color = color.new(vc, 15), style = lstyle(nakedStyle), width = vw)))
+                lvls.push(Lvl.new(val, s.name + " VAL " + d, vc, line.new(xe, val, time, val, xloc = xloc.bar_time, color = color.new(vc, 15), style = lstyle(nakedStyle), width = vw)))
         if s.monthly
             mprofs.push(p)
             while mprofs.size() > moKeep
@@ -498,8 +503,8 @@ method finish(Sess s) =>
         // naked session high / low
         if (s.monthly ? moNakedHL : s.weekly ? wkNakedHL : showNaked)
             bool isLonHigh = s.name == "LDN"
-            lvls.push(Lvl.new(s.hi, s.name + " H " + d, s.col, line.new(s.hiX, s.hi, bar_index, s.hi, color = color.new(s.col, 15), style = lstyle(nakedStyle), width = s.monthly ? moWidth : s.weekly ? wkWidth : isLonHigh ? 2 : 1), isLonHigh))
-            lvls.push(Lvl.new(s.lo, s.name + " L " + d, s.col, line.new(s.loX, s.lo, bar_index, s.lo, color = color.new(s.col, 15), style = lstyle(nakedStyle), width = s.monthly ? moWidth : s.weekly ? wkWidth : 1), false))
+            lvls.push(Lvl.new(s.hi, s.name + " H " + d, s.col, line.new(s.hiX, s.hi, time, s.hi, xloc = xloc.bar_time, color = color.new(s.col, 15), style = lstyle(nakedStyle), width = s.monthly ? moWidth : s.weekly ? wkWidth : isLonHigh ? 2 : 1), isLonHigh))
+            lvls.push(Lvl.new(s.lo, s.name + " L " + d, s.col, line.new(s.loX, s.lo, time, s.lo, xloc = xloc.bar_time, color = color.new(s.col, 15), style = lstyle(nakedStyle), width = s.monthly ? moWidth : s.weekly ? wkWidth : 1), false))
         while lvls.size() > nakedMax
             int idx = 0
             for j = 0 to lvls.size() - 1
@@ -526,51 +531,51 @@ if timeframe.isintraday and not na(emDay)
 // Weekly layer: one "session" per chart week (futures week starts Sunday 18:00 ET)
 if timeframe.isintraday and not na(emDay) and wkOn
     if timeframe.change("W") and wk.active
-        [wp, wh, wl] = drawProf(wk, Prof.new(array.new<box>(), array.new<line>()), wk.x0, 2, false)
+        [wp, wh, wl] = drawProf(wk, Prof.new(array.new<box>(), array.new<line>()), wk.x0, 2 * barMs, false)
         wk.finish()
         if wkPrevVa and not na(wp)
             pwPoc := wp
             pwVah := wh
             pwVal := wl
-            lPwPoc := line.new(bar_index, wp, bar_index, wp, color = cWkPoc, width = wkWidth + 1)
-            lPwVah := line.new(bar_index, wh, bar_index, wh, color = cWkVa, style = lstyle(vaStyle), width = wkWidth)
-            lPwVal := line.new(bar_index, wl, bar_index, wl, color = cWkVa, style = lstyle(vaStyle), width = wkWidth)
+            lPwPoc := line.new(time, wp, time, wp, xloc = xloc.bar_time, color = cWkPoc, width = wkWidth + 1)
+            lPwVah := line.new(time, wh, time, wh, xloc = xloc.bar_time, color = cWkVa, style = lstyle(vaStyle), width = wkWidth)
+            lPwVal := line.new(time, wl, time, wl, xloc = xloc.bar_time, color = cWkVa, style = lstyle(vaStyle), width = wkWidth)
     if not wk.active
         wk.start(emDay * math.sqrt(5) * wkMult * regMult)
         wk.lenMs := 7140.0 * 60000.0
     wk.update()
     if not na(lPwPoc)
-        lPwPoc.set_x2(bar_index)
-        lPwVah.set_x2(bar_index)
-        lPwVal.set_x2(bar_index)
+        lPwPoc.set_x2(time)
+        lPwVah.set_x2(time)
+        lPwVal.set_x2(time)
 
 // Monthly layer: one "session" per chart month
 if timeframe.isintraday and not na(emDay) and moOn
     if timeframe.change("M") and mo.active
-        [mp, mh, ml] = drawProf(mo, Prof.new(array.new<box>(), array.new<line>()), mo.x0, 2, false)
+        [mp, mh, ml] = drawProf(mo, Prof.new(array.new<box>(), array.new<line>()), mo.x0, 2 * barMs, false)
         mo.finish()
         if moPrevVa and not na(mp)
             pmPoc := mp
             pmVah := mh
             pmVal := ml
-            lPmPoc := line.new(bar_index, mp, bar_index, mp, color = cMoPoc, width = moWidth + 1)
-            lPmVah := line.new(bar_index, mh, bar_index, mh, color = cMoVa, style = lstyle(vaStyle), width = moWidth)
-            lPmVal := line.new(bar_index, ml, bar_index, ml, color = cMoVa, style = lstyle(vaStyle), width = moWidth)
+            lPmPoc := line.new(time, mp, time, mp, xloc = xloc.bar_time, color = cMoPoc, width = moWidth + 1)
+            lPmVah := line.new(time, mh, time, mh, xloc = xloc.bar_time, color = cMoVa, style = lstyle(vaStyle), width = moWidth)
+            lPmVal := line.new(time, ml, time, ml, xloc = xloc.bar_time, color = cMoVa, style = lstyle(vaStyle), width = moWidth)
     if not mo.active
         mo.start(emDay * math.sqrt(21) * moMult * regMult)
         mo.lenMs := monthMs()
     mo.update()
     if not na(lPmPoc)
-        lPmPoc.set_x2(bar_index)
-        lPmVah.set_x2(bar_index)
-        lPmVal.set_x2(bar_index)
+        lPmPoc.set_x2(time)
+        lPmVah.set_x2(time)
+        lPmVal.set_x2(time)
 
 // Naked levels: extend while untouched; stop and fade at first touch
 if lvls.size() > 0
     for i = lvls.size() - 1 to 0
         Lvl v = lvls.get(i)
         if v.live
-            v.ln.set_x2(bar_index)
+            v.ln.set_x2(time)
             if high >= v.price and low <= v.price
                 bool htf = str.startswith(v.name, "WK") or str.startswith(v.name, "MO")
                 if (htf and alNakedHTF) or (not htf and alNakedSess)
@@ -599,7 +604,7 @@ if ibOn and nyNow and not nyNow[1]
     ibH    := high
     ibL    := low
     ibT0   := time
-    ibX0   := bar_index
+    ibX0   := time
     ibDone := false
     ibUp   := false
     ibDn   := false
@@ -609,11 +614,11 @@ else if ibOn and nyNow and not ibDone
         ibL := math.min(ibL, low)
     else
         ibDone := true
-        lIbH := line.new(ibX0, ibH, bar_index, ibH, color = cIB, style = line.style_solid, width = 2)
-        lIbL := line.new(ibX0, ibL, bar_index, ibL, color = cIB, style = line.style_solid, width = 2)
+        lIbH := line.new(ibX0, ibH, time, ibH, xloc = xloc.bar_time, color = cIB, style = line.style_solid, width = 2)
+        lIbL := line.new(ibX0, ibL, time, ibL, xloc = xloc.bar_time, color = cIB, style = line.style_solid, width = 2)
 if ibOn and ibDone and nyNow and not na(lIbH)
-    lIbH.set_x2(bar_index)
-    lIbL.set_x2(bar_index)
+    lIbH.set_x2(time)
+    lIbL.set_x2(time)
     if high > ibH and not ibUp
         ibUp := true
         if alIb
@@ -689,7 +694,7 @@ var array<label> edge = array.new<label>()
 var table badge = table.new(position.top_right, 1, 1, bgcolor = cBadgeBg, frame_color = color.new(#C8794A, 60), frame_width = 1)
 
 edgeLabel(float y, string t, color c, string tip) =>
-    label.new(bar_index + labelOffset, y, t, style = label.style_label_left, color = color(na), textcolor = c, size = lsize(), tooltip = tip)
+    label.new(time + labelOffset * barMs, y, t, xloc = xloc.bar_time, style = label.style_label_left, color = color(na), textcolor = c, size = lsize(), tooltip = tip)
 
 if barstate.islast
     for l in edge
@@ -700,11 +705,11 @@ if barstate.islast
 
     // live session profile
     if cur.active and timeframe.isintraday
-        [lp, lh, ll] = drawProf(cur, liveProf, cur.x0, sessW(cur, bar_index), showProf)
+        [lp, lh, ll] = drawProf(cur, liveProf, cur.x0, sessW(cur, time), showProf)
         if showPocVa and not na(lp)
-            liveProf.ln.push(line.new(cur.x0, lp, bar_index, lp, color = cPOC, width = pocWidth))
-            liveProf.ln.push(line.new(cur.x0, lh, bar_index, lh, color = cVAedge, style = lstyle(vaStyle)))
-            liveProf.ln.push(line.new(cur.x0, ll, bar_index, ll, color = cVAedge, style = lstyle(vaStyle)))
+            liveProf.ln.push(line.new(cur.x0, lp, time, lp, xloc = xloc.bar_time, color = cPOC, width = pocWidth))
+            liveProf.ln.push(line.new(cur.x0, lh, time, lh, xloc = xloc.bar_time, color = cVAedge, style = lstyle(vaStyle)))
+            liveProf.ln.push(line.new(cur.x0, ll, time, ll, xloc = xloc.bar_time, color = cVAedge, style = lstyle(vaStyle)))
             if showLabels and labSess
                 edge.push(edgeLabel(lp, cur.name + " POC (live)  " + fmt(lp), lcol(cPOC), "Developing session point of control"))
                 edge.push(edgeLabel(lh, cur.name + " VAH (live)  " + fmt(lh), lcol(cVAedge), "Developing value area high"))
@@ -714,13 +719,13 @@ if barstate.islast
     clearProf(liveWProf)
     if wkOn and wk.active and timeframe.isintraday
         bool rightEdge = wkProfPos == "Right edge"
-        int  wxA = rightEdge ? bar_index + wkRightOff : wk.x0
-        int  wW  = rightEdge ? wkRightW : sessW(wk, bar_index)
+        int  wxA = rightEdge ? time + wkRightOff * barMs : wk.x0
+        int  wW  = rightEdge ? wkRightW * barMs : sessW(wk, time)
         [wp, wh, wl] = drawProf(wk, liveWProf, wxA, wW, wkLiveProf)
         if not na(wp)
-            liveWProf.ln.push(line.new(wk.x0, wp, bar_index, wp, color = cWkPoc, width = wkWidth))
-            liveWProf.ln.push(line.new(wk.x0, wh, bar_index, wh, color = cWkVa, style = lstyle(vaStyle), width = wkWidth))
-            liveWProf.ln.push(line.new(wk.x0, wl, bar_index, wl, color = cWkVa, style = lstyle(vaStyle), width = wkWidth))
+            liveWProf.ln.push(line.new(wk.x0, wp, time, wp, xloc = xloc.bar_time, color = cWkPoc, width = wkWidth))
+            liveWProf.ln.push(line.new(wk.x0, wh, time, wh, xloc = xloc.bar_time, color = cWkVa, style = lstyle(vaStyle), width = wkWidth))
+            liveWProf.ln.push(line.new(wk.x0, wl, time, wl, xloc = xloc.bar_time, color = cWkVa, style = lstyle(vaStyle), width = wkWidth))
             if showLabels and labWk
                 edge.push(edgeLabel(wp, "WK POC (developing)  " + fmt(wp), lcol(cWkPoc), "This week's developing point of control"))
                 edge.push(edgeLabel(wh, "WK VAH (developing)  " + fmt(wh), lcol(cWkVa), "This week's developing value area high"))
@@ -733,13 +738,13 @@ if barstate.islast
     clearProf(liveMProf)
     if moOn and mo.active and timeframe.isintraday
         bool mRight = moProfPos == "Right edge"
-        int  mxA = mRight ? bar_index + moRightOff : mo.x0
-        int  mW  = mRight ? moRightW : sessW(mo, bar_index)
+        int  mxA = mRight ? time + moRightOff * barMs : mo.x0
+        int  mW  = mRight ? moRightW * barMs : sessW(mo, time)
         [mp, mh, ml] = drawProf(mo, liveMProf, mxA, mW, moLiveProf)
         if not na(mp)
-            liveMProf.ln.push(line.new(mo.x0, mp, bar_index, mp, color = cMoPoc, width = moWidth))
-            liveMProf.ln.push(line.new(mo.x0, mh, bar_index, mh, color = cMoVa, style = lstyle(vaStyle), width = moWidth))
-            liveMProf.ln.push(line.new(mo.x0, ml, bar_index, ml, color = cMoVa, style = lstyle(vaStyle), width = moWidth))
+            liveMProf.ln.push(line.new(mo.x0, mp, time, mp, xloc = xloc.bar_time, color = cMoPoc, width = moWidth))
+            liveMProf.ln.push(line.new(mo.x0, mh, time, mh, xloc = xloc.bar_time, color = cMoVa, style = lstyle(vaStyle), width = moWidth))
+            liveMProf.ln.push(line.new(mo.x0, ml, time, ml, xloc = xloc.bar_time, color = cMoVa, style = lstyle(vaStyle), width = moWidth))
             if showLabels and labMo
                 edge.push(edgeLabel(mp, "MO POC (developing)  " + fmt(mp), lcol(cMoPoc), "This month's developing point of control"))
                 edge.push(edgeLabel(mh, "MO VAH (developing)  " + fmt(mh), lcol(cMoVa), "This month's developing value area high"))
@@ -866,3 +871,4 @@ if barstate.islast
 //   price inside S1–R1 77% of 5m bars, 2% of shifts are multi-step gap jumps (NQ, 60 days). Not tested as an edge.
 // • Tested and REMOVED for having no edge: line fades (−0.07R, n=827), line breaks (~0R), VWAP 2σ fades,
 //   OPEX pinning, range-exhaustion fades, first-hour breakout to projection (−0.05R).
+
