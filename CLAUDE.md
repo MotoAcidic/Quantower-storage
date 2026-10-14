@@ -5107,6 +5107,61 @@ output path. Still **NOT YET watched placing a structure-anchored stop/target li
 candle definition in particular is my own interpretation of a one-sentence description and hasn't
 been checked against what the operator actually sees happen on a real chart yet.
 
+### FIX, 2026-10-15, same day — three real live bugs found in quick succession from first-ever runs
+
+The operator ran the structure-based build live and reported, in order: "it just instant sold and
+closed the position within a second" → (log evidence) "said protective stop is missing" → "on the
+next order it placed it worked perfect" → "it placed a take profit but not a stop loss on the next
+order" → "oh never mind it placed a stop loss that is super massive way out of the way that would
+blow the account if it ever reached that" → "it placed it at the other call wall which was a
+massive move away" → a real screenshot: stop ~493 points from a 2-contract MNQ entry, target only
+~57 points away ("the stop loss is wayup there and take profit is super close"). Diagnosed and
+fixed as the trades came in, using the operator's own log lines and a real screenshot as evidence
+rather than guessing — same discipline as every other live-strategy bug in this repo's history.
+
+**Bug 1 — wrong-side stop (instant-close / missing-stop reports)**: three setups (budget-band
+fade, NY IB breakout, Vol-Step fade) only confirmed a bar's HIGH/LOW touching their level, never
+the bar's own CLOSE — so the entry's reference price (`item.Close`) could land on EITHER side of
+the level being used to anchor the stop. A stop requested on the same side as (or too close to) the
+entry is immediately marketable, which is exactly what produced "instant sold and closed within a
+second" directly, and "placed a take profit but not a stop loss" via the async-refusal path (stop
+accepted-then-refused a moment after the target already went through — the SAME failure class
+`finchDomScalpStrategy` hit once before, self-healed here exactly as designed, confirmed by the
+real "said protective stop is missing" log line). Fixed two ways: (a) all three setups' own entry
+conditions now additionally require the CLOSE to confirm the correct side before entering at all,
+not just a wick touch; (b) `ResolveStopPrice` itself now refuses to ever hand back a wrong-side or
+too-close stop regardless of which setup calls it, protecting any future setup too.
+
+**Bug 2 — unbounded target distance**: `ResolveTargetPrice` picked whichever of {nearest untested
+SRM/GEX key level, nearest wickless candle} was CLOSER — but if nothing nearby qualified, "nearest
+of two candidates" still meant "nearest of two candidates that are both far away," reaching all the
+way to e.g. a distant GEX Call Wall. Fixed with a hard ceiling, `MaxTargetDistanceEmDayFraction`
+(default 0.20 × emDay) — a candidate beyond that falls through to the tighter volatility-scaled
+target instead of being used anyway.
+
+**Bug 3 — unbounded stop distance (the screenshot bug)**: the SAME class of bug as Bug 2, just on
+the stop side, and NOT caught by Bug 1's fix — Bug 1 only validated that the stop was on the
+correct side and far enough from entry (a MINIMUM distance check), nothing capped a stop that was
+simply too FAR (a MAXIMUM distance check was never added for stops, only for targets in the same
+pass). A fast-moving bar can satisfy "closed on the correct side of the level" while still closing
+hundreds of points away from it — a big down-wick bar can touch a budget band with its high, then
+close far below, producing a technically-valid-direction but wildly oversized stop. The real
+screenshot showed exactly this: ~493pt stop on a 2-contract MNQ position (~$986 of risk), while the
+target (already capped from Bug 2's fix) sat a sane ~57pts away — the asymmetry itself ("stop loss
+is wayup there and take profit is super close") was the tell. Fixed the same way as Bug 2:
+`MaxStopDistanceEmDayFraction` (default 0.15 × emDay) added to `ResolveStopPrice`.
+
+**`emDay` now threaded through `EnterTrade`** (new parameter, all 12 call sites updated) so both
+`ResolveStopPrice` and `ResolveTargetPrice` can apply their own distance ceiling — it wasn't in
+scope at that layer before this fix.
+
+**Verified 2026-10-15**: same build command as above — 0 errors, 0 warnings across all three fixes.
+Same output path. **Given three distinct real bugs surfaced from the first live runs of the
+structure-based build, the operator was advised directly (not just logged here) to treat this as
+still actively shaking out rather than trustworthy at size** — the underlying pattern (a direction
+check without a matching magnitude check) is exactly the kind of thing that could recur in a
+not-yet-exercised code path.
+
 ---
 
 ## Known gaps (as of the 2026-09-14 reorganization)

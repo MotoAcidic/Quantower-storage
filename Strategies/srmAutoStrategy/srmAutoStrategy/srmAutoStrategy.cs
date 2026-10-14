@@ -239,6 +239,12 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     [InputParameter("Structure: minimum target distance (points, avoids a too-close target)", 100, 0, 100, 0.5, 2)]
     public double MinTargetDistancePoints { get; set; }
 
+    [InputParameter("Structure: maximum target distance (x daily expected move, avoids a too-far target)", 101, 0.05, 3, 0.05, 2)]
+    public double MaxTargetDistanceEmDayFraction { get; set; }
+
+    [InputParameter("Structure: maximum stop distance (x daily expected move, avoids a too-far stop)", 102, 0.02, 2, 0.02, 2)]
+    public double MaxStopDistanceEmDayFraction { get; set; }
+
     public srmAutoStrategy()
     {
         this.Name = "SRM Auto";
@@ -303,6 +309,8 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.StructureLookbackBars = 50;
         this.WicklessTolerancePoints = 0.25;
         this.MinTargetDistancePoints = 5.0;
+        this.MaxTargetDistanceEmDayFraction = 0.20;
+        this.MaxStopDistanceEmDayFraction = 0.15;
     }
 
     // ---- state ---------------------------------------------------------------------------------
@@ -744,12 +752,12 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 
                 if (lvl.IsHigh && item.Close <= lvl.Price - this.NakedLevelTolerancePoints)
                 {
-                    if (this.EnterTrade(Side.Sell, item.Close, lvl.Price, stopDist, targetDist, $"naked {this.srmEngine.PeriodFor(lvl.PeriodKind).Name} H {lvl.Price:0.##} rejection"))
+                    if (this.EnterTrade(Side.Sell, item.Close, lvl.Price, stopDist, targetDist, emDay, $"naked {this.srmEngine.PeriodFor(lvl.PeriodKind).Name} H {lvl.Price:0.##} rejection"))
                         return;
                 }
                 else if (!lvl.IsHigh && item.Close >= lvl.Price + this.NakedLevelTolerancePoints)
                 {
-                    if (this.EnterTrade(Side.Buy, item.Close, lvl.Price, stopDist, targetDist, $"naked {this.srmEngine.PeriodFor(lvl.PeriodKind).Name} L {lvl.Price:0.##} rejection"))
+                    if (this.EnterTrade(Side.Buy, item.Close, lvl.Price, stopDist, targetDist, emDay, $"naked {this.srmEngine.PeriodFor(lvl.PeriodKind).Name} L {lvl.Price:0.##} rejection"))
                         return;
                 }
             }
@@ -757,7 +765,15 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 
         // 2) Session budget-band fade — whichever session is currently active AND enabled for
         // trading (see activeSession above); its own volatility-implied extreme, not NY's
-        // specifically.
+        // specifically. Requires the bar's own CLOSE to have come back inside the band, not just a
+        // wick touch — a mere high/low touch with no close confirmation left the reference price
+        // free to land on either side of the level used for the stop, which is exactly what
+        // produced an immediately-marketable (wrong-side) stop price — operator reports, 2026-10-15:
+        // "it just instant sold and closed the position within a second" / "it placed a take profit
+        // but not a stop loss." The one-shot flag is still consumed on the mere touch, matching the
+        // established "a touch consumes untested status whether or not a trade follows" liquidity-
+        // sweep convention elsewhere in this codebase — only the ENTRY itself now additionally
+        // requires the close confirmation.
         if (this.BudgetFadeEnabled && activeSession is { } sess)
         {
             var upper = sess.OpenPrice + sess.BudgetPts;
@@ -766,35 +782,41 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             if (!this.budgetFadeUpperDone && item.High >= upper)
             {
                 this.budgetFadeUpperDone = true;
-                if (this.EnterTrade(Side.Sell, item.Close, upper, stopDist, targetDist, $"{sess.Name} budget fade upper {upper:0.##}"))
+                if (item.Close <= upper && this.EnterTrade(Side.Sell, item.Close, upper, stopDist, targetDist, emDay, $"{sess.Name} budget fade upper {upper:0.##}"))
                     return;
             }
             else if (!this.budgetFadeLowerDone && item.Low <= lower)
             {
                 this.budgetFadeLowerDone = true;
-                if (this.EnterTrade(Side.Buy, item.Close, lower, stopDist, targetDist, $"{sess.Name} budget fade lower {lower:0.##}"))
+                if (item.Close >= lower && this.EnterTrade(Side.Buy, item.Close, lower, stopDist, targetDist, emDay, $"{sess.Name} budget fade lower {lower:0.##}"))
                     return;
             }
         }
 
-        // 3) NY initial balance breakout — first break each side only.
+        // 3) NY initial balance breakout — first break each side only. Requires the CLOSE to have
+        // confirmed beyond the IB level too (not just a wick) — same reasoning as the budget fade
+        // above, and arguably a better breakout filter anyway (a wick-only break with no close
+        // confirmation isn't much of a breakout).
         if (this.IbBreakoutEnabled && this.srmEngine.IbDone)
         {
             if (!this.ibUpTraded && this.srmEngine.IbBrokenUp)
             {
                 this.ibUpTraded = true;
-                if (this.EnterTrade(Side.Buy, item.Close, this.srmEngine.IbHigh, stopDist, targetDist, $"NY IB breakout up {this.srmEngine.IbHigh:0.##}"))
+                if (this.srmEngine.IbHigh is { } ibH && item.Close > ibH
+                    && this.EnterTrade(Side.Buy, item.Close, ibH, stopDist, targetDist, emDay, $"NY IB breakout up {ibH:0.##}"))
                     return;
             }
             else if (!this.ibDownTraded && this.srmEngine.IbBrokenDn)
             {
                 this.ibDownTraded = true;
-                if (this.EnterTrade(Side.Sell, item.Close, this.srmEngine.IbLow, stopDist, targetDist, $"NY IB breakout down {this.srmEngine.IbLow:0.##}"))
+                if (this.srmEngine.IbLow is { } ibL && item.Close < ibL
+                    && this.EnterTrade(Side.Sell, item.Close, ibL, stopDist, targetDist, emDay, $"NY IB breakout down {ibL:0.##}"))
                     return;
             }
         }
 
-        // 4) Vol-Step Range fade — first touch of R1/S1 per step only.
+        // 4) Vol-Step Range fade — first touch of R1/S1 per step only. Same close-confirmation
+        // requirement as budget fade/IB breakout above.
         if (this.VolStepFadeEnabled && this.srmEngine.VsMid is { } vsMid && this.srmEngine.VsHalf is { } vsHalf)
         {
             var r1 = vsMid + vsHalf;
@@ -803,13 +825,13 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             if (!this.volStepUpTraded && item.High >= r1)
             {
                 this.volStepUpTraded = true;
-                if (this.EnterTrade(Side.Sell, item.Close, r1, stopDist, targetDist, $"Vol-Step fade R1 {r1:0.##}"))
+                if (item.Close <= r1 && this.EnterTrade(Side.Sell, item.Close, r1, stopDist, targetDist, emDay, $"Vol-Step fade R1 {r1:0.##}"))
                     return;
             }
             else if (!this.volStepDownTraded && item.Low <= s1)
             {
                 this.volStepDownTraded = true;
-                if (this.EnterTrade(Side.Buy, item.Close, s1, stopDist, targetDist, $"Vol-Step fade S1 {s1:0.##}"))
+                if (item.Close >= s1 && this.EnterTrade(Side.Buy, item.Close, s1, stopDist, targetDist, emDay, $"Vol-Step fade S1 {s1:0.##}"))
                     return;
             }
         }
@@ -832,7 +854,7 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
                 if (!this.callWallTraded && item.High >= callWall && item.Close <= callWall - this.GexWallTolerancePoints)
                 {
                     this.callWallTraded = true;
-                    if (this.EnterTrade(Side.Sell, item.Close, callWall, stopDist, targetDist, $"GEX Call Wall fade {callWall:0.##}"))
+                    if (this.EnterTrade(Side.Sell, item.Close, callWall, stopDist, targetDist, emDay, $"GEX Call Wall fade {callWall:0.##}"))
                         return;
                 }
             }
@@ -845,7 +867,7 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
                 if (!this.putWallTraded && item.Low <= putWall && item.Close >= putWall + this.GexWallTolerancePoints)
                 {
                     this.putWallTraded = true;
-                    if (this.EnterTrade(Side.Buy, item.Close, putWall, stopDist, targetDist, $"GEX Put Wall fade {putWall:0.##}"))
+                    if (this.EnterTrade(Side.Buy, item.Close, putWall, stopDist, targetDist, emDay, $"GEX Put Wall fade {putWall:0.##}"))
                         return;
                 }
             }
@@ -858,7 +880,7 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
                 var nowAbove = item.Close > zeroGamma;
                 if (this.zgWasAbove is { } wasAbove && wasAbove != nowAbove)
                 {
-                    if (this.EnterTrade(nowAbove ? Side.Buy : Side.Sell, item.Close, zeroGamma, stopDist, targetDist, $"GEX Zero Gamma cross {(nowAbove ? "up" : "down")} {zeroGamma:0.##}"))
+                    if (this.EnterTrade(nowAbove ? Side.Buy : Side.Sell, item.Close, zeroGamma, stopDist, targetDist, emDay, $"GEX Zero Gamma cross {(nowAbove ? "up" : "down")} {zeroGamma:0.##}"))
                     {
                         this.zgWasAbove = nowAbove;
                         return;
@@ -880,7 +902,7 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
                     // No structural invalidation level for a distance-based pull — null falls
                     // through to the volatility-scaled stop. The target naturally resolves to the
                     // magnet itself anyway: TryFindKeyLevelTarget already considers it a candidate.
-                    if (this.EnterTrade(side, item.Close, null, stopDist, targetDist, $"GEX Magnet pull toward {magnet:0.##}"))
+                    if (this.EnterTrade(side, item.Close, null, stopDist, targetDist, emDay, $"GEX Magnet pull toward {magnet:0.##}"))
                         return;
                 }
             }
@@ -906,12 +928,44 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     // ---- entry / protective orders ---------------------------------------------------------------
 
     /// <summary>Stop beyond the structural level that invalidates the trade (plus a small buffer),
-    /// falling back to the volatility-scaled distance when structure mode is off or there's no
-    /// level for this particular setup (GEX Magnet pull).</summary>
-    private double ResolveStopPrice(bool isLong, double? structureLevel, double referencePrice, double fallbackDist)
+    /// falling back to the volatility-scaled distance when structure mode is off, there's no level
+    /// for this particular setup (GEX Magnet pull), or the structural stop would land on the WRONG
+    /// side of the entry (or too close to it).
+    ///
+    /// That last case is a real one, not theoretical: three setups (budget-band fade, NY IB
+    /// breakout, Vol-Step fade) only confirmed a WICK touching their level, not the bar's own
+    /// CLOSE — so the entry's own reference price could land on either side of the level being used
+    /// for the stop. A stop requested on the same side as (or too close to) the entry is
+    /// immediately marketable and gets refused/instantly closed — operator report, 2026-10-15: "it
+    /// just instant sold and closed the position within a second," confirmed via the real log line
+    /// ("said protective stop is missing") matching this exact failure mode in
+    /// RepairMissingProtectiveOrders. Fixed at BOTH ends: this method now refuses to ever hand back
+    /// a wrong-side/too-close stop regardless of which setup calls it (protects any future setup
+    /// too), AND the three vulnerable setups themselves were tightened to require a close
+    /// confirmation before entering at all (see each one's own entry condition below) — so this
+    /// fallback should rarely even need to fire going forward.
+    ///
+    /// SECOND BUG, same day, caught from a live screenshot: that minimum-distance check above
+    /// only ever caught a stop on the WRONG side or too CLOSE — nothing capped a stop that was
+    /// simply too FAR. A fast-moving bar can satisfy "closed on the correct side of the level"
+    /// (the fix above) while still closing hundreds of points away from it (e.g. a big down-wick
+    /// bar touches the budget band with its high, then closes far below) — the close-confirmation
+    /// fix guaranteed DIRECTION, never MAGNITUDE. Operator: "it did it again look" + a real
+    /// screenshot showing a stop ~493 points from entry (a ~2-contract MNQ position, visibly
+    /// "the stop loss is wayup there and take profit is super close" — the target already had this
+    /// same cap from the PRIOR fix this same conversation, the stop never did). Now capped the same
+    /// way, via <see cref="MaxStopDistanceEmDayFraction"/> × emDay.</summary>
+    private double ResolveStopPrice(bool isLong, double? structureLevel, double referencePrice, double fallbackDist, double emDay)
     {
         if (this.UseStructureStops && structureLevel is { } level && level > 0)
-            return isLong ? level - this.StructureStopBufferPoints : level + this.StructureStopBufferPoints;
+        {
+            var structureStop = isLong ? level - this.StructureStopBufferPoints : level + this.StructureStopBufferPoints;
+            var distance = isLong ? referencePrice - structureStop : structureStop - referencePrice;
+            var maxDistance = emDay * this.MaxStopDistanceEmDayFraction;
+
+            if (distance >= this.StructureStopBufferPoints && distance <= maxDistance)
+                return structureStop;
+        }
 
         return isLong ? referencePrice - fallbackDist : referencePrice + fallbackDist;
     }
@@ -920,14 +974,25 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     /// level) or wickless-candle extreme beyond the entry in the trade's own favorable direction —
     /// whichever of the two is CLOSER (same "nearest, not farthest" convention mesOrbStrategy's own
     /// opposing-level targeting already uses). Falls back to the volatility-scaled distance when
-    /// structure mode is off, nothing qualifies, or the nearest candidate is too close to be worth
-    /// targeting (<see cref="MinTargetDistancePoints"/>).</summary>
-    private double ResolveTargetPrice(bool isLong, double referencePrice, double fallbackDist)
+    /// structure mode is off, nothing qualifies, the nearest candidate is too close to be worth
+    /// targeting (<see cref="MinTargetDistancePoints"/>), OR — operator report, 2026-10-15: "it
+    /// placed it at the other call wall which was a massive move away" — the nearest candidate is
+    /// too FAR to be a realistic intraday target (<see cref="MaxTargetDistanceEmDayFraction"/> ×
+    /// `emDay`). Both sources are genuinely unbounded in how far away they can sit: a GEX wall or a
+    /// week/month naked level can easily be hundreds of points off, and the wickless-candle scanner
+    /// only looks within <see cref="StructureLookbackBars"/> bars but places no ceiling on price
+    /// DISTANCE within that window. Without this cap, "nearest of two candidates" can still mean
+    /// "nearest of two candidates that are both far away" whenever nothing closer exists — this
+    /// stops that from producing an unrealistic target instead of just admitting nothing nearby
+    /// qualifies.</summary>
+    private double ResolveTargetPrice(bool isLong, double referencePrice, double fallbackDist, double emDay)
     {
+        var maxDistance = emDay * this.MaxTargetDistanceEmDayFraction;
+
         if (this.UseStructureTargets)
         {
-            var haveKey = this.TryFindKeyLevelTarget(isLong, referencePrice, out var keyTarget);
-            var haveWickless = this.TryFindWicklessTarget(isLong, referencePrice, out var wicklessTarget);
+            var haveKey = this.TryFindKeyLevelTarget(isLong, referencePrice, out var keyTarget) && Math.Abs(keyTarget - referencePrice) <= maxDistance;
+            var haveWickless = this.TryFindWicklessTarget(isLong, referencePrice, out var wicklessTarget) && Math.Abs(wicklessTarget - referencePrice) <= maxDistance;
 
             double? chosen = (haveKey, haveWickless) switch
             {
@@ -1027,7 +1092,7 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     /// volatility-scaled distances used only when structure mode is off or no suitable
     /// level/wickless candle is found — see <see cref="ResolveStopPrice"/>/<see cref="ResolveTargetPrice"/>.
     /// </summary>
-    private bool EnterTrade(Side side, double referencePrice, double? structureLevel, double stopFallbackDist, double targetFallbackDist, string reason)
+    private bool EnterTrade(Side side, double referencePrice, double? structureLevel, double stopFallbackDist, double targetFallbackDist, double emDay, string reason)
     {
         if (this.CurrentSymbol is null || this.CurrentAccount is null) return false;
         if (this.MyPositions().Length > 0) return false;
@@ -1037,8 +1102,8 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         if (tickSize <= 0) return false;
 
         var isLong = side == Side.Buy;
-        this.pendingStopPrice = this.ResolveStopPrice(isLong, structureLevel, referencePrice, stopFallbackDist);
-        this.pendingTargetPrice = this.ResolveTargetPrice(isLong, referencePrice, targetFallbackDist);
+        this.pendingStopPrice = this.ResolveStopPrice(isLong, structureLevel, referencePrice, stopFallbackDist, emDay);
+        this.pendingTargetPrice = this.ResolveTargetPrice(isLong, referencePrice, targetFallbackDist, emDay);
 
         var result = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
         {
