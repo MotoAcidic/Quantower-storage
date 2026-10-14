@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Platforms>AnyCPU</Platforms>
+    <AlgoType>Strategy</AlgoType>
+    <AssemblyName>srmAutoStrategy</AssemblyName>
+    <RootNamespace>srmAutoStrategy</RootNamespace>
+    <StartAction>Program</StartAction>
+    <!-- CONFIRM against whatever's under C:\Quantower\TradingPlatform\ on the machine actually
+         building; Quantower auto-updates itself with no warning (see Quantower-storage/CLAUDE.md).
+         Verified v1.147.6 at creation time, 2026-10-14. Keep this AND the Reference HintPath below
+         in sync. -->
+    <StartProgram>C:\Quantower\TradingPlatform\v1.147.6\Console.StarterNew.exe</StartProgram>
+    <StartArguments>--address 127.0.0.1 --port 62744</StartArguments>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+     <OutputPath>C:\Quantower\Settings\Scripts\Strategies\srmAutoStrategy</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+     <OutputPath>C:\Quantower\Settings\Scripts\Strategies\srmAutoStrategy</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>C:\Quantower\TradingPlatform\v1.147.6\bin\TradingPlatform.BusinessLayer.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Reaches into Finch-Lite's own folder for the Session Range Map engine — Finch-Lite is the
+         older/foundational artifact here (same direction oceansStackStrategy already reaches into
+         Finch-Lite for TickClassifier.cs), so this strategy pulls from it, not the other way
+         around. A frozen snapshot as of this strategy's own last build: a later tuning change to
+         SrmEngine.cs inside Finch-Lite does not reach this strategy until rebuilt — same accepted
+         tradeoff already documented for every other cross-project <Compile Include> in this repo. -->
+    <Compile Include="..\..\..\Indicators\Finch-Lite\src\Finch.Lite.Indicator\SrmEngine.cs" />
+    <Compile Include="..\..\..\Indicators\Finch-Lite\src\Finch.Lite.Indicator\CboeIndexClient.cs" />
+    <!-- Reaches into LevelsMap's own folder for the live GEX engine, same direction/reasoning as
+         the Finch-Lite reach above (LevelsMap is older than this strategy too). -->
+    <Compile Include="..\..\..\Indicators\LevelsMap\src\LevelsMap.Indicator\GexEngine.cs" />
+    <Compile Include="..\..\..\Indicators\LevelsMap\src\LevelsMap.Indicator\CboeOptionsClient.cs" />
+  </ItemGroup>
+</Project>

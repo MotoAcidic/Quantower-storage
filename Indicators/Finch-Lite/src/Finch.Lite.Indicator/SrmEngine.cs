@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
+using TradingPlatform.BusinessLayer;
 
 namespace FinchLite;
 
@@ -417,6 +419,36 @@ internal sealed class SrmEngine
         this.Ny.ForceInactive();
         this.Week.ForceInactive();
         this.Month.ForceInactive();
+    }
+
+    /// <summary>Prior day close + ATR(14), recomputed fresh from the whole held daily series each
+    /// call — cheap (the lookback is a few dozen bars), so no incremental rolling-window state is
+    /// worth the complexity. Shared by `FinchLiteIndicator`'s own `DrainSrm` and any strategy
+    /// built on this engine (e.g. `srmAutoStrategy`) rather than duplicated in each.</summary>
+    public static bool TryComputeDailyVolInputs(HistoricalData daily, out double priorClose, out double atr14)
+    {
+        priorClose = 0;
+        atr14 = 0;
+
+        var closedUpTo = daily.Count - 1; // exclude the still-forming day
+        if (closedUpTo < 1) return false;
+        if (daily[closedUpTo - 1, SeekOriginHistory.Begin] is not HistoryItemBar priorBar) return false;
+
+        priorClose = priorBar.Close;
+
+        var trs = new List<double>();
+        var start = Math.Max(1, closedUpTo - 14);
+        for (var i = start; i < closedUpTo; i++)
+        {
+            if (daily[i, SeekOriginHistory.Begin] is not HistoryItemBar bar) continue;
+            if (daily[i - 1, SeekOriginHistory.Begin] is not HistoryItemBar prevBar) continue;
+
+            var tr = Math.Max(bar.High - bar.Low, Math.Max(Math.Abs(bar.High - prevBar.Close), Math.Abs(bar.Low - prevBar.Close)));
+            trs.Add(tr);
+        }
+
+        if (trs.Count > 0) atr14 = trs.Average();
+        return true;
     }
 
     public void SetVolatility(double? prevClose, double? impliedVolIndex, double? vix, double? vix3m, double atrFallback)

@@ -4880,6 +4880,235 @@ This documentation should be updated whenever strategy logic or parameters are m
 
 ---
 
+## `srmAutoStrategy` — Session Range Map auto-trader, added 2026-10-14
+
+**Files**: `Strategies/srmAutoStrategy/srmAutoStrategy/srmAutoStrategy.csproj`, `srmAutoStrategy.cs`.
+
+The operator, after confirming the Session Range Map port into Finch-Lite was working well: "based
+on these levels we need to make a strategy to auto trade for me because i get to emotional when
+trading them." Given the real-money stakes, scoped via `AskUserQuestion` BEFORE writing any code
+(four questions: which setup, stop/target style, sizing, sessions) rather than guessing at a trade
+thesis on the operator's behalf. Answers: **"its trading all of those"** (all four setup options
+offered, not just one), **volatility-scaled** stop/target, **fixed contract count** (not
+account-balance-based risk), **NY only**.
+
+### The four setups (checked in this fixed order each bar; first match wins — see below)
+
+1. **Naked level reaction** — any session/weekly/monthly level (from `SrmEngine.NakedLevels`) that
+   the CURRENT bar just invalidated (`TouchedUtc == thisBar.TimeLeft`) AND the bar's own close
+   confirms a rejection (closed back away from the level by `NakedLevelTolerancePoints`, not through
+   it) — enters in the rejection direction.
+2. **Session budget-band fade** — NY session's own volatility-implied budget band (`Ny.OpenPrice ±
+   Ny.BudgetPts`) touched for the first time this session — fades back toward the session.
+3. **NY initial balance breakout** — first break of the NY first-hour high/low each side (reusing
+   `SrmEngine`'s own `IbDone`/`IbBrokenUp`/`IbBrokenDn`) — trades WITH the break.
+4. **Vol-Step Range fade** — first touch of R1/S1 (implied-move mode only, same limitation
+   `SrmEngine.VsMid`/`VsHalf` themselves carry) since the last step shift — fades back toward the
+   Vol-Step midpoint.
+
+**Signal-priority decision made here, NOT asked for**: only ONE position open at a time across all
+four setups combined (same "never more than one position open at once" discipline as every other
+strategy in this codebase). Naked-level reaction and budget-band fade are both MEAN-REVERSION
+theses; NY IB breakout is a CONTINUATION thesis — these can disagree on direction on the very same
+bar. Resolved by fixed check order (naked level -> budget fade -> IB breakout -> Vol-Step fade), not
+independent position slots per setup. Flagged honestly as a scoping choice, not something the
+operator chose themselves — worth revisiting if the mix of theses turns out to matter in practice.
+
+**Stop/target**: uniformly `referencePrice -/+ (emDay × fraction)` for every setup
+(`StopFractionOfEmDay`=0.25, `TargetFractionOfEmDay`=0.5 defaults, 2:1 reward:risk) — the operator
+chose "volatility-scaled" over "opposite SRM level" in the scoping questions, applied consistently
+rather than mixing a level-anchored stop in for setups where that might arguably read sounder.
+
+### Engineering — nothing here is new territory, all carried over from proven strategies
+
+- **`SrmEngine`/`CboeIndexClient` reused, not duplicated**, via `<Compile Include>` reaching into
+  `Indicators/Finch-Lite/src/Finch.Lite.Indicator/` (Finch-Lite is the older/foundational artifact
+  here, same direction `oceansStackStrategy` already reaches into Finch-Lite for
+  `TickClassifier.cs`). `SrmEngine.TryComputeDailyVolInputs` was promoted from a private method
+  inside `FinchLiteIndicator.cs` to a public static method on `SrmEngine` itself specifically so
+  this strategy could share it instead of duplicating — the indicator's own `DrainSrm` now calls the
+  shared version too (verified the indicator still builds clean after the move).
+- **`BusinessObjectState.Fake` symbol/account re-resolution** at the very top of `OnRun`, before
+  anything else — the root-cause fix `mesOrbStrategy` needed after a real silent-stall incident,
+  applied here from the start rather than risking the same bug on a strategy built fresh.
+- **Order-placement safety carried over verbatim from mesOrbStrategy/finchDomScalpStrategy**:
+  separate stop/target orders (never a bracket), tick-rounded (`Math.Round(price / tickSize,
+  MidpointRounding.AwayFromZero) * tickSize`) immediately before either reaches the broker, an
+  ADOPTED position (this instance didn't open it — e.g. after a restart) gets a fallback
+  volatility-scaled stop/target from its real fill instead of a zeroed default, an async order
+  refusal self-heals via `Core_OrdersHistoryAdded` → `RepairMissingProtectiveOrders` (missing target
+  re-placed, missing stop closes the position immediately — this strategy never knowingly runs with
+  no stop at all).
+- **Daily-loss/account-floor risk limits**, checked against the REAL broker-reported
+  `Account.Balance`, persisted to `srm_auto_daily_risk_state.txt` so they survive a mid-session
+  restart — `MaxDailyLoss`/`AccountBalanceFloor` InputParameters, both default to 0 (off). This
+  directly serves the operator's own stated reason for wanting this strategy at all ("i get too
+  emotional") — **strongly worth turning on** given that motivation; defaulted off only to match
+  every other strategy's own convention of not assuming a dollar figure on the operator's behalf.
+- **Heartbeat** every 5 minutes (`[Heartbeat]` log line: EmDay, regime, NY session status, naked
+  level count, in-position flag) — same diagnostic discipline as `mesOrbStrategy`'s own, added from
+  the start rather than after a real "strategy went silent with no trace" incident forces it later.
+- **Historical replay on startup**: `SrmEngine` needs ~`SrmDailyLookbackDays` (default 40) worth of
+  1-minute bars to correctly reconstruct the CURRENT week/month's own budget and naked levels, not
+  just today's session — so `OnRun` feeds the whole fetched history through the engine once, with
+  signal evaluation explicitly OFF, before switching to live bars. Needs a synchronous CBOE
+  volatility fetch to succeed first (`EmDay` must be non-null or every `FeedBar` call is a no-op) —
+  if that one-time fetch fails, the replay silently does nothing and week/month reconstruction from
+  before the recurring volatility timer's first later success would be incomplete. Narrow, rare
+  edge case, documented rather than specially handled.
+
+### NOT YET in this build
+
+Per-setup stop/target overrides (all four currently share ONE fraction pair), naked-level stacking,
+Vol-Step "ATR classic" mode, independent concurrent positions per setup, and — critically — **any
+live or paper verification at all**. This compiled clean on the first build attempt, but that is a
+compiler check, not a trading check; nothing about entry timing, the four-setups-sharing-one-slot
+interaction, or the replay-then-live handoff has been watched running against a real or simulated
+feed yet.
+
+**Verified 2026-10-14**: `dotnet build srmAutoStrategy/srmAutoStrategy.csproj -c Release` — 0
+errors (pre-existing CS8632 nullable-annotation warnings only, same as every other file in this
+repo). Strategy projects build directly to their own `OutputPath`
+(`C:\Quantower\Settings\Scripts\Strategies\srmAutoStrategy\`) — no manual DLL copy step the way
+indicators need. **NOT YET run, paper or live** — this is a brand-new strategy carrying real
+automated order placement and has not been watched executing a single trade yet.
+
+### FEATURE, same day — live GEX levels added as 4 more setups
+
+Operator, after confirming the strategy only used Finch-Lite's SRM engine and NOT `LevelsMap`:
+"i need it to trade off those gex levels as well but dont want to paste them" — the live,
+CBOE-auto-fetched GEX feature specifically (Zero Gamma/Call Wall/Put Wall/Magnet), not the manual
+paste box. Scoped via `AskUserQuestion` first (which levels, which underlying, same or different
+stop/target) since Zero Gamma and Magnet don't have an obvious "fade" interpretation the way Call
+Wall/Put Wall do. Answers: **all four**, **QQQ**, **same volatility-scaled stop/target** as the
+other four setups.
+
+**`GexEngine.cs`/`CboeOptionsClient.cs` reused, not duplicated**, via another `<Compile Include>`
+reaching into `Indicators/LevelsMap/src/LevelsMap.Indicator/` (same older-artifact direction as the
+Finch-Lite reach above). Now **8 setups total**, checked in this fixed order, still only one
+position at a time: naked level → budget fade → IB breakout → Vol-Step fade → GEX Call Wall fade →
+GEX Put Wall fade → GEX Zero Gamma cross → GEX Magnet pull.
+
+**Four genuinely different mechanics for the four GEX levels** — NOT one shape forced onto all of
+them, a deliberate design choice made here rather than asked for:
+- **Call Wall / Put Wall**: touch-and-reject, same shape as the naked-level setup — these behave
+  like conventional dealer-hedging support/resistance.
+- **Zero Gamma**: a regime flip, not a bounce level — traded as CROSS-and-CONTINUE with the new
+  regime's own direction (price crosses above ZG → long; below → short), not faded.
+- **Magnet**: pulls price toward it from a distance rather than reacting when touched — traded as
+  "price is far enough away (`GexMagnetTriggerDistancePoints`), bet on drift toward it," direction
+  determined by which side of the magnet price currently sits on.
+
+**Ratio jitter bug avoided by construction, not retrofitted**: `LevelsMap` itself shipped with (and
+later fixed, 2026-10-12) a bug where the QQQ/SPY→chart ratio was recomputed every poll tick from a
+live chart price paired against a stale reference price, causing visible drift. This strategy's own
+`OnGexTimer` samples `this.CurrentSymbol.Last` in the SAME callback as the GEX chain fetch, so the
+two are always from the same instant — the bug never had a chance to exist here.
+
+**11 new InputParameters** (indices 80-90): GEX enable/underlying/max-days/refresh-interval/
+risk-free-rate, per-setup enable toggles (Call Wall/Put Wall/Zero Gamma/Magnet), wall touch
+tolerance, Magnet trigger distance. Heartbeat log extended with a GEX summary line (ZG/CW/PW/Magnet,
+converted to chart price).
+
+**Verified 2026-10-14**: same build command as above — 0 errors, 0 warnings, first attempt. Same
+output path. **NOT YET run, paper or live** — same caveat as the base strategy above, now with twice
+the signal surface to watch before trusting any of it.
+
+### FEATURE, 2026-10-15 — per-session trading toggles (Asia/London/NY independently)
+
+Operator: "i would like to work in asia as well is that possible." The strategy had a single
+`NySessionOnly` bool — off meant 24/7 (all three sessions, no real control), on meant NY only, with
+no way to add Asia specifically. Replaced with three independent toggles: `TradeAsiaSession`
+(default off), `TradeLondonSession` (default off), `TradeNySession` (default on, preserving the
+strategy's prior default behavior unless the operator opts into more).
+
+**Found and fixed in the same pass**: the session budget-band fade setup was hardcoded to
+`this.srmEngine.Ny` specifically — turning Asia on alone wouldn't have actually given it anything to
+fade, since that setup never looked at Asia's own budget at all. Generalized to trade whichever
+session is BOTH currently active AND enabled via its own toggle (`activeSession`, checked
+Asia → London → NY in that order), using that session's own `OpenPrice`/`BudgetPts` and labelling
+the log/signal reason with that session's own name instead of a hardcoded "NY". NY initial balance
+breakout stays NY-specific on purpose (an "initial balance" is by definition the first hour of a
+named session — Asia/London don't have an equivalent concept in this engine) — its own one-shot
+reset still keys off `Ny.StartUtc` specifically, now tracked in a separate field from the
+budget-fade's own more general `lastActiveSessionStartUtc`.
+
+**Verified 2026-10-15**: same build command as above — 0 errors, 0 warnings. Same output path. Still
+**NOT YET run, paper or live**.
+
+### FIX, 2026-10-15 — first real trade feedback: stop/target way too wide
+
+Operator ran it live for the first time: "it also never placed stop loss and take profits" then,
+moments later, "oh nevermind it did but they are massive." Both halves resolved to the same root
+cause: the protective orders WERE being placed correctly (no actual order-placement bug), but
+`StopFractionOfEmDay`/`TargetFractionOfEmDay` defaulted to 0.25/0.5 — a quarter and a half of the
+FULL DAILY expected move (`emDay`, ~400 points on MNQ at the vol seen that session), not a sensible
+intraday reaction size. That produced a ~100pt stop / ~200pt target on every single trade, which
+read as either "nothing placed" (easy to miss amid a stop/target that wide relative to the chart) or
+"massive" once actually spotted. Tightened both defaults by 5x, same 2:1 ratio kept:
+`StopFractionOfEmDay` 0.25 → **0.05**, `TargetFractionOfEmDay` 0.5 → **0.10** (now ~20pt stop / ~40pt
+target at that same volatility). Still fully adjustable per-operator via the InputParameters
+themselves — this is a DEFAULT change only, and (same caveat as every other default change in this
+file) does NOT retroactively update an already-saved, already-running instance's own configured
+values; the operator needs to manually set "Stop = x daily expected move" / "Target = x daily
+expected move" to 0.05/0.10 (or whatever they actually want) in the strategy's own settings panel,
+not just restart it. **Verified 2026-10-15**: same build command as above — 0 errors, 0 warnings.
+Same output path.
+
+### FEATURE, 2026-10-15, same thread — structure-based stop/target (replaces pure volatility scaling)
+
+Operator, right after the stop/target sizing fix above: "it should be looking at the structure of
+the candles and going on if it breaks this structure we are not going in that direction for the
+stop loss and target like wickless candles for take profits or other key levels." A real redesign,
+not a tuning tweak — `StopFractionOfEmDay`/`TargetFractionOfEmDay` are now only the FALLBACK, used
+when structure mode is off or nothing qualifies, not the primary sizing.
+
+**Stop = the specific level that invalidates each setup's own thesis, ± a small buffer**
+(`StructureStopBufferPoints`, default 2pts) — computed PER-SETUP, not generically:
+- Naked level / GEX Call Wall / Put Wall / Vol-Step R1-S1: the level just rejected/faded itself.
+- Budget-band fade: the budget band price just touched.
+- NY IB breakout: the IB side that was just broken (stop back inside the range — a re-entry
+  invalidates the breakout).
+- GEX Zero Gamma cross: Zero Gamma itself (crossing back invalidates the regime-change thesis).
+- GEX Magnet pull: NO natural invalidation level (it's a distance bet, not a level reaction) — this
+  ONE setup still always uses the volatility-scaled stop, by design, not an oversight.
+
+**Target = nearest "key level" or wickless-candle extreme beyond entry, whichever is CLOSER**
+(same "nearest, not farthest" convention `mesOrbStrategy`'s own opposing-level targeting already
+uses) — `ResolveTargetPrice` tries two independent sources and picks the nearer:
+- `TryFindKeyLevelTarget`: nearest untested SRM naked level, session POC/VAH/VAL, or live GEX level
+  (Call Wall/Put Wall/Zero Gamma/Magnet) beyond entry in the favorable direction. (This is also why
+  GEX Magnet pull's own TARGET still naturally lands on the magnet itself with no special-casing —
+  it's already a candidate in this same list.)
+- `TryFindWicklessTarget`: operator's own term for a candle with no wick at all on the relevant side
+  (within `WicklessTolerancePoints`, default 0.25pt) — "a clean, one-directional move with no
+  rejection recorded at that exact price" (my own interpretation, stated plainly since the operator
+  didn't define it more precisely than the one sentence quoted above — correct me if this isn't
+  what was meant). Searches back up to `StructureLookbackBars` (default 50) CLOSED chart bars for
+  the nearest qualifying candle's own extreme beyond entry.
+- Either source failing, or the nearest candidate sitting closer than `MinTargetDistancePoints`
+  (default 5pt — avoids a target too close to be worth entering for), falls through to the
+  volatility-scaled distance.
+
+**`EnterTrade`'s own signature changed** from `(side, referencePrice, stopDistance, targetDistance,
+reason)` to `(side, referencePrice, structureLevel, stopFallbackDist, targetFallbackDist, reason)` —
+every one of the (now 12) call sites across all 8 setups updated to pass its own setup-specific
+structural level (or `null` for Magnet pull) instead of a precomputed distance; `ResolveStopPrice`/
+`ResolveTargetPrice` do the actual resolution+fallback internally so each call site stays a
+one-liner.
+
+**New InputParameters** (indices 95-100): `UseStructureStops`/`UseStructureTargets` (master
+on/off toggles, both default ON — set either off to go back to pure volatility-scaled sizing
+without reverting any code), `StructureStopBufferPoints`, `StructureLookbackBars`,
+`WicklessTolerancePoints`, `MinTargetDistancePoints`.
+
+**Verified 2026-10-15**: same build command as above — 0 errors, 0 warnings, first attempt. Same
+output path. Still **NOT YET watched placing a structure-anchored stop/target live** — the wickless-
+candle definition in particular is my own interpretation of a one-sentence description and hasn't
+been checked against what the operator actually sees happen on a real chart yet.
+
+---
+
 ## Known gaps (as of the 2026-09-14 reorganization)
 
 - **`README.md` is stale** - it documents 8 strategies in user-facing parameter-table form
