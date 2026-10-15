@@ -174,6 +174,15 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     [InputParameter("Account balance floor ($, sticky, 0 = off)", 61, 0, 1000000, 1, 2)]
     public double AccountBalanceFloor { get; set; }
 
+    /// <summary>FOUND 2026-10-15, operator, with real log numbers worked out: "it seems like every
+    /// single time it enters off gex magnet or ib breakout its always in drawdown right away and
+    /// the risk to reward is massive in negative rr." A real trade was 14.75pts reward against
+    /// 69.25pts risk (≈1:4.7 against). Checked in <see cref="EnterTrade"/> for EVERY setup, not
+    /// just the two named — rejects a trade before it's ever placed if the resolved reward:risk
+    /// ratio falls below this.</summary>
+    [InputParameter("Minimum reward:risk ratio (0 = off)", 62, 0, 5, 0.1, 2)]
+    public double MinRewardToRiskRatio { get; set; }
+
     [InputParameter("Poll interval (ms)", 70, 100, 5000, 50, 0)]
     public int PollIntervalMs { get; set; }
 
@@ -222,6 +231,15 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     /// means something significant again.</summary>
     [InputParameter("GEX: Magnet trigger distance (x daily expected move)", 90, 0.02, 2, 0.02, 2)]
     public double GexMagnetTriggerDistanceEmDayFraction { get; set; }
+
+    /// <summary>FOUND 2026-10-15, operator: "the gex magenet pull trades seem to be very bad on
+    /// the rr and never really work out... soon as we enter we are in crazy draw down." Magnet pull
+    /// was the only one of the 8 setups with no reaction confirmation at all — see the entry
+    /// condition's own doc comment for the full diagnosis. This is how much the bar must close back
+    /// from its own extreme (toward the magnet) before that extreme counts as a real rejection
+    /// rather than just a wick on an otherwise-trending bar.</summary>
+    [InputParameter("GEX: Magnet rejection confirmation (points)", 91, 0, 50, 0.5, 2)]
+    public double GexMagnetRejectionPoints { get; set; }
 
     // ---- structure-based stop/target (operator's own ask, 2026-10-15: "it should be looking at
     // the structure of the candles and going on if it breaks this structure we are not going in
@@ -335,6 +353,7 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.ValueAreaPercent = 70;
         this.MaxDailyLoss = 0;
         this.AccountBalanceFloor = 0;
+        this.MinRewardToRiskRatio = 1.0;
         this.PollIntervalMs = 1000;
 
         this.GexEnabled = true;
@@ -348,6 +367,7 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.MagnetPullEnabled = true;
         this.GexWallTolerancePoints = 1.0;
         this.GexMagnetTriggerDistanceEmDayFraction = 0.35;
+        this.GexMagnetRejectionPoints = 3.0;
 
         this.UseStructureStops = true;
         this.StructureStopBufferPoints = 2.0;
@@ -760,24 +780,80 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.Log($"[Order] trailing stop moved to {candidateStop:0.##} (best price {this.openBestPrice:0.##}).", StrategyLoggingLevel.Trading);
     }
 
+    /// <summary>Expanded 2026-10-15, operator: "i turned off the gex magnet in the settings and it
+    /// hasnt entered anything and there is no logs other than heartbeat." The old heartbeat only
+    /// showed raw level VALUES, not how close current price actually is to any of them — leaving no
+    /// way to tell "nothing has happened yet" (several of the 8 setups are deliberately strict —
+    /// e.g. budget fade needs price to reach ~90% of the FULL daily expected move) apart from a real
+    /// silent bug. Now reports every live level ALONGSIDE its own distance from current price, so
+    /// that distinction is visible without guessing or another round of log screenshots.</summary>
     private void MaybeLogHeartbeat()
     {
         var now = Core.TimeUtils.DateTimeUtcNow;
         if (now - this.lastHeartbeatUtc < TimeSpan.FromMinutes(HeartbeatIntervalMinutes)) return;
         this.lastHeartbeatUtc = now;
 
-        var ny = this.srmEngine.Ny;
-        var nyStatus = ny.Active ? $"active, budget={ny.BudgetPts:0.##}, high={ny.High:0.##}, low={ny.Low:0.##}" : "not active";
-        var gexStatus = this.GexEnabled
-            ? (this.gexResult is { } gex && this.gexRatio is { } ratio
-                ? $"ZG={gex.FullChain.ZeroGamma * ratio:0.##} CW={gex.FullChain.CallWall * ratio:0.##} PW={gex.FullChain.PutWall * ratio:0.##} Magnet={gex.FullChain.Magnet * ratio:0.##}"
-                : "waiting for first fetch")
-            : "disabled";
-        this.Log(
-            $"[Heartbeat] still polling. EmDay={this.srmEngine.EmDay:0.##} Expanded={this.srmEngine.Expanded} "
-            + $"NY session: {nyStatus}. Naked levels tracked: {this.srmEngine.NakedLevels.Count}. "
-            + $"GEX: {gexStatus}. In position: {this.MyPositions().Length > 0}.",
-            StrategyLoggingLevel.Trading);
+        var last = this.CurrentSymbol?.Last ?? 0;
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"[Heartbeat] price={last:0.##} EmDay={this.srmEngine.EmDay:0.##} Expanded={this.srmEngine.Expanded}. ");
+
+        void AddSession(string name, SrmPeriod p, bool enabled)
+        {
+            if (!enabled) { sb.Append($"{name}=off. "); return; }
+            if (!p.Active) { sb.Append($"{name}=not active. "); return; }
+            var upper = p.OpenPrice + p.BudgetPts;
+            var lower = p.OpenPrice - p.BudgetPts;
+            sb.Append($"{name} budget[{lower:0.##}..{upper:0.##}] (Δupper={upper - last:0.##}, Δlower={last - lower:0.##}). ");
+        }
+
+        AddSession("Asia", this.srmEngine.Asia, this.TradeAsiaSession);
+        AddSession("London", this.srmEngine.London, this.TradeLondonSession);
+        AddSession("NY", this.srmEngine.Ny, this.TradeNySession);
+
+        if (this.srmEngine.IbDone)
+            sb.Append($"IB[{this.srmEngine.IbLow:0.##}..{this.srmEngine.IbHigh:0.##}] brokenUp={this.srmEngine.IbBrokenUp} brokenDn={this.srmEngine.IbBrokenDn}. ");
+
+        if (this.srmEngine.VsMid is { } vsMid && this.srmEngine.VsHalf is { } vsHalf)
+        {
+            var r1 = vsMid + vsHalf;
+            var s1 = vsMid - vsHalf;
+            sb.Append($"VolStep mid={vsMid:0.##} R1={r1:0.##}(Δ{r1 - last:0.##}) S1={s1:0.##}(Δ{last - s1:0.##}). ");
+        }
+
+        if (this.GexEnabled)
+        {
+            if (this.gexResult is { } gex && this.gexRatio is { } ratio)
+            {
+                var zg = gex.FullChain.ZeroGamma * ratio;
+                var cw = gex.FullChain.CallWall * ratio;
+                var pw = gex.FullChain.PutWall * ratio;
+                var mg = gex.FullChain.Magnet * ratio;
+                var magnetNeed = this.srmEngine.EmDay * this.GexMagnetTriggerDistanceEmDayFraction;
+                sb.Append(
+                    $"GEX ZG={zg:0.##} CW={cw:0.##}(Δ{cw - last:0.##}) PW={pw:0.##}(Δ{last - pw:0.##}) "
+                    + $"Magnet={mg:0.##}(Δ{mg - last:0.##}, needs {magnetNeed:0.##}). ");
+            }
+            else
+            {
+                sb.Append("GEX=waiting for first fetch. ");
+            }
+        }
+        else
+        {
+            sb.Append("GEX=disabled. ");
+        }
+
+        var nearestNaked = this.srmEngine.NakedLevels
+            .Where(l => l.TouchedUtc is null)
+            .OrderBy(l => Math.Abs(l.Price - last))
+            .FirstOrDefault();
+        sb.Append(nearestNaked is not null
+            ? $"Nearest untested level: {this.srmEngine.PeriodFor(nearestNaked.PeriodKind).Name} {(nearestNaked.IsHigh ? "H" : "L")} {nearestNaked.Price:0.##} (Δ{Math.Abs(nearestNaked.Price - last):0.##}). "
+            : "No untested levels tracked. ");
+
+        sb.Append($"In position: {this.MyPositions().Length > 0}.");
+
+        this.Log(sb.ToString(), StrategyLoggingLevel.Trading);
     }
 
     private void SyncSrmVolTimer()
@@ -1103,15 +1179,40 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 
                 var distance = item.Close - magnet;
                 var magnetTriggerDistance = emDay * this.GexMagnetTriggerDistanceEmDayFraction;
+
+                // FOUND 2026-10-15, operator: "the gex magenet pull trades seem to be very bad on
+                // the rr and never really work out... soon as we enter we are in crazy draw down."
+                // This was the ONLY one of the 8 setups with ZERO reaction confirmation — every
+                // other setup requires an actual rejection (a wick touching a level AND the close
+                // coming back the other way) or a confirmed break before entering; Magnet pull fired
+                // the instant price was simply far enough away, with no evidence the move was
+                // actually exhausted. If price got that far because it's genuinely trending, this
+                // was a blind counter-trend bet straight into the trend's own teeth — exactly what
+                // "instant drawdown" looks like. Now requires the SAME kind of rejection evidence
+                // as everything else: this bar must have pushed to a fresh extreme AWAY from the
+                // magnet (its own high if price is above, low if below) and then closed back toward
+                // it by at least GexMagnetRejectionPoints — a real sign of exhaustion, not just
+                // distance. A bar still trending hard typically closes near its own extreme with
+                // little opposing wick and will correctly fail this check and stay out.
                 if (!this.magnetTraded && Math.Abs(distance) >= magnetTriggerDistance)
                 {
-                    this.magnetTraded = true;
-                    var side = distance > 0 ? Side.Sell : Side.Buy;
-                    // No structural invalidation level for a distance-based pull — null falls
-                    // through to the volatility-scaled stop. The target naturally resolves to the
-                    // magnet itself anyway: TryFindKeyLevelTarget already considers it a candidate.
-                    if (this.EnterTrade(side, item.Close, null, stopDist, targetDist, emDay, $"GEX Magnet pull toward {magnet:0.##}"))
-                        return;
+                    var isAbove = distance > 0;
+                    var extremeThisBar = isAbove ? item.High : item.Low;
+                    var extremeDistance = Math.Abs(extremeThisBar - magnet);
+                    var closeDistance = Math.Abs(item.Close - magnet);
+                    var rejected = extremeDistance - closeDistance >= this.GexMagnetRejectionPoints;
+
+                    if (rejected)
+                    {
+                        this.magnetTraded = true;
+                        var side = isAbove ? Side.Sell : Side.Buy;
+                        // No structural invalidation level for a distance-based pull — null falls
+                        // through to the volatility-scaled stop. The target naturally resolves to
+                        // the magnet itself anyway: TryFindKeyLevelTarget already considers it a
+                        // candidate.
+                        if (this.EnterTrade(side, item.Close, null, stopDist, targetDist, emDay, $"GEX Magnet pull toward {magnet:0.##}"))
+                            return;
+                    }
                 }
             }
         }
@@ -1336,8 +1437,32 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         if (tickSize <= 0) return false;
 
         var isLong = side == Side.Buy;
-        this.pendingStopPrice = this.ResolveStopPrice(isLong, structureLevel, referencePrice, stopFallbackDist, emDay);
-        this.pendingTargetPrice = this.ResolveTargetPrice(isLong, referencePrice, targetFallbackDist, emDay);
+        var stopPrice = this.ResolveStopPrice(isLong, structureLevel, referencePrice, stopFallbackDist, emDay);
+        var targetPrice = this.ResolveTargetPrice(isLong, referencePrice, targetFallbackDist, emDay);
+
+        // FOUND 2026-10-15, operator, with real log numbers worked out: "it seems like every single
+        // time it enters off gex magnet or ib breakout its always in drawdown right away and the
+        // risk to reward is massive in negative rr." A real trade: 14.75pts of reward against
+        // 69.25pts of risk (≈1:4.7 AGAINST). Root cause: a setup with no structural stop anchor
+        // (GEX Magnet pull, always) falls back to the full volatility-scaled stop distance, while
+        // the TARGET logic always grabs the NEAREST qualifying level regardless of how that compares
+        // to the stop — nothing previously checked whether the resulting trade was even sane before
+        // taking it. Rejects here, before the order is ever placed, rather than trying to force a
+        // better target (which would mean picking something farther than "nearest," undermining the
+        // achievability that choice was made for in the first place).
+        var riskDist = Math.Abs(referencePrice - stopPrice);
+        var rewardDist = Math.Abs(targetPrice - referencePrice);
+        if (this.MinRewardToRiskRatio > 0 && riskDist > 0 && rewardDist / riskDist < this.MinRewardToRiskRatio)
+        {
+            this.Log(
+                $"[Signal] skipped ({reason}) — reward:risk {rewardDist:0.##}:{riskDist:0.##} "
+                + $"({rewardDist / riskDist:0.##}) is below the minimum {this.MinRewardToRiskRatio:0.##}.",
+                StrategyLoggingLevel.Trading);
+            return false;
+        }
+
+        this.pendingStopPrice = stopPrice;
+        this.pendingTargetPrice = targetPrice;
 
         var result = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
         {

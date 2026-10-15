@@ -5291,6 +5291,121 @@ something real, not ratio noise.
 
 **Verified 2026-10-15**: same build command as above — 0 errors, 0 warnings. Same output path.
 
+### FEATURE, 2026-10-15, same day — heartbeat expanded to show distance-to-every-level
+
+Operator: "i turned off the gex magnet in the settings and it hasnt entered anything and there is
+no logs other than heartbeat." Plausible as genuine "nothing qualified yet" rather than a new bug —
+several of the remaining 7 setups are deliberately strict (budget fade needs price to reach ~90% of
+the FULL daily expected move; naked-level reaction needs an actual untested level nearby) — but the
+old heartbeat only printed raw level VALUES, giving no way to tell "legitimately nothing happening"
+apart from "something's silently broken" without another round of screenshots.
+
+`MaybeLogHeartbeat` rewritten to report, every 5 minutes: current price; each enabled session's own
+budget band AND the live distance from price to each edge; the NY IB range plus whether either side
+has broken; Vol-Step Mid/R1/S1 with distance to each; every live GEX level (Zero Gamma/Call Wall/Put
+Wall/Magnet) with distance to each, including how far price still needs to move to satisfy the
+Magnet trigger specifically; and the single nearest untested naked level with its own distance. One
+line, fully diagnostic — the operator (or a future debugging pass) can now see exactly how close
+price is to triggering anything, rather than inferring it from whether a trade happened to fire.
+
+**Verified 2026-10-15**: same build command as above — 0 errors, 0 warnings. Same output path.
+
+### FIX, 2026-10-15, same day — GEX Magnet pull had zero reaction confirmation, unlike every other setup
+
+Operator: "the gex magenet pull trades seem to be very bad on the rr and never really work out
+please review this and fine tune it because its like soon as we enter we are in crazy draw down."
+Real design gap, found by comparing Magnet pull against the other 7 setups side by side: every
+OTHER setup requires actual reaction evidence before entering — a wick touching a level AND the
+bar's own close confirming the right side (naked level, GEX Call/Put Wall, budget fade, Vol-Step
+fade), or a confirmed close-through break (NY IB breakout, Zero Gamma cross). Magnet pull had NONE
+of that — it fired the instant `Math.Abs(item.Close - magnet) >= trigger distance`, a pure distance
+check with no evidence price was actually turning. If price got that far from the magnet because
+it's genuinely trending, this was a blind counter-trend bet straight into the trend — exactly what
+"instant drawdown" looks like, and the one setup in the whole strategy actually designed this way.
+
+Added the same caliber of confirmation every other setup already has: the triggering bar must now
+also show a REJECTION — push to a fresh extreme away from the magnet (its own high if price is
+above the magnet, low if below) and then close back toward it by at least
+`GexMagnetRejectionPoints` (new InputParameter, default 3pts). A bar that's genuinely still
+trending typically closes near its own extreme with little-to-no opposing wick and will correctly
+fail this check and stay out — only a bar actually showing exhaustion at that distance qualifies
+now. The one-shot `magnetTraded` flag is deliberately NOT consumed just because distance alone was
+satisfied — it only locks once a real rejection bar fires, so the setup keeps watching for a
+genuine reversal signal across multiple bars rather than burning its one shot on the first (possibly
+low-quality) bar that happens to be far enough away.
+
+**Verified 2026-10-15**: same build command as above — 0 errors, 0 warnings. Same output path.
+
+### FEATURE, 2026-10-15, same day — minimum reward:risk gate, all 8 setups
+
+Operator, same thread, with a new real log to work the numbers from: "it seems like every single
+time it enters off gex magnet or ib breakout its always in drawdown right away and the risk to
+reward is massive in negative rr." Worked it out precisely: fill=29934, target=29948.75 (14.75pts
+reward), stop=29864.75 (69.25pts risk) — roughly **1:4.7 AGAINST** the trade. Root architectural
+cause, not isolated to those two setups: any setup with no structural stop anchor (GEX Magnet pull,
+always — the other 7 at least have a real level to anchor the stop to) falls back to the full
+volatility-scaled stop distance, often landing near the `MaxStopDistanceEmDayFraction` ceiling,
+while `ResolveTargetPrice` always grabs the NEAREST qualifying level regardless of how that compares
+to the stop size. Nothing previously checked whether the resulting trade was even sane before
+taking it — the nearest-target and widest-fallback-stop choices were each independently reasonable,
+but nothing reconciled them against each other.
+
+New `MinRewardToRiskRatio` (default 1.0 — reward must be at least equal to risk, 0 = off), checked
+in `EnterTrade` itself for ALL 8 setups uniformly, right after both prices are resolved but before
+anything is placed — rejects with a clear `[Signal] skipped (...) — reward:risk X:Y is below the
+minimum` log line rather than silently declining, so it's visible when and why a trade was passed
+over. Deliberately rejects rather than trying to force a better target by picking something farther
+away than "nearest" — that would undermine the achievability `ResolveTargetPrice`'s own "nearest,
+not farthest" choice was made for in the first place; better to just not take a bad trade.
+
+**Verified 2026-10-15**: same build command as above — 0 errors, 0 warnings. Same output path.
+
+---
+
+## `SwingLevels` indicator — higher-timeframe support/resistance, added 2026-10-15
+
+**Files**: `Indicators/SwingLevels/src/SwingLevels.Indicator/SwingLevels.Indicator.csproj`,
+`SwingLevelsIndicator.cs`, `SwingLevelEngine.cs`, `SwingLevelOverlay.cs`.
+
+Operator, after a long day of auto-trading fixes on `srmAutoStrategy`: "lets make a new indicator i
+want to trade on a higher time frame with less risk, i want to trade support and resistance
+levels." Scoped via `AskUserQuestion` before writing code (what defines S/R, which timeframe,
+manual or auto) rather than guessing — confirmed: **higher-timeframe swing highs/lows** (not
+prior-period H/L or volume profile), **1-hour** by default, **visual only** — no orders, no
+account, a deliberate step back from automation after everything that happened with the strategy
+that same day.
+
+**Swing detection is a fresh, independent implementation**, not reused via `<Compile Include>` from
+`goldOrbStrategy`'s own `SwingLevelTracker.cs` despite using the identical fractal pivot-confirmation
+rule (a candidate bar needs `PivotLookback` bars closed on both sides without a more extreme
+high/low — same rule `finchDomScalpStrategy`'s `SwingTracker`, `PocEngine`, and `OrderBlockEngine`
+all already independently implement). That tracker only keeps raw price values for TARGETING use
+(nearest swing above/below a reference price); a DRAWN indicator needs a per-level timestamp (where
+to anchor the line) and touched-state (when to stop extending it), neither of which that file
+tracks. Matches this codebase's own established precedent — every swing detector here is already
+its own small, independent implementation, none of them shared.
+
+**Scaffold and overlay directly adapted from `OrbLevels`** (`OrbLevelsIndicator.cs`'s own
+init-retry/poll/replay lifecycle, `LevelLineOverlay.cs`'s own untested-vs-tested line styling) —
+simplified to a SINGLE higher-timeframe series instead of OrbLevels' dual 5m+15m split, since this
+indicator only ever watches one timeframe at a time. Each confirmed swing extends solid/bright from
+its own confirmation bar until a later bar trades through that exact price, then fades to a dim
+dotted line with a "(tested)" label suffix — same convention as OrbLevels' own session highs/lows.
+Line thickness is a configurable InputParameter (operator's own established preference from the
+LevelsMap work), not a fixed-size soft-fill band.
+
+**InputParameters**: poll interval, swing timeframe (`Period`, default `HOUR1`), pivot lookback
+(bars each side, default 3), max levels kept (default 30), history lookback (days, default 60),
+show-tested-levels toggle, resistance/support colours, line thickness.
+
+**Verified 2026-10-15**: `dotnet build SwingLevels.Indicator.csproj -c Release
+-p:QuantowerSdkPath="C:\Quantower\TradingPlatform\v1.147.6\bin\TradingPlatform.BusinessLayer.dll"`
+— 0 errors, 0 warnings, first attempt. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\SwingLevels\SwingLevelsIndicator.dll`. **NOT YET
+confirmed rendering correctly on a live chart** — compiled clean, but attaching it, watching a
+1-hour swing actually get detected and drawn, and confirming the untested→tested fade triggers
+correctly on a real touch have not been observed yet.
+
 ---
 
 ## Known gaps (as of the 2026-09-14 reorganization)
