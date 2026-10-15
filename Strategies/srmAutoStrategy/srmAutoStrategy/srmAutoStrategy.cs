@@ -211,8 +211,17 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     [InputParameter("GEX: wall touch tolerance (points, for rejection confirmation)", 89, 0, 100, 0.25, 2)]
     public double GexWallTolerancePoints { get; set; }
 
-    [InputParameter("GEX: Magnet trigger distance (points)", 90, 0, 500, 0.5, 2)]
-    public double GexMagnetTriggerDistancePoints { get; set; }
+    /// <summary>FOUND 2026-10-15, operator: "why is it only ever trading on the gex magnet pulls" —
+    /// this was a flat 5-POINT threshold (`Math.Abs(item.Close - magnet) >= 5`), which on MNQ is
+    /// satisfied on nearly every single bar (the close is almost never within 5 points of a
+    /// specific option strike) — combined with the one-shot flag resetting roughly every GEX
+    /// refresh (~60s) regardless of real price movement, this setup was essentially always "ready"
+    /// the instant the strategy went flat, while the other 7 setups need much rarer, more specific
+    /// conditions to align. Rescaled to a fraction of the daily expected move, matching every other
+    /// distance in this strategy, so "far enough from the magnet to bet on reversion" actually
+    /// means something significant again.</summary>
+    [InputParameter("GEX: Magnet trigger distance (x daily expected move)", 90, 0.02, 2, 0.02, 2)]
+    public double GexMagnetTriggerDistanceEmDayFraction { get; set; }
 
     // ---- structure-based stop/target (operator's own ask, 2026-10-15: "it should be looking at
     // the structure of the candles and going on if it breaks this structure we are not going in
@@ -244,6 +253,43 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 
     [InputParameter("Structure: maximum stop distance (x daily expected move, avoids a too-far stop)", 102, 0.02, 2, 0.02, 2)]
     public double MaxStopDistanceEmDayFraction { get; set; }
+
+    // ---- active in-trade management (operator's own ask, 2026-10-15: "it should be always looking
+    // at the chart during a trade and moving the stop loss when in profit to secure wins but not so
+    // much that it cuts off the actual good entry it still needs room to breath" + "reviews if that
+    // trade logic is still valid or not and if its not it exits") — runs every poll tick (already
+    // ~1s) while a position is open, not just on bar close. ------------------------------------------
+
+    [InputParameter("Trailing stop: enabled", 105)]
+    public bool UseTrailingStop { get; set; }
+
+    [InputParameter("Trailing stop: activate after this much profit (points)", 106, 0, 200, 0.5, 2)]
+    public double TrailingActivationPoints { get; set; }
+
+    [InputParameter("Trailing stop: distance behind the best price reached (points, the \"breathing room\")", 107, 0, 100, 0.5, 2)]
+    public double TrailingBufferPoints { get; set; }
+
+    [InputParameter("Trailing stop: minimum re-trail step (points, avoids order-replace spam)", 108, 0, 20, 0.25, 2)]
+    public double TrailingMinStepPoints { get; set; }
+
+    [InputParameter("Thesis invalidation: enabled", 110)]
+    public bool UseThesisInvalidation { get; set; }
+
+    [InputParameter("Thesis invalidation: minimum favorable excursion before it applies (points)", 111, 0, 200, 0.5, 2)]
+    public double ThesisInvalidationMinFavorablePoints { get; set; }
+
+    [InputParameter("Thesis invalidation: give-back from best price that triggers a review (points)", 112, 0, 100, 0.5, 2)]
+    public double ThesisInvalidationGiveBackPoints { get; set; }
+
+    /// <summary>Operator's own ask, 2026-10-15: "after exiting an order we need a cool down i
+    /// think because it just hit take profit in a short and then entered a brand new short and is
+    /// in instant drawdown from hitting that level." Blocks ALL new entries (all 8 setups alike)
+    /// for this long after ANY exit — stop, target, thesis-invalidation close, or risk-limit close,
+    /// whichever happens — not just a repeat of the exact same setup. A level that just got hit and
+    /// resolved doesn't mean the next bar is a fresh, independent opportunity; it's often the same
+    /// move still finishing.</summary>
+    [InputParameter("Cooldown after any exit (minutes, 0 = off)", 115, 0, 120, 0.5, 2)]
+    public double CooldownAfterExitMinutes { get; set; }
 
     public srmAutoStrategy()
     {
@@ -301,7 +347,7 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.ZeroGammaCrossEnabled = true;
         this.MagnetPullEnabled = true;
         this.GexWallTolerancePoints = 1.0;
-        this.GexMagnetTriggerDistancePoints = 5.0;
+        this.GexMagnetTriggerDistanceEmDayFraction = 0.35;
 
         this.UseStructureStops = true;
         this.StructureStopBufferPoints = 2.0;
@@ -311,6 +357,17 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.MinTargetDistancePoints = 5.0;
         this.MaxTargetDistanceEmDayFraction = 0.20;
         this.MaxStopDistanceEmDayFraction = 0.15;
+
+        this.UseTrailingStop = true;
+        this.TrailingActivationPoints = 15.0;
+        this.TrailingBufferPoints = 10.0;
+        this.TrailingMinStepPoints = 2.0;
+
+        this.UseThesisInvalidation = true;
+        this.ThesisInvalidationMinFavorablePoints = 12.0;
+        this.ThesisInvalidationGiveBackPoints = 8.0;
+
+        this.CooldownAfterExitMinutes = 5.0;
     }
 
     // ---- state ---------------------------------------------------------------------------------
@@ -334,6 +391,14 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     private bool protectiveOrdersPlaced;
     private double pendingStopPrice;
     private double pendingTargetPrice;
+
+    // ---- active in-trade management state --------------------------------------------------------
+    private bool inTradeManaged;
+    private Side openSide;
+    private double openEntryPrice;
+    private double openBestPrice;
+    private double currentStopPrice;
+    private DateTime lastExitUtc = DateTime.MinValue;
 
     private int balanceDayKey = -1;
     private double dayStartBalance;
@@ -447,6 +512,11 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.putWallTraded = false;
         this.magnetTraded = false;
         this.zgWasAbove = null;
+        this.inTradeManaged = false;
+        this.openEntryPrice = 0;
+        this.openBestPrice = 0;
+        this.currentStopPrice = 0;
+        this.lastExitUtc = DateTime.MinValue;
 
         try
         {
@@ -557,7 +627,137 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         this.MaybeLogHeartbeat();
         this.SyncSrmVolTimer();
         this.SyncGexTimer();
+        this.ManagePosition();
         this.DrainChartBars();
+    }
+
+    /// <summary>
+    /// Active in-trade management — operator's own ask, 2026-10-15: "it should be always looking
+    /// at the chart during a trade and moving the stop loss when in profit to secure wins but not
+    /// so much that it cuts off the actual good entry it still needs room to breath" + "reviews if
+    /// that trade logic is still valid or not and if its not it exits." Runs every poll tick
+    /// (already ~1s), not just on bar close, reading the symbol's own live `Last` price — this is
+    /// genuinely "always looking," not just reacting once a bar closes the way entry signals do.
+    ///
+    /// TWO independent pieces, each with its own on/off toggle:
+    ///
+    /// TRAILING STOP: once unrealized profit (measured from the real entry fill) reaches
+    /// <see cref="TrailingActivationPoints"/>, the stop ratchets to <see cref="TrailingBufferPoints"/>
+    /// behind the BEST price reached so far — never the current price directly, which would make the
+    /// buffer meaningless the moment price pulls back even slightly. The stop only ever MOVES
+    /// TOWARD the entry (locks in more, never less) and only replaces the resting order once the
+    /// improvement clears <see cref="TrailingMinStepPoints"/>, so ordinary tick noise doesn't spam
+    /// cancel/replace calls. Replacement is NEW-STOP-FIRST, OLD-STOP-CANCELLED-SECOND — deliberately
+    /// never leaves the position with zero resting stop, even for a moment, the way a cancel-then-
+    /// place sequence would.
+    ///
+    /// THESIS INVALIDATION: a setup-agnostic proxy rather than bespoke logic per setup (which would
+    /// need its own "what does invalidated mean" answer for all 8 setups) — if the trade reached at
+    /// least <see cref="ThesisInvalidationMinFavorablePoints"/> of favorable excursion and has since
+    /// given back at least <see cref="ThesisInvalidationGiveBackPoints"/> of it, AND a fresh
+    /// structural candle is now forming AGAINST the position (reusing the same wickless-candle
+    /// scanner already built for targets, just checked in the adverse direction), that combination
+    /// is treated as "the move this trade was betting on is reversing, not just pausing" and the
+    /// position is closed early rather than waiting for either the stop or the target.
+    /// </summary>
+    private void ManagePosition()
+    {
+        if (!this.inTradeManaged) return;
+        if (this.CurrentSymbol is null || this.CurrentAccount is null) return;
+
+        var positions = this.MyPositions();
+        if (positions.Length == 0)
+        {
+            this.inTradeManaged = false;
+            return;
+        }
+
+        var position = positions[0];
+        var last = this.CurrentSymbol.Last;
+        if (last <= 0 || double.IsNaN(last)) return;
+
+        var isLong = this.openSide == Side.Buy;
+        if (isLong) this.openBestPrice = Math.Max(this.openBestPrice, last);
+        else this.openBestPrice = Math.Min(this.openBestPrice, last);
+
+        var favorableExcursion = isLong ? this.openBestPrice - this.openEntryPrice : this.openEntryPrice - this.openBestPrice;
+        var givenBack = isLong ? this.openBestPrice - last : last - this.openBestPrice;
+
+        if (this.UseThesisInvalidation
+            && favorableExcursion >= this.ThesisInvalidationMinFavorablePoints
+            && givenBack >= this.ThesisInvalidationGiveBackPoints
+            && this.TryFindWicklessTarget(!isLong, last, out _))
+        {
+            this.Log(
+                $"[Risk] thesis invalidation — gave back {givenBack:0.##}pts from the best price reached "
+                + $"({this.openBestPrice:0.##}) with a fresh structural candle now forming against the "
+                + "position; closing early rather than waiting for the stop.",
+                StrategyLoggingLevel.Trading);
+
+            var closeResult = position.Close();
+            if (closeResult.Status != TradingOperationResultStatus.Success)
+                this.Log($"[Order] thesis-invalidation close failed: {closeResult.Message}", StrategyLoggingLevel.Error);
+            return;
+        }
+
+        if (this.UseTrailingStop)
+        {
+            var profit = isLong ? last - this.openEntryPrice : this.openEntryPrice - last;
+            if (profit >= this.TrailingActivationPoints)
+            {
+                var candidateStop = isLong ? this.openBestPrice - this.TrailingBufferPoints : this.openBestPrice + this.TrailingBufferPoints;
+                this.TryTrailStop(position, isLong, candidateStop);
+            }
+        }
+    }
+
+    /// <summary>NEW-STOP-FIRST, OLD-STOP-CANCELLED-SECOND — see <see cref="ManagePosition"/>'s own
+    /// doc comment for why. Uses the same tick-rounding discipline as every other order placement
+    /// in this file.</summary>
+    private void TryTrailStop(Position position, bool isLong, double candidateStop)
+    {
+        if (this.CurrentAccount is null || this.CurrentSymbol is null) return;
+
+        var tickSize = this.CurrentSymbol.TickSize;
+        if (tickSize <= 0) return;
+
+        candidateStop = Math.Round(candidateStop / tickSize, MidpointRounding.AwayFromZero) * tickSize;
+
+        var improves = isLong
+            ? candidateStop >= this.currentStopPrice + this.TrailingMinStepPoints
+            : candidateStop <= this.currentStopPrice - this.TrailingMinStepPoints;
+        if (!improves) return;
+
+        var oldStopOrder = this.FindProtectiveStopOrder();
+        var closingSide = isLong ? Side.Sell : Side.Buy;
+
+        var newStopResult = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
+        {
+            Account = this.CurrentAccount,
+            Symbol = this.CurrentSymbol,
+            OrderTypeId = this.stopOrderTypeId,
+            Quantity = position.Quantity,
+            Side = closingSide,
+            Comment = StrategyTag,
+            TriggerPrice = candidateStop,
+        });
+
+        if (newStopResult.Status != TradingOperationResultStatus.Success)
+        {
+            this.Log($"[Order] trailing stop re-placement failed, leaving the existing stop resting: {newStopResult.Message}", StrategyLoggingLevel.Error);
+            return;
+        }
+
+        this.currentStopPrice = candidateStop;
+
+        if (oldStopOrder is not null)
+        {
+            var cancelResult = oldStopOrder.Cancel();
+            if (cancelResult.Status != TradingOperationResultStatus.Success)
+                this.Log($"[Order] failed to cancel the old stop after trailing — TWO stop orders may now be resting, check manually: {cancelResult.Message}", StrategyLoggingLevel.Error);
+        }
+
+        this.Log($"[Order] trailing stop moved to {candidateStop:0.##} (best price {this.openBestPrice:0.##}).", StrategyLoggingLevel.Trading);
     }
 
     private void MaybeLogHeartbeat()
@@ -698,6 +898,13 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         if (this.srmEngine.EmDay is not { } emDay || emDay <= 0) return;
         if (this.CurrentSymbol is null || this.CurrentAccount is null) return;
         if (this.MyPositions().Length > 0 || this.accountFloorBreached) return;
+
+        // Operator, 2026-10-15: "after exiting an order we need a cool down... it just hit take
+        // profit in a short and then entered a brand new short and is in instant drawdown." Blocks
+        // EVERY setup alike, not just a repeat of the same one — a level that just resolved isn't
+        // automatically a fresh, independent opportunity one bar later.
+        if (this.CooldownAfterExitMinutes > 0 && (Core.TimeUtils.DateTimeUtcNow - this.lastExitUtc).TotalMinutes < this.CooldownAfterExitMinutes)
+            return;
 
         var et = TimeZoneInfo.ConvertTimeFromUtc(item.TimeLeft, SessionZone);
         var inAsia = IsInWindow(et, 18, 0, 3, 0);
@@ -849,7 +1056,7 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             if (this.CallWallFadeEnabled && gex.FullChain.CallWall is { } cw0)
             {
                 var callWall = cw0 * ratio;
-                if (this.lastCallWallSeen != callWall) { this.lastCallWallSeen = callWall; this.callWallTraded = false; }
+                if (LevelChanged(this.lastCallWallSeen, callWall)) { this.lastCallWallSeen = callWall; this.callWallTraded = false; }
 
                 if (!this.callWallTraded && item.High >= callWall && item.Close <= callWall - this.GexWallTolerancePoints)
                 {
@@ -862,7 +1069,7 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             if (this.PutWallFadeEnabled && gex.FullChain.PutWall is { } pw0)
             {
                 var putWall = pw0 * ratio;
-                if (this.lastPutWallSeen != putWall) { this.lastPutWallSeen = putWall; this.putWallTraded = false; }
+                if (LevelChanged(this.lastPutWallSeen, putWall)) { this.lastPutWallSeen = putWall; this.putWallTraded = false; }
 
                 if (!this.putWallTraded && item.Low <= putWall && item.Close >= putWall + this.GexWallTolerancePoints)
                 {
@@ -875,7 +1082,7 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             if (this.ZeroGammaCrossEnabled && gex.FullChain.ZeroGamma is { } zg0)
             {
                 var zeroGamma = zg0 * ratio;
-                if (this.lastZeroGammaSeen != zeroGamma) { this.lastZeroGammaSeen = zeroGamma; this.zgWasAbove = null; }
+                if (LevelChanged(this.lastZeroGammaSeen, zeroGamma)) { this.lastZeroGammaSeen = zeroGamma; this.zgWasAbove = null; }
 
                 var nowAbove = item.Close > zeroGamma;
                 if (this.zgWasAbove is { } wasAbove && wasAbove != nowAbove)
@@ -892,10 +1099,11 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             if (this.MagnetPullEnabled && gex.FullChain.Magnet is { } mg0)
             {
                 var magnet = mg0 * ratio;
-                if (this.lastMagnetSeen != magnet) { this.lastMagnetSeen = magnet; this.magnetTraded = false; }
+                if (LevelChanged(this.lastMagnetSeen, magnet)) { this.lastMagnetSeen = magnet; this.magnetTraded = false; }
 
                 var distance = item.Close - magnet;
-                if (!this.magnetTraded && Math.Abs(distance) >= this.GexMagnetTriggerDistancePoints)
+                var magnetTriggerDistance = emDay * this.GexMagnetTriggerDistanceEmDayFraction;
+                if (!this.magnetTraded && Math.Abs(distance) >= magnetTriggerDistance)
                 {
                     this.magnetTraded = true;
                     var side = distance > 0 ? Side.Sell : Side.Buy;
@@ -908,6 +1116,18 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             }
         }
     }
+
+    /// <summary>True on a genuine change in a GEX level's own chart-converted price, not just
+    /// floating-point/ratio noise — used to decide whether a setup's one-shot "already traded this
+    /// level" flag should reset. A plain `!=` comparison was resetting these flags on every GEX
+    /// refresh (~60s) even when the level hadn't meaningfully moved, which (combined with GEX
+    /// Magnet pull's own too-tight trigger distance, fixed separately) left that one setup firing
+    /// far more often than the other seven — operator, 2026-10-15: "why is it only ever trading on
+    /// the gex magnet pulls."</summary>
+    private const double LevelChangeTolerancePoints = 0.5;
+
+    private static bool LevelChanged(double? last, double current) =>
+        last is not { } l || Math.Abs(l - current) > LevelChangeTolerancePoints;
 
     private static int MinutesOfDay(DateTime t) => (t.Hour * 60) + t.Minute;
 
@@ -957,17 +1177,27 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
     /// way, via <see cref="MaxStopDistanceEmDayFraction"/> × emDay.</summary>
     private double ResolveStopPrice(bool isLong, double? structureLevel, double referencePrice, double fallbackDist, double emDay)
     {
+        var maxDistance = emDay * this.MaxStopDistanceEmDayFraction;
+
         if (this.UseStructureStops && structureLevel is { } level && level > 0)
         {
             var structureStop = isLong ? level - this.StructureStopBufferPoints : level + this.StructureStopBufferPoints;
             var distance = isLong ? referencePrice - structureStop : structureStop - referencePrice;
-            var maxDistance = emDay * this.MaxStopDistanceEmDayFraction;
 
             if (distance >= this.StructureStopBufferPoints && distance <= maxDistance)
                 return structureStop;
         }
 
-        return isLong ? referencePrice - fallbackDist : referencePrice + fallbackDist;
+        // Clamped to the SAME ceiling as the structure path, regardless of StopFractionOfEmDay —
+        // operator report, 2026-10-15, with a real log: a trade's stop landed at exactly
+        // emDay × 0.25 (the OLD default, before that fraction was tightened to 0.05 earlier this
+        // same conversation) because the structural level was correctly rejected as too far, but
+        // the FALLBACK it dropped to had no ceiling of its own. If `StopFractionOfEmDay` is ever
+        // left wider than intended (stale settings, a bad manual edit, whatever), this stops it
+        // from producing an outsized stop regardless — the fraction is a SUGGESTION within this
+        // ceiling, not an override of it.
+        var clampedFallback = Math.Min(fallbackDist, maxDistance);
+        return isLong ? referencePrice - clampedFallback : referencePrice + clampedFallback;
     }
 
     /// <summary>Nearest "key level" (untested SRM naked level, session POC/VAH/VAL, or a live GEX
@@ -1006,7 +1236,11 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
                 return t;
         }
 
-        return isLong ? referencePrice + fallbackDist : referencePrice - fallbackDist;
+        // Same clamp as ResolveStopPrice's own fallback — see that method's doc comment for the
+        // real log evidence behind it. TargetFractionOfEmDay is a suggestion within this ceiling,
+        // not an override of it.
+        var clampedFallback = Math.Min(fallbackDist, maxDistance);
+        return isLong ? referencePrice + clampedFallback : referencePrice - clampedFallback;
     }
 
     /// <summary>Nearest untested SRM naked level, session POC/VAH/VAL, or live GEX level beyond
@@ -1128,9 +1362,9 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         return true;
     }
 
-    private void PlaceProtectiveOrders(Position position)
+    private bool PlaceProtectiveOrders(Position position)
     {
-        if (this.CurrentAccount is null || this.CurrentSymbol is null) return;
+        if (this.CurrentAccount is null || this.CurrentSymbol is null) return false;
 
         var isLong = position.Side == Side.Buy;
         var closingSide = isLong ? Side.Sell : Side.Buy;
@@ -1183,8 +1417,10 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             var closeResult = position.Close();
             if (closeResult.Status != TradingOperationResultStatus.Success)
                 this.Log($"[Order] failed to close unprotected position: {closeResult.Message}", StrategyLoggingLevel.Error);
-            return;
+            return false;
         }
+
+        this.currentStopPrice = stopPrice;
 
         var targetResult = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
         {
@@ -1204,6 +1440,8 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
             $"[Order] protective stop={stopPrice:0.##} target={targetPrice:0.##} "
             + $"(fill={position.OpenPrice:0.##}) placed as separate orders.",
             StrategyLoggingLevel.Trading);
+
+        return true;
     }
 
     private void Core_PositionAdded(Position obj)
@@ -1215,7 +1453,19 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
 
         try
         {
-            this.PlaceProtectiveOrders(obj);
+            // Active in-trade management only starts if the stop ACTUALLY landed — a failed stop
+            // closes the position itself inside PlaceProtectiveOrders and returns false, in which
+            // case there's nothing left to manage.
+            if (this.PlaceProtectiveOrders(obj)) // sets this.currentStopPrice itself, tick-rounded
+            {
+                // Seeds from the REAL fill, not the signal's own reference price — openBestPrice
+                // starts at the real entry so the first poll tick after this can only ever see
+                // favorable excursion from here forward, never a phantom head start.
+                this.openSide = obj.Side;
+                this.openEntryPrice = obj.OpenPrice;
+                this.openBestPrice = obj.OpenPrice;
+                this.inTradeManaged = true;
+            }
         }
         catch (Exception ex)
         {
@@ -1229,6 +1479,8 @@ public class srmAutoStrategy : Strategy, ICurrentAccount, ICurrentSymbol
         if (this.MyPositions().Any()) return;
 
         this.protectiveOrdersPlaced = false;
+        this.inTradeManaged = false;
+        this.lastExitUtc = Core.TimeUtils.DateTimeUtcNow;
 
         try
         {

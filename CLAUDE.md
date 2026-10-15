@@ -5162,6 +5162,135 @@ still actively shaking out rather than trustworthy at size** — the underlying 
 check without a matching magnitude check) is exactly the kind of thing that could recur in a
 not-yet-exercised code path.
 
+Operator confirmed, same thread: "i was able to close it in profit though for this one" — the
+Vol-Step fade trade shown in their screenshot (stop≈16pts, target≈33pts from a 29888 fill) closed
+out correctly, first real positive confirmation of the structure-based sizing actually working end
+to end.
+
+### FEATURE, 2026-10-15, same day — active in-trade management (trailing stop + thesis invalidation)
+
+Operator, looking at a live screenshot of an open Vol-Step fade trade: "what would be nice is when
+its in a trade it reviews if that trade logic is still valid or not and if its not it exits, it
+should be always looking at the chart during a trade and moving the stop loss when in profit to
+secure wins but not so much that it cuts off the actual good entry it still needs room to breath."
+New `ManagePosition()`, called from `RunPoll()` every poll tick (~1s) while a position is open —
+genuinely "always looking," not just reacting once a bar closes the way the 8 entry setups do (those
+still only evaluate on bar close).
+
+**Trailing stop**: once unrealized profit (from the real fill) reaches `TrailingActivationPoints`
+(default 15pts), the stop ratchets to `TrailingBufferPoints` (default 10pts — the "room to breathe")
+behind the BEST price reached so far, not the current price directly (a trail off current price
+would make the buffer meaningless the instant price pulls back even slightly). Only ever moves
+toward locking in more — never loosens — and only replaces the resting order once the improvement
+clears `TrailingMinStepPoints` (default 2pts), so ordinary tick noise doesn't spam cancel/replace
+calls. **Replacement order is deliberately NEW-STOP-FIRST, OLD-STOP-CANCELLED-SECOND** — a
+cancel-then-place sequence would leave the position with zero resting stop for the gap between the
+two calls; this never does.
+
+**Thesis invalidation**: a setup-AGNOSTIC proxy rather than bespoke per-setup logic (which would
+need its own "what does invalidated mean" answer across all 8 setups — a real option for a later
+pass, not attempted here). If the trade reached at least `ThesisInvalidationMinFavorablePoints`
+(default 12pts) of favorable excursion and has since given back at least
+`ThesisInvalidationGiveBackPoints` (default 8pts) of it, AND a fresh structural candle is now
+forming AGAINST the position (reusing the SAME wickless-candle scanner already built for targets,
+checked in the adverse direction this time via `TryFindWicklessTarget(!isLong, ...)`), that
+combination is read as "the move this trade was betting on is reversing, not just pausing" and the
+position closes early rather than waiting for the stop.
+
+**`PlaceProtectiveOrders` changed from `void` to `bool`** (returns whether the stop actually landed)
+so `Core_PositionAdded` only starts tracking a trade for management when there's actually something
+to manage — a failed stop already closes the position inside that method; without this, management
+state would have briefly (and harmlessly, since `ManagePosition` already defends against zero open
+positions, but still incorrectly) marked an already-closing position as active.
+
+**7 new InputParameters** (indices 105-112): `UseTrailingStop`/`TrailingActivationPoints`/
+`TrailingBufferPoints`/`TrailingMinStepPoints`, `UseThesisInvalidation`/
+`ThesisInvalidationMinFavorablePoints`/`ThesisInvalidationGiveBackPoints`.
+
+**Verified 2026-10-15**: same build command as above — 0 errors, 0 warnings, first attempt. Same
+output path. **NOT YET watched managing a live trade** — both pieces are new, today's build, and
+given how many real bugs already surfaced from THIS SAME strategy's first live runs earlier today,
+this should be watched at least as closely before being trusted.
+
+### FIX, 2026-10-15, same day — fallback stop/target had no ceiling of its own
+
+Operator, with a real log screenshot: "it just created a crazy stop and take profit order like
+super crazy price differences first it made one so small aand tight it was over in less than a
+second and the next one the stop was so far away and the take profit." Worked the real numbers
+from the log rather than guessing: one trade's stop landed at EXACTLY `emDay(431.6) × 0.25` and
+another trade's target at EXACTLY `emDay × 0.50` — the OLD `StopFractionOfEmDay`/
+`TargetFractionOfEmDay` defaults (0.25/0.5), tightened to 0.05/0.10 several fixes earlier this same
+conversation. That confirmed the running instance still had the stale wide fractions configured
+(same "code default doesn't retroactively update an already-saved instance" caveat already
+documented several times this session) — but it also exposed a REAL architectural gap: the
+MAX-distance caps added earlier today (`MaxStopDistanceEmDayFraction`/`MaxTargetDistanceEmDayFraction`)
+only applied to the STRUCTURE path — the math confirms they worked correctly (a ~552pt-away IB
+level was correctly rejected as too far) — but the FALLBACK volatility-scaled distance it then fell
+through to had no ceiling of its own, so a stale/wide fraction setting could still produce an
+oversized stop or target even though the structure path was behaving exactly as designed.
+
+Rather than just telling the operator (again) to go re-check two settings fields, closed the actual
+gap: `ResolveStopPrice`'s and `ResolveTargetPrice`'s own fallback branches now clamp to
+`Math.Min(fallbackDist, maxDistance)` using the SAME `MaxStopDistanceEmDayFraction`/
+`MaxTargetDistanceEmDayFraction` ceilings the structure path already respects.
+`StopFractionOfEmDay`/`TargetFractionOfEmDay` are now a SUGGESTION within that ceiling, not an
+override of it — even a badly stale or mis-set fraction can no longer produce an outsized stop or
+target. **Verified 2026-10-15**: same build command as above — 0 errors, 0 warnings. Same output
+path.
+
+Operator, with a real screenshot right after: "if i didnt manually close this order look how far
+in draw down i would have been" — retroactive confirmation of the exact risk the sizing fix above
+closes: the same GEX Magnet short (fill 29896, old-fraction stop at 30003.5) sat through a real
+adverse push toward ~29955 before the operator closed it by hand. Validated, not a new issue —
+explained how both the distance-cap fix and the same-day active-management feature (thesis
+invalidation) now layer against this exact scenario recurring.
+
+### FEATURE, 2026-10-15, same day — post-exit cooldown
+
+Operator: "after exiting an order we need a cool down i think because it just hit take profit in a
+short and then entered a brand new short and is in instant drawdown from hitting that level" —
+confirmed moments later on a different trade: "this trade is working out but i think it entered way
+to quick from a previous position." Nothing previously stopped the strategy from evaluating entry
+signals on the very next bar after a position closed — a level that just resolved isn't
+automatically a fresh, independent opportunity one bar later, and re-entering the same side right
+after taking profit is often just chasing a move that already played out.
+
+New `CooldownAfterExitMinutes` (default 5 minutes, 0 = off) blocks ALL EIGHT setups alike for this
+long after ANY exit — stop, target, thesis-invalidation close, or risk-limit close, whichever
+happens, not just a repeat of the same setup that just closed. `lastExitUtc` is set from
+`Core_PositionRemoved` — the single choke point every closure path already funnels through
+regardless of cause, so no other wiring was needed. Checked early in `ProcessClosedBar`'s own
+signal-evaluation guards, alongside the existing "already in a position" / "account floor breached"
+checks.
+
+**Verified 2026-10-15**: same build command as above — 0 errors, 0 warnings. Same output path.
+
+### FIX, 2026-10-15, same day — GEX Magnet pull was crowding out the other 7 setups
+
+Operator: "why is it only ever trading on the gex magnet pulls." Real root cause, not a vague
+imbalance: `GexMagnetTriggerDistancePoints` defaulted to a flat **5 points** — on MNQ,
+`Math.Abs(item.Close - magnet) >= 5` is satisfied on nearly EVERY bar (the close is almost never
+within 5 points of a specific option strike), while the other 7 setups all need much rarer, more
+specific conditions (a session reaching its full volatility budget, a wick AND a close confirming
+the right side, an IB break, a genuine wall touch). Compounded by a second bug: all four GEX
+one-shot "already traded this level" flags (`lastCallWallSeen`/`lastPutWallSeen`/
+`lastZeroGammaSeen`/`lastMagnetSeen`) reset on a bare `!=` comparison against the level's own
+chart-converted price — which drifts slightly every ~60s GEX refresh from ratio noise alone, so
+these flags were effectively resetting on a timer regardless of whether price had done anything.
+Together: GEX Magnet pull was essentially always "ready to fire" the instant the strategy went
+flat, so it won the fixed-priority check order almost every time by default, not because the other
+setups were broken.
+
+**Two fixes**: (1) `GexMagnetTriggerDistancePoints` replaced with
+`GexMagnetTriggerDistanceEmDayFraction` (default 0.35 × emDay — matching how every other distance in
+this strategy already scales with volatility instead of a flat point count) — now requires a
+genuinely large deviation from the magnet before considering a reversion bet, not a trivial one.
+(2) new `LevelChanged(double? last, double current)` helper (0.5pt tolerance) replaces the bare
+`!=` for all four GEX one-shot resets, so a flag only actually resets when the level moved by
+something real, not ratio noise.
+
+**Verified 2026-10-15**: same build command as above — 0 errors, 0 warnings. Same output path.
+
 ---
 
 ## Known gaps (as of the 2026-09-14 reorganization)
