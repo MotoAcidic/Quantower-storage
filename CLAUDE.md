@@ -5362,6 +5362,91 @@ not farthest" choice was made for in the first place; better to just not take a 
 
 ---
 
+## `wicklessTrendStrategy` — trend-aligned wickless-candle auto-trader, added 2026-10-16
+
+**Files**: `Strategies/wicklessTrendStrategy/wicklessTrendStrategy/wicklessTrendStrategy.csproj`,
+`wicklessTrendStrategy.cs`.
+
+Operator's own manual setup, described verbatim (2026-10-16): "waiting for a wickless candle to
+form that aligns with the current trend so if a trend is bearish and a bearish candle forms with a
+wickless top and the next 1min candle doesnt fill the wickless candle like close above the wickless
+end it enters a short and puts a stop at the top of that current move and targets either a session
+level that hasnt been tested or a bullish wickless candle that hasnt been tested yet." Scoped via
+`AskUserQuestion` before writing any order-placing code — all four answers were the recommended
+option:
+
+- **Trend** = higher-timeframe swing structure (lower highs + lower lows = bearish, higher highs +
+  higher lows = bullish), not a moving-average slope.
+- **Wickless candle + confirmation** both on the 1-minute series (not a higher-timeframe wickless
+  candle with 1-minute confirmation).
+- **Stop** = the nearest confirmed swing point AGAINST the trade, not a simple N-bar lookback max/min.
+- **Risk management** = the full scaffold (daily loss/floor limits, R:R gate, trailing stop, thesis
+  invalidation, cooldown), matching `srmAutoStrategy`'s own proven protections, not a leaner version.
+
+**Three engines, three independent bar streams, all reused via `&lt;Compile Include&gt;` from the
+`SwingLevels` indicator's own folder** (`SwingLevelEngine.cs`, `SessionLevelEngine.cs`,
+`WicklessLevelEngine.cs` — SwingLevels is the older/foundational artifact here, same reach direction
+`srmAutoStrategy` already established into Finch-Lite/LevelsMap): `SwingLevelEngine` off a 1-hour
+(default) stream for trend + stop, `SessionLevelEngine` off a 5-minute (default) stream for the four
+Asia/London/NY AM/NY PM session-level targets, `WicklessLevelEngine` off the SAME 1-minute stream the
+entry signal itself watches. The entry-signal check (candle colour + wickless side, trend-aligned) is
+a small inline check in this file rather than threaded through the shared engine, which only ever
+needed wick absence, not candle colour — same "small, independent" convention as everywhere else in
+this codebase. `SessionLevelEngine.cs` also pulls in a `Color` field this strategy never uses (it's
+part of that file's own `SessionDef` type, built for drawing) — harmless, just a `System.Drawing.Common`
+package reference this strategy otherwise wouldn't need.
+
+**Entry mechanics**: a qualifying 1-minute candle (trend-aligned colour + wickless on the
+trend-facing side) arms a ONE-SHOT pending signal. The very next 1-minute candle's own CLOSE decides
+it — stays on the correct side (doesn't "fill" the wickless extreme) = enter at that close; closes
+back through it = the signal is simply dropped, no entry, no retry on the same candle.
+
+**Stop**: the most recently CONFIRMED countertrend swing point (the actual "top"/"bottom of that
+current move," time-ordered, not price-nearest) plus a small buffer — capped at
+`MaxStopDistanceAtrMult` × ATR(`AtrPeriod`, on the trend timeframe). This cap exists specifically
+because an uncapped swing lookup is the EXACT failure mode a different strategy
+(`finchDomScalpStrategy`) prompted an NY-open-blackout request over this same session: "a Buy fired
+right at the 9:30 AM ET NY open, with a swing-based stop 68+ points away." Same "fraction is a
+suggestion within a ceiling, not an override" discipline `srmAutoStrategy` already uses for its own
+structural stops, just ATR-based here since this strategy has no implied-move/options dependency at
+all (no SRM engine, no CBOE fetch, nothing network-dependent in this strategy whatsoever).
+
+**Target**: nearest of (a) the nearest untested session high/low in the favorable direction, or (b)
+the nearest untested OPPOSITE-type wickless level (a short targets an untested BULLISH wickless-
+bottom candle's own low; a long targets an untested BEARISH wickless-top candle's own high — matches
+the operator's own words exactly) — whichever is closer, same "nearest of two candidates, capped"
+convention as `srmAutoStrategy`'s own structural targets. Falls back to a simple reward:risk multiple
+of the stop distance (`TargetFallbackRMultiple`, default 2.0) only when neither candidate qualifies.
+
+**Thesis invalidation** reuses the same raw structural check the entry signal itself uses (a fresh
+wickless candle forming against the position), evaluated against the most recently closed 1-minute
+bar regardless of trend alignment — same `srmAutoStrategy`-proven concept, substituting this
+strategy's own wickless check for that one's.
+
+**Order-placement safety**: ported near-verbatim from `srmAutoStrategy` — separate stop/target
+orders (never a bracket), tick-rounded before either reaches the broker, an adopted position (this
+instance didn't itself open it) gets a sane ATR-based fallback stop/target from its real fill
+instead of price zero, an async order refusal self-heals (missing stop closes immediately, missing
+target gets a fallback re-placed), one position at a time, account-balance-based daily-loss/floor
+limits persisted to their own local state file (`wickless_trend_daily_risk_state.txt`) for
+restart-immunity.
+
+**NOT YET added**: no trading-session gate on ENTRIES (sessions are only used as target sources
+here, unlike `srmAutoStrategy`'s own Asia/London/NY trading-hours toggles) — worth adding later if
+the operator finds this fires at hours they don't want to trade. No independent position sizing
+beyond a fixed `Quantity`.
+
+**Verified 2026-10-16**: `dotnet build wicklessTrendStrategy/wicklessTrendStrategy.csproj -c Release`
+— 0 errors (22 warnings, all either the same harmless pre-existing CS8632 nullable-context pattern
+already present throughout this codebase, or one expected CS0649 for `SessionDef.Color` being
+unused by a strategy that never draws). Builds directly to
+`C:\Quantower\Settings\Scripts\Strategies\wicklessTrendStrategy\` (Strategy projects need no manual
+DLL copy, unlike indicators). **NOT YET confirmed live** — compiled clean, but has not been attached
+to a chart, watched arming a real pending signal, confirming/dropping it on the next 1-minute candle,
+or placing a real order.
+
+---
+
 ## `SwingLevels` indicator — higher-timeframe support/resistance, added 2026-10-15
 
 **Files**: `Indicators/SwingLevels/src/SwingLevels.Indicator/SwingLevels.Indicator.csproj`,
@@ -5405,6 +5490,140 @@ show-tested-levels toggle, resistance/support colours, line thickness.
 confirmed rendering correctly on a live chart** — compiled clean, but attaching it, watching a
 1-hour swing actually get detected and drawn, and confirming the untested→tested fade triggers
 correctly on a real touch have not been observed yet.
+
+### Extension (same day, 2026-10-15): session levels, reaction zones, reversal/trend-reach stats
+
+**New files**: `SessionLevelEngine.cs`, `SessionLevelOverlay.cs`, `SwingHistoryStats.cs`.
+
+**1. Session levels, ported from the operator's own `TradingView/untestedLevels.pine`** ("Sessions
+Suite [claysul]"). Operator: "i have my untestedLevels.pine file that i use to mark out untested
+session levels i want added into this as well with the settings options." That script is large
+(session boxes, prior day/week/month H/L, opening prices, opening gaps, 90-minute cycles) — scoped
+via `AskUserQuestion` to the session range boxes specifically (Asia/London/NY AM/NY PM), not the
+other feature groups. New `SessionLevelEngine`: tracks each session's running high/low live (the
+box) while its ET window is open — 18:00-00:00/00:00-06:00/06:00-12:00/12:00-18:00 by default,
+the pine script's own even quartering of the ET day, deliberately NOT the same hours as
+`srmAutoStrategy`'s own Asia/London/NY split (different purpose: visual reference vs. real-money
+session gating). The instant a window closes, its high and low each become their own untested
+level — same "extends forward until a later bar trades through it, then fades" semantics as a
+swing level — fed from its own 5-minute (configurable) bar stream, independent of the swing
+engine's own 1-hour timeframe, since a session's true high/low needs finer resolution than the
+window itself. Drawn in a visually distinct per-session colour + dash style (operator's own choice,
+via `AskUserQuestion`) so the two engines' output is tellable apart from swing S/R at a glance.
+
+**2. Swing levels can render as reaction zones, not bare lines.** Operator sent a screenshot of
+their own TradingView markup mid-build: "this is how im marking my charts up were i have the box
+were its were price keeps touching as a support and resistance level so i know when to see the
+reaction to the box... and have the sessions highs and lows that are not tested yet" — confirming
+the session-level direction was already correct, but showing swing levels should be a price *band*
+(a zone with tolerance), not a single-price line, matching how price actually reacts in practice.
+New `ShowSwingZoneBox` + `SwingZoneHalfHeightPoints` InputParameters switch `SwingLevelOverlay`'s
+line to a filled box (price ± half-height), reusing the exact same fill+border shape as
+`LevelsMap`'s own dark-pool zone boxes (`LevelZoneDraw`/`DrawZone`) rather than re-deriving it.
+Default on, 3-point half-height.
+
+**3. Historical statistics — real counted backtest, not a heuristic.** Operator: "keep that logic
+that shows if its been retested and probability of a reversal on that level and also the
+probability of the current trend going to that level," scoped via `AskUserQuestion` back when the
+multi-timeframe ask first came in: reversal = "simply never closes through it," trend-reach = "build
+it as a real backtested stat too." New `SwingHistoryStats.cs`: `ComputeReversalStats` counts, across
+every confirmed swing the engine has seen (bounded to the same ~2000-bar window the swing engine
+itself keeps), how many were ever closed through (broken) vs. never were (held) — a real sample
+size, reported as `n=`. `ComputeTrendReach` classifies trend via a simple MA (close vs. MA) and
+normalizes distance by ATR, bucketing each resolved trend-segment's starting distance (as an ATR
+fraction) into reached/not-reached counts — plus a live readout of the CURRENT trend, nearest level,
+its distance, and which historical bucket it falls into. Recomputed once per newly-closed swing-
+timeframe bar (not every poll tick), rendered as a small text panel bottom-left of the pane.
+
+**New InputParameters**: `ShowSwingZoneBox`, `SwingZoneHalfHeightPoints`; session levels master
+toggle, bar resolution, max kept, show-live-box, show-tested, line thickness; per-session
+enable/start/end/colour for Asia/London/NY AM/NY PM; statistics panel toggle, min-forward-bars,
+trend MA period, ATR period.
+
+**Verified 2026-10-15**: two incremental rebuilds, both `dotnet build ... -c Release` — 0 errors
+each time (session-levels addition; stats-panel addition). Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\SwingLevels\SwingLevelsIndicator.dll` after each. **NOT
+YET confirmed on a live chart** — same caveat as the base indicator above, now also covering: a
+session box actually tracking live through its own window and freezing into two lines at the close
+boundary, the zone-box rendering looking right at a real tick size, and the stats panel's numbers
+looking sane once enough bars have accumulated.
+
+### Extension (same day, 2026-10-15): wickless-candle levels — no source, reused an existing definition
+
+**New files**: `WicklessLevelEngine.cs`, `WicklessLevelOverlay.cs`.
+
+Operator: "i also have an indicator that marks out untested wickless candles but i dont have the
+source to it." With no pine/source file to port from, this reuses the ONE "wickless" definition
+already written and verified against live trading in this codebase rather than inventing a second,
+possibly-divergent one: `srmAutoStrategy.cs`'s own `TryFindWicklessTarget` — a candle has "no wick
+at all on a given side, within a small tolerance" when its body-extreme on that side sits within
+`WicklessTolerancePoints` (same name, same default 0.25 as the strategy's own setting) of the bar's
+own high/low. A top-wickless candle (no upper wick) marks its HIGH as a level; a bottom-wickless
+candle (no lower wick) marks its LOW — both extend forward as untested levels, same "trades through
+it = tested" semantics already used for swing/session levels, drawn as a thin dash-dot line (own
+colour pair, not a reaction zone — a wickless level is one exact price, matching how
+`srmAutoStrategy` already uses it as a precise target).
+
+Fed from its own 15-minute (configurable) bar stream, independent of both the swing and session
+engines' own timeframes. **Inherits the source definition's known limitation as-is**: no minimum
+body-size filter, so a tiny/doji bar can register as wickless on both sides — `srmAutoStrategy`
+already accepts this trade-off (it only ever picks the nearest candidate), kept identical here
+rather than silently diverging from the proven logic with an unrequested filter.
+
+**New InputParameters**: enabled toggle, timeframe (default `MIN15`), tolerance (points, default
+0.25), max levels kept (default 40), show-tested toggle, line thickness, high/low colours.
+
+**Verified 2026-10-15**: `dotnet build ... -c Release` — 0 errors (17 pre-existing nullable-context
+warnings, same harmless CS8632 pattern already present everywhere else in this file — not new).
+Deployed to `C:\Quantower\Settings\Scripts\Indicators\SwingLevels\SwingLevelsIndicator.dll`. **NOT
+YET confirmed on a live chart** — same standing caveat as every other piece of this indicator: has
+not yet been watched detecting a real wickless candle and fading it to tested on a real touch.
+
+### Extension (same day, 2026-10-15): removed trend-reach bucket stat, added SRM Vol-Step S1-S3/R1-R3
+
+Operator: "remove the historical bucket part in the indicator i dont need it but i need the srm
+portion from the finch-lite that shows just the s1 s2 s3 and r1 r2 r3." Two changes:
+
+**1. Trend-reach distance-bucket statistic removed outright**, not just hidden. `SwingHistoryStats.cs`
+trimmed back down to `ComputeReversalStats`/`ReversalStats`/`StatsBar` only — `ComputeTrendReach`,
+`TrendReachResult`, and `DistanceBucket` deleted. `SwingLevelsIndicator.cs`: removed the `trendReach`
+field, `StatsBucketEdges` constant, `StatsTrendMaPeriod`/`StatsAtrPeriod` InputParameters (both
+unused once their only consumer was gone), and the trend-reach lines from `BuildStatsLines()`. The
+stats panel now shows only the aggregate swing reversal rate.
+
+**2. SRM Vol-Step range (S1-S3/R1-R3), ported from Finch-Lite's own SRM feature.** Operator's own
+words make clear this is the Vol-Step sub-piece specifically (not the rest of SRM: no histogram,
+badge, session budgets, naked levels, IB). New `<Compile Include>` in `SwingLevels.Indicator.csproj`
+reaching into Finch-Lite's folder for `SrmEngine.cs`/`CboeIndexClient.cs` — same two files, same
+reach direction, `srmAutoStrategy` already established. Rather than re-deriving the implied-move
+math, this feeds the SAME `SrmEngine` a `SrmSettings` with every OTHER feature disabled
+(`AsiaEnabled`/`LondonEnabled`/`NyEnabled`/`WeeklyEnabled`/`MonthlyEnabled`/`IbEnabled` all false) and
+only `VolStepEnabled` on, so none of that other machinery runs — just `VsMid`/`VsHalf`. Finch-Lite's
+own version of this feature only ever drew TWO levels each side (R1/R2, S1/S2) — extended to THREE
+here (R1-R3/S1-S3) to match the operator's own literal ask, via `vsMid ± n*vsHalf` for n=1,2,3.
+New `SrmVolStepOverlay.cs`: full-pane-width lines (not anchored to a confirmation bar — these move
+only when price travels a full implied-move step away), adapted from `LevelsMap`'s own
+`LevelsOverlay.DrawLine`.
+
+Implied-vol quote fetched from CBOE's free public index endpoint (`CboeIndexClient`, default ticker
+`VXN`) on its own poll timer, reactively started/stopped from the main poll tick (same self-healing
+shape as Finch-Lite's own `SyncSrmVolTimer`) — unlike Finch-Lite's own SRM feature, VIX/VIX3M are
+NOT fetched here (the "Expanded" regime flag they drive never affects Vol-Step's own step size, so
+skipping them is a genuine simplification, not a missing feature). Prior-close/ATR14 fallback comes
+from its own daily `HistoricalData` fetch via the already-shared `SrmEngine.TryComputeDailyVolInputs`.
+Fed from its own 5-minute (configurable) bar stream, independent of every other engine in this
+indicator.
+
+**New InputParameters**: enabled toggle, implied-vol ticker (default `VXN`), vol poll interval
+(default 60s), bar resolution (default `MIN5`), step multiplier (default 0.5, matching
+`srmAutoStrategy`'s own `VolStepMult` default), daily lookback (default 40 days, matching Finch-
+Lite's own `SrmDailyLookbackDays` default), line thickness, up/down/mid colours.
+
+**Verified 2026-10-15**: two rebuilds (trend-reach removal; SRM Vol-Step addition), both
+`dotnet build ... -c Release` — 0 errors each time. Deployed to
+`C:\Quantower\Settings\Scripts\Indicators\SwingLevels\SwingLevelsIndicator.dll` after each. **NOT
+YET confirmed on a live chart** — same standing caveat: has not yet been watched actually fetching a
+real VXN quote and drawing R1-R3/S1-S3 at sane prices on a live chart.
 
 ---
 

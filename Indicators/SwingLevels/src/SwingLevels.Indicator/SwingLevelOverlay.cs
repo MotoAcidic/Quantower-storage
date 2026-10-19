@@ -9,8 +9,12 @@ namespace SwingLevels;
 /// <summary>One confirmed higher-timeframe swing high/low, ready to draw. <see cref="Untested"/>
 /// drives both line style (solid+bright while live, dim+dotted once price has traded through it)
 /// and the label's own "(tested)" suffix — same semantics as `OrbLevels`' own `LevelLineOverlay`,
-/// which this is adapted from.</summary>
-internal readonly record struct SwingLevelDraw(bool IsHigh, double Price, DateTime SinceUtc, bool Untested, Color Color);
+/// which this is adapted from. <see cref="ZoneHalfHeight"/> &gt; 0 switches the render from a bare
+/// line to a filled reaction-zone box (price &#177; half-height) — the operator's own charting habit
+/// (screenshot, 2026-10-15): "the box were its were price keeps touching as a support and
+/// resistance level so i know when to see the reaction to the box." Same fill+border shape as
+/// `LevelsMap`'s own `LevelZoneDraw`/`DrawZone`, reused here rather than re-derived.</summary>
+internal readonly record struct SwingLevelDraw(bool IsHigh, double Price, DateTime SinceUtc, bool Untested, Color Color, double ZoneHalfHeight = 0);
 
 /// <summary>Immutable paint snapshot: the poll writes it, the paint reads it.</summary>
 internal sealed record SwingLevelDrawable(SwingLevelDraw[] Lines)
@@ -30,6 +34,7 @@ internal sealed class SwingLevelOverlay : IDisposable
     private readonly Dictionary<int, Pen> dimPens = new();
     private readonly Dictionary<int, SolidBrush> labelBrushes = new();
     private readonly Dictionary<int, SolidBrush> dimLabelBrushes = new();
+    private readonly Dictionary<int, SolidBrush> zoneFills = new();
     private bool disposed;
 
     public void Draw(Graphics graphics, IChartWindow window, SwingLevelDrawable drawable, float lineThickness, List<RectangleF> labelRegistry)
@@ -57,7 +62,23 @@ internal sealed class SwingLevelOverlay : IDisposable
                 TryX(converter, line.SinceUtc, pane.Left, pane.Right, out startX);
 
                 var pen = line.Untested ? this.SolidPen(line.Color, lineThickness) : this.DimPen(line.Color, lineThickness);
-                graphics.DrawLine(pen, startX, y, pane.Right, y);
+
+                if (line.ZoneHalfHeight > 0
+                    && TryY(converter, line.Price + line.ZoneHalfHeight, pane.Top, pane.Bottom, out var topY)
+                    && TryY(converter, line.Price - line.ZoneHalfHeight, pane.Top, pane.Bottom, out var botY))
+                {
+                    var top = Math.Min(topY, botY);
+                    var height = Math.Max(Math.Abs(botY - topY), 1f);
+                    var zoneRect = new RectangleF(startX, top, Math.Max(1f, pane.Right - startX), height);
+
+                    graphics.FillRectangle(this.ZoneFill(line.Color, line.Untested), zoneRect);
+                    graphics.DrawRectangle(pen, zoneRect.X, zoneRect.Y, zoneRect.Width, zoneRect.Height);
+                    graphics.DrawLine(pen, startX, y, pane.Right, y);
+                }
+                else
+                {
+                    graphics.DrawLine(pen, startX, y, pane.Right, y);
+                }
 
                 var kind = line.IsHigh ? "R" : "S";
                 var text = line.Untested ? $"{kind} {line.Price:0.####}" : $"{kind} {line.Price:0.####} (tested)";
@@ -130,6 +151,17 @@ internal sealed class SwingLevelOverlay : IDisposable
         return pen;
     }
 
+    private SolidBrush ZoneFill(Color colour, bool untested)
+    {
+        var key = (colour.ToArgb() * 2) + (untested ? 1 : 0);
+        if (!this.zoneFills.TryGetValue(key, out var brush))
+        {
+            brush = new SolidBrush(Color.FromArgb(untested ? 45 : 22, colour));
+            this.zoneFills[key] = brush;
+        }
+        return brush;
+    }
+
     private SolidBrush LabelBrush(Color colour)
     {
         var key = colour.ToArgb();
@@ -163,10 +195,12 @@ internal sealed class SwingLevelOverlay : IDisposable
         foreach (var p in this.dimPens.Values) p.Dispose();
         foreach (var b in this.labelBrushes.Values) b.Dispose();
         foreach (var b in this.dimLabelBrushes.Values) b.Dispose();
+        foreach (var b in this.zoneFills.Values) b.Dispose();
 
         this.solidPens.Clear();
         this.dimPens.Clear();
         this.labelBrushes.Clear();
         this.dimLabelBrushes.Clear();
+        this.zoneFills.Clear();
     }
 }

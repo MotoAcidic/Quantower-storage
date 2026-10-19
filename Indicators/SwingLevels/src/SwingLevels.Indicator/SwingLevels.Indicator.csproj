@@ -24,4 +24,17 @@
       <Private>false</Private>
     </Reference>
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Reaches into Finch-Lite's own folder for the SRM Vol-Step range engine (S1-S3/R1-R3) —
+         operator's own ask: "i need the srm portion from the finch-lite that shows just the s1 s2
+         s3 and r1 r2 r3." Finch-Lite is the older/foundational artifact here (same direction
+         srmAutoStrategy already reaches into Finch-Lite for the same two files), so this indicator
+         pulls from it, not the other way around. A frozen snapshot as of this indicator's own last
+         build — a later tuning change to SrmEngine.cs inside Finch-Lite does not reach here until
+         rebuilt, same accepted tradeoff as every other cross-project <Compile Include> in this
+         repo. -->
+    <Compile Include="..\..\..\Finch-Lite\src\Finch.Lite.Indicator\SrmEngine.cs" />
+    <Compile Include="..\..\..\Finch-Lite\src\Finch.Lite.Indicator\CboeIndexClient.cs" />
+  </ItemGroup>
 </Project>
