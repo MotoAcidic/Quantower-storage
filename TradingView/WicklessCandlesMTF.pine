@@ -1,82 +1,216 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //
-// Wickless Candles (MTF) — marks candles with (within a small tolerance) no wick on one side,
-// across five fixed timeframes at once: 1m, 5m, 15m, 1H, 4H. Operator's own ask (2026-10-22):
-// "I need a tradingview indicator that will draw a line and label the chart time frame that has a
-// wickless candle body on it," then: "I want it to mark out all wickless candles from the 1min
-// 5min 15min 1hr and 4hr."
+// Wickless Candles (MTF) — marks candles with (within a small tolerance) no wick on one side, on
+// the chart's own native timeframe AND on four higher timeframes (5m/15m/1H/4H) watched at the
+// same time. Operator's own ask (2026-10-22): "I need a tradingview indicator that will draw a
+// line and label the chart time frame that has a wickless candle body on it," then: "I want it to
+// mark out all wickless candles from the 1min 5min 15min 1hr and 4hr."
+//
+// HISTORY, 2026-10-23: the original build watched five FIXED timeframes via `request.security`,
+// which needed the "offset by one bar inside a lookahead_on request" idiom to avoid repainting.
+// Several rounds of bug reports (a visibly-wicked candle flagged wickless; a level that should
+// have cleared not clearing) never got fully root-caused despite a debug-OHLC mode added to chase
+// them. Operator's own call: "just read the actual bars them selves instead of the data read the
+// bar and if the bar doesnt have a wick then mark it not that hard." Correct call — the script was
+// rewritten to read the chart's own native series directly (no request.security at all), which
+// has been solid since. Operator then asked for the multi-timeframe convenience back: "being on
+// the 1min chart and seeing the 5min lines was nice."
+//
+// HOW THE HIGHER TIMEFRAMES WORK NOW, WITHOUT `request.security`: rather than fetching 5m/15m/1H/4H
+// data from Pine's own higher-timeframe machinery (the thing that kept producing mismatched data),
+// each one is assembled BY HAND from the chart's own native, already-proven-reliable closed bars —
+// same "just read the actual bars" principle, just applied to build the higher-timeframe candles
+// too instead of fetching them pre-built. For each watched period, a running accumulator tracks its
+// own open/high/low/close across every native bar that falls inside the current UTC-aligned
+// boundary (`time - (time % periodMs)`); the instant a native bar's boundary differs from the
+// accumulator's own, the accumulator holds one COMPLETE, correctly-closed higher-timeframe candle,
+// evaluated for wickless-ness right then before starting a fresh accumulator for the new boundary.
+// No request.security, no lookahead, no repaint-avoidance trickery — only the same native OHLC
+// values already in use for the chart's own timeframe.
+//
+// REQUIREMENT, stated plainly: this self-aggregation only produces a correct higher-timeframe
+// candle when the CHART's own timeframe evenly divides into it (1-minute chart building 5m candles
+// from five native 1-minute bars = correct; a 7-minute chart cannot cleanly build 5m candles at
+// all). Each watched period is automatically skipped whenever it isn't strictly larger than the
+// chart's own timeframe — matches the operator's own stated primary use (the 1-minute chart, which
+// divides cleanly into all four of 5m/15m/1H/4H).
 //
 // DEFINITION — same tolerance-based rule already proven in the operator's own Quantower work
 // (srmAutoStrategy / WicklessLevelEngine): a candle's body-extreme sits within a small tick
 // tolerance of the bar's own high/low on that side. A top-wickless candle (no upper wick) marks
-// its HIGH as a level; a bottom-wickless candle (no lower wick) marks its LOW. Tolerance is in
-// TICKS (syminfo.mintick multiples), not a fixed price number, so one default works across any
-// instrument/price scale — 1 tick is the same "basically no wick" standard already used there.
+// its HIGH as a level; a bottom-wickless candle (no lower wick) marks its LOW.
 //
-// UNTESTED-UNTIL-TOUCHED — same convention used throughout: each level extends forward from the
-// candle that formed it until a LATER bar's range trades through that exact price (high >= level
-// and low <= level — the exact wick touching it counts, same as a resting take-profit order would
-// fill there). By default a tested level is DELETED outright (`showTestedInput` off) rather than
-// kept dimmed — operator's own report, 2026-10-22: leaving every tested level on the chart piled
-// up into unreadable clutter over a session. With `showTestedInput` on, it's kept instead — frozen,
-// dimmed, relabeled with a "(tested)" suffix. Checked against the CURRENT chart's own high/low
-// every bar, regardless of which of the five timeframes produced the level, so a touch is detected
-// in real time no matter what timeframe you're viewing.
+// UNTESTED-UNTIL-TOUCHED: each level extends forward until a LATER bar's range trades through that
+// exact price (high >= level and low <= level — a wick touching it counts, same as a resting
+// take-profit order would fill there), checked every bar against the CHART's own live high/low
+// regardless of which timeframe produced the level. By default a tested level is DELETED outright
+// (`showTestedInput` off) rather than kept on the chart piling up into clutter over a session.
 //
 // LINES AND LABELS ARE PINNED INTO THE BLANK SPACE PAST THE LAST CANDLE (`last_bar_time + N *
 // barInterval`, N staggered per timeframe) — same convention as the PWL/PDL/PML labels in the
-// operator's own smc.pine, with the label itself using `label.style_label_left` so its text grows
-// LEFTWARD from that fixed right-side anchor and never runs off the edge. Labels show just the
-// timeframe + side (e.g. "1m WLS H") — no price in the text, since the line itself already sits at
-// the exact price on the axis.
-//
-// MULTI-TIMEFRAME MECHANICS — non-repainting by construction: each timeframe's own bar count is
-// read via `timeframe.change(tf)` (computable directly from the chart's own bar stream, no fetch
-// needed), and its CONFIRMED (just-closed) OHLC is pulled via `request.security(..., open[1],
-// high[1], low[1], close[1], time[1], lookahead = barmerge.lookahead_on)` — the same "offset by one
-// bar inside a lookahead_on request" idiom the operator's own smc.pine (LuxAlgo) uses for its Fair
-// Value Gap detection. request.security's own timeframe argument must be a compile-time-constant
-// string in Pine, so the five timeframes are five separate, explicit request.security calls
-// (cannot be looped over a dynamic array of timeframe strings) — the actual per-timeframe
-// detection/tracking logic is still written ONCE, in `processWickless()`, and just called five times.
-//
-// KNOWN LIMITATION, stated plainly: `request.security` can only return the LAST lower-timeframe bar
-// within each bar of whatever chart you're actually viewing — so watching "1m" wickless candles
-// while viewing a chart SLOWER than 1 minute (e.g. a 5-minute chart) will miss most of the 1-minute
-// candles, not just the wickless ones. This is accurate and complete when viewed on the 1-minute
-// chart itself (every one of the five requested timeframes is then >= the chart's own timeframe) —
-// matches the operator's own stated primary use ("im going to use the 1min chart").
+// operator's own smc.pine, label text growing LEFTWARD (`label.style_label_left`) from that fixed
+// right-side anchor so it never runs off the edge.
 //
 //@version=6
 indicator('Wickless Candles (MTF)', shorttitle = 'Wickless MTF', overlay = true, max_lines_count = 500, max_labels_count = 500)
 
 // === Inputs ===
 tolTicksInput = input.float(1.0, 'Wick tolerance (ticks, 0 = no wick at all)', minval = 0, step = 0.25, group = 'Detection')
+debugRawOhlc  = input.bool(false, 'Debug: show raw O/H/L/C in label', group = 'Detection', tooltip = 'Shows the exact open/high/low/close used for the candle, for comparison against what the chart (or, for the higher timeframes, the real published candle) shows on hover.')
 
-show1m  = input.bool(true, '1 minute',  group = 'Timeframes', inline = 'tf1')
-color1m = input.color(color.new(#ff6d00, 0), '', group = 'Timeframes', inline = 'tf1')
-show5m  = input.bool(true, '5 minute',  group = 'Timeframes', inline = 'tf2')
-color5m = input.color(color.new(#d500f9, 0), '', group = 'Timeframes', inline = 'tf2')
-show15m = input.bool(true, '15 minute', group = 'Timeframes', inline = 'tf3')
-color15m = input.color(color.new(#2979ff, 0), '', group = 'Timeframes', inline = 'tf3')
-show1h  = input.bool(true, '1 hour',    group = 'Timeframes', inline = 'tf4')
-color1h = input.color(color.new(#00c853, 0), '', group = 'Timeframes', inline = 'tf4')
-show4h  = input.bool(true, '4 hour',    group = 'Timeframes', inline = 'tf5')
-color4h = input.color(color.new(#ffd600, 0), '', group = 'Timeframes', inline = 'tf5')
+showNative = input.bool(true, 'Current chart timeframe', group = 'Timeframes', inline = 'tfN')
+colorNativeH = input.color(color.new(#ff6d00, 0), '', group = 'Timeframes', inline = 'tfN')
+show5m  = input.bool(true, '5 minute',  group = 'Timeframes', inline = 'tf5')
+color5m = input.color(color.new(#d500f9, 0), '', group = 'Timeframes', inline = 'tf5')
+show15m = input.bool(true, '15 minute', group = 'Timeframes', inline = 'tf15')
+color15m = input.color(color.new(#2979ff, 0), '', group = 'Timeframes', inline = 'tf15')
+show1h  = input.bool(true, '1 hour',    group = 'Timeframes', inline = 'tf1h')
+color1h = input.color(color.new(#00c853, 0), '', group = 'Timeframes', inline = 'tf1h')
+show4h  = input.bool(true, '4 hour',    group = 'Timeframes', inline = 'tf4h')
+color4h = input.color(color.new(#ffd600, 0), '', group = 'Timeframes', inline = 'tf4h')
 
-maxLevelsPerTf = input.int(15, 'Max UNTESTED levels kept per timeframe', minval = 2, maxval = 80, group = 'Style', tooltip = 'Bounds how many still-untested levels each timeframe tracks at once.')
-lineWidthInput = input.int(1, 'Line width', minval = 1, maxval = 4, group = 'Style')
-showLabels     = input.bool(true, 'Show labels', group = 'Style')
-showTestedInput = input.bool(false, 'Show tested levels (unchecked = delete them)', group = 'Style', tooltip = 'Off by default — a tested level is simply removed the instant price trades through it, instead of staying on the chart dimmed forever. With enough wickless candles in a session, leaving them all on the chart piles up into unreadable clutter once you scroll back.')
-rightOffsetBars  = input.int(20, 'Right-edge offset (bars past the last candle)', minval = 2, maxval = 100, group = 'Style', tooltip = 'How far into the blank space past the last candle the lines/labels are pinned — same convention as the PWL/PDL/PML labels in smc.pine.')
-labelStaggerBars = input.int(6, 'Label horizontal stagger (bars per timeframe)', minval = 0, maxval = 60, group = 'Style', tooltip = 'Each timeframe gets this many extra bars further right than the one before it (1m closest, 4h furthest), so two timeframes with a level at nearly the same price don\'t render their labels stacked on top of each other.')
+maxLevelsPerTf  = input.int(15, 'Max UNTESTED levels kept per timeframe', minval = 2, maxval = 80, group = 'Style', tooltip = 'Bounds how many still-untested levels each timeframe tracks at once.')
+lineWidthInput  = input.int(1, 'Line width', minval = 1, maxval = 4, group = 'Style')
+showLabels      = input.bool(true, 'Show labels', group = 'Style')
+showTestedInput = input.bool(false, 'Show tested levels (unchecked = delete them)', group = 'Style', tooltip = 'Off by default — a tested level is simply removed the instant price trades through it, instead of staying on the chart dimmed forever.')
+rightOffsetBars  = input.int(3, 'Right-edge offset (bars past the last candle)', minval = 0, maxval = 100, group = 'Style', tooltip = 'How far into the blank space past the last candle the lines/labels are pinned — same convention as the PWL/PDL/PML labels in smc.pine. Kept small by default so it stays close even at a tight zoom.')
+labelStaggerBars = input.int(10, 'Label horizontal stagger (bars per timeframe)', minval = 0, maxval = 60, group = 'Style', tooltip = 'Each timeframe gets this many extra bars further right than the one before it, so two timeframes with a level at nearly the same price (very plausible — a 1m wickless candle is often literally one of the five 1-minute candles inside a 5m bar) render as two distinguishable labels instead of one overlapping blob.')
 
 tolerance = tolTicksInput * syminfo.mintick
+chartPeriodMs = timeframe.in_seconds(timeframe.period) * 1000
 
-// === Per-timeframe tracked state ===
-// @type                     Tracks one timeframe's own untested wickless-top and wickless-bottom levels.
+// Friendly tag for the native timeframe's own label text — falls back to the raw Pine period
+// string (e.g. "D", "W") for anything outside the common intraday set.
+nativeTag = switch timeframe.period
+    '1'   => '1m'
+    '5'   => '5m'
+    '15'  => '15m'
+    '60'  => '1H'
+    '240' => '4H'
+    =>       timeframe.period
+
+// === Native (current chart) timeframe — reads the chart's own series directly, no aggregation ===
+var line[]   nTopLines  = array.new_line()
+var float[]  nTopLevels = array.new_float()
+var label[]  nTopLabels = array.new_label()
+var string[] nTopTexts  = array.new_string()
+var line[]   nBotLines  = array.new_line()
+var float[]  nBotLevels = array.new_float()
+var label[]  nBotLabels = array.new_label()
+var string[] nBotTexts  = array.new_string()
+
+nativeLabelX = last_bar_time + (rightOffsetBars * (time - time[1]))
+
+if showNative
+    if array.size(nTopLines) > 0
+        for i = array.size(nTopLines) - 1 to 0
+            lvl = array.get(nTopLevels, i)
+            if high >= lvl and low <= lvl
+                ln  = array.get(nTopLines, i)
+                lbl = array.get(nTopLabels, i)
+                if showTestedInput
+                    base = array.get(nTopTexts, i)
+                    line.set_x2(ln, nativeLabelX)
+                    line.set_color(ln, color.new(colorNativeH, 75))
+                    line.set_style(ln, line.style_dotted)
+                    if not na(lbl)
+                        label.set_x(lbl, nativeLabelX)
+                        label.set_text(lbl, base + ' (tested)')
+                else
+                    line.delete(ln)
+                    if not na(lbl)
+                        label.delete(lbl)
+                array.remove(nTopLines, i)
+                array.remove(nTopLevels, i)
+                array.remove(nTopLabels, i)
+                array.remove(nTopTexts, i)
+            else
+                line.set_x2(array.get(nTopLines, i), nativeLabelX)
+
+    if array.size(nBotLines) > 0
+        for i = array.size(nBotLines) - 1 to 0
+            lvl = array.get(nBotLevels, i)
+            if high >= lvl and low <= lvl
+                ln  = array.get(nBotLines, i)
+                lbl = array.get(nBotLabels, i)
+                if showTestedInput
+                    base = array.get(nBotTexts, i)
+                    line.set_x2(ln, nativeLabelX)
+                    line.set_color(ln, color.new(colorNativeH, 75))
+                    line.set_style(ln, line.style_dotted)
+                    if not na(lbl)
+                        label.set_x(lbl, nativeLabelX)
+                        label.set_text(lbl, base + ' (tested)')
+                else
+                    line.delete(ln)
+                    if not na(lbl)
+                        label.delete(lbl)
+                array.remove(nBotLines, i)
+                array.remove(nBotLevels, i)
+                array.remove(nBotLabels, i)
+                array.remove(nBotTexts, i)
+            else
+                line.set_x2(array.get(nBotLines, i), nativeLabelX)
+
+    if barstate.isconfirmed
+        nBodyHigh = math.max(open, close)
+        nBodyLow  = math.min(open, close)
+        nDebugTxt = debugRawOhlc
+          ? ' [o=' + str.tostring(open, format.mintick) + ' h=' + str.tostring(high, format.mintick) + ' l=' + str.tostring(low, format.mintick) + ' c=' + str.tostring(close, format.mintick) + ']'
+          : ''
+
+        if (high - nBodyHigh) <= tolerance
+            nBaseTxt = nativeTag + ' WLS H' + nDebugTxt
+            nNewLine = line.new(time, high, nativeLabelX, high, xloc = xloc.bar_time, color = colorNativeH, width = lineWidthInput, style = line.style_solid)
+            label nNewLabel = na
+            if showLabels
+                nNewLabel := label.new(nativeLabelX, high, nBaseTxt, xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 100), textcolor = colorNativeH, size = size.small)
+            array.push(nTopLines, nNewLine)
+            array.push(nTopLevels, high)
+            array.push(nTopLabels, nNewLabel)
+            array.push(nTopTexts, nBaseTxt)
+            if array.size(nTopLines) > maxLevelsPerTf
+                oldLine  = array.shift(nTopLines)
+                array.shift(nTopLevels)
+                oldLabel = array.shift(nTopLabels)
+                array.shift(nTopTexts)
+                line.delete(oldLine)
+                if not na(oldLabel)
+                    label.delete(oldLabel)
+
+        if (nBodyLow - low) <= tolerance
+            nBaseTxt = nativeTag + ' WLS L' + nDebugTxt
+            nNewLine = line.new(time, low, nativeLabelX, low, xloc = xloc.bar_time, color = colorNativeH, width = lineWidthInput, style = line.style_solid)
+            label nNewLabel = na
+            if showLabels
+                nNewLabel := label.new(nativeLabelX, low, nBaseTxt, xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 100), textcolor = colorNativeH, size = size.small)
+            array.push(nBotLines, nNewLine)
+            array.push(nBotLevels, low)
+            array.push(nBotLabels, nNewLabel)
+            array.push(nBotTexts, nBaseTxt)
+            if array.size(nBotLines) > maxLevelsPerTf
+                oldLine  = array.shift(nBotLines)
+                array.shift(nBotLevels)
+                oldLabel = array.shift(nBotLabels)
+                array.shift(nBotTexts)
+                line.delete(oldLine)
+                if not na(oldLabel)
+                    label.delete(oldLabel)
+
+// === Higher timeframes — self-aggregated from the chart's own native closed bars, no request.security ===
+
+// @type   One watched higher timeframe: its own accumulator (building the CURRENT, still-forming
+//         higher-timeframe candle out of native bars) plus its own tracked untested levels.
 type tfState
     color    col
+    int      periodMs
+    string   tag
+    int      boundary = na
+    float    accO = na
+    float    accH = na
+    float    accL = na
+    float    accC = na
+    bool     accValid = false
     line[]   topLines
     float[]  topLevels
     label[]  topLabels
@@ -86,36 +220,25 @@ type tfState
     label[]  botLabels
     string[] botTexts
 
-// @function      Builds one timeframe's tracked state with a fresh, independent set of arrays —
-//                 `type` field defaults in Pine must be compile-time constants (na/false/literals),
-//                 not function calls like array.new_line(), so each array is constructed explicitly
-//                 here rather than as a UDT field default.
-newTfState(color c) =>
-    tfState.new(c, array.new_line(), array.new_float(), array.new_label(), array.new_string(), array.new_line(), array.new_float(), array.new_label(), array.new_string())
+// @function   `type` field defaults in Pine must be compile-time constants, not function calls
+//              like array.new_line(), so the array fields are constructed explicitly here.
+newTfState(color c, int periodMs, string tag) =>
+    tfState.new(c, periodMs, tag, na, na, na, na, na, false, array.new_line(), array.new_float(), array.new_label(), array.new_string(), array.new_line(), array.new_float(), array.new_label(), array.new_string())
 
-var tfState state1m  = newTfState(color1m)
-var tfState state5m  = newTfState(color5m)
-var tfState state15m = newTfState(color15m)
-var tfState state1h  = newTfState(color1h)
-var tfState state4h  = newTfState(color4h)
+var tfState state5m  = newTfState(color5m,  5  * 60 * 1000, '5m')
+var tfState state15m = newTfState(color15m, 15 * 60 * 1000, '15m')
+var tfState state1h  = newTfState(color1h,  60 * 60 * 1000, '1H')
+var tfState state4h  = newTfState(color4h,  240 * 60 * 1000, '4H')
 
-// === Core per-timeframe logic (called once per timeframe below) ===
-// @function      Mitigation check (against the CURRENT chart's own high/low, every bar) + new-level
-//                 creation (only on a freshly confirmed htf bar) for one timeframe's tracked arrays.
-processWickless(tfState st, bool enabled, bool newBar, int htfTime, float o, float h, float l, float c, string tfTag, int slotIndex) =>
-    // Pinned into the blank space past the last candle, same convention as smc.pine's own
-    // PWL/PDL/PML labels (`last_bar_time + N * (time - time[1])`) — updates every bar so it tracks
-    // the right edge as new candles form, rather than sitting at a fixed historical x. Each
-    // timeframe gets its own extra stagger so same-price levels from different timeframes don't
-    // land on the exact same spot.
-    labelX = last_bar_time + ((rightOffsetBars + (slotIndex * labelStaggerBars)) * (time - time[1]))
-    if enabled
-        // A level this bar's range just traded through is "tested." Default: delete it outright
-        // (line + label) rather than leave it on the chart — with enough wickless candles in a
-        // session, keeping every tested one piles up into unreadable clutter once you scroll back
-        // (operator's own report, 2026-10-22, with a screenshot showing exactly that). With
-        // `showTestedInput` on, it's kept instead — frozen, dimmed, relabeled "(tested)" — using the
-        // base text tracked in `topTexts`/`botTexts` ourselves rather than a label.get_text() getter.
+// @function   Mitigation (every bar, against the chart's own live high/low) + accumulator update
+//              and wickless evaluation (only on a confirmed native bar) for one watched timeframe.
+//              Skips entirely whenever this timeframe isn't strictly larger than the chart's own —
+//              self-aggregation only produces a correct candle when the chart's own bars evenly
+//              divide into it.
+processHtf(tfState st, bool enabled, int slotIndex) =>
+    if enabled and st.periodMs > chartPeriodMs
+        labelX = last_bar_time + ((rightOffsetBars + ((slotIndex + 1) * labelStaggerBars)) * (time - time[1]))
+
         if array.size(st.topLines) > 0
             for i = array.size(st.topLines) - 1 to 0
                 lvl = array.get(st.topLevels, i)
@@ -166,103 +289,77 @@ processWickless(tfState st, bool enabled, bool newBar, int htfTime, float o, flo
                 else
                     line.set_x2(array.get(st.botLines, i), labelX)
 
-        // New confirmed htf bar — check wickless conditions and arm a fresh level if it qualifies.
-        if newBar and not na(o)
-            bodyHigh = math.max(o, c)
-            bodyLow  = math.min(o, c)
+        if barstate.isconfirmed
+            boundary = time - (time % st.periodMs)
 
-            if (h - bodyHigh) <= tolerance
-                baseTxt  = tfTag + ' WLS H'
-                newLine  = line.new(htfTime, h, labelX, h, xloc = xloc.bar_time, color = st.col, width = lineWidthInput, style = line.style_solid)
-                label newLabel = na
-                if showLabels
-                    newLabel := label.new(labelX, h, baseTxt, xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 100), textcolor = st.col, size = size.small)
-                array.push(st.topLines, newLine)
-                array.push(st.topLevels, h)
-                array.push(st.topLabels, newLabel)
-                array.push(st.topTexts, baseTxt)
-                if array.size(st.topLines) > maxLevelsPerTf
-                    oldLine  = array.shift(st.topLines)
-                    array.shift(st.topLevels)
-                    oldLabel = array.shift(st.topLabels)
-                    array.shift(st.topTexts)
-                    line.delete(oldLine)
-                    if not na(oldLabel)
-                        label.delete(oldLabel)
+            // The accumulator holds a COMPLETE higher-timeframe candle the instant we roll into a
+            // new boundary — evaluate it now, before resetting for the new one.
+            if st.accValid and boundary != st.boundary
+                hBodyHigh = math.max(st.accO, st.accC)
+                hBodyLow  = math.min(st.accO, st.accC)
+                hDebugTxt = debugRawOhlc
+                  ? ' [o=' + str.tostring(st.accO, format.mintick) + ' h=' + str.tostring(st.accH, format.mintick) + ' l=' + str.tostring(st.accL, format.mintick) + ' c=' + str.tostring(st.accC, format.mintick) + ']'
+                  : ''
 
-            if (bodyLow - l) <= tolerance
-                baseTxt  = tfTag + ' WLS L'
-                newLine  = line.new(htfTime, l, labelX, l, xloc = xloc.bar_time, color = st.col, width = lineWidthInput, style = line.style_solid)
-                label newLabel = na
-                if showLabels
-                    newLabel := label.new(labelX, l, baseTxt, xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 100), textcolor = st.col, size = size.small)
-                array.push(st.botLines, newLine)
-                array.push(st.botLevels, l)
-                array.push(st.botLabels, newLabel)
-                array.push(st.botTexts, baseTxt)
-                if array.size(st.botLines) > maxLevelsPerTf
-                    oldLine  = array.shift(st.botLines)
-                    array.shift(st.botLevels)
-                    oldLabel = array.shift(st.botLabels)
-                    array.shift(st.botTexts)
-                    line.delete(oldLine)
-                    if not na(oldLabel)
-                        label.delete(oldLabel)
+                if (st.accH - hBodyHigh) <= tolerance
+                    hBaseTxt = st.tag + ' WLS H' + hDebugTxt
+                    hNewLine = line.new(st.boundary, st.accH, labelX, st.accH, xloc = xloc.bar_time, color = st.col, width = lineWidthInput, style = line.style_solid)
+                    label hNewLabel = na
+                    if showLabels
+                        hNewLabel := label.new(labelX, st.accH, hBaseTxt, xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 100), textcolor = st.col, size = size.small)
+                    array.push(st.topLines, hNewLine)
+                    array.push(st.topLevels, st.accH)
+                    array.push(st.topLabels, hNewLabel)
+                    array.push(st.topTexts, hBaseTxt)
+                    if array.size(st.topLines) > maxLevelsPerTf
+                        oldLine  = array.shift(st.topLines)
+                        array.shift(st.topLevels)
+                        oldLabel = array.shift(st.topLabels)
+                        array.shift(st.topTexts)
+                        line.delete(oldLine)
+                        if not na(oldLabel)
+                            label.delete(oldLabel)
 
-// === Five explicit, literal-timeframe requests — request.security's own timeframe argument must
-// be a compile-time constant in Pine, so this can't be a loop over a dynamic array of strings. ===
-//
-// 1m is special-cased: when the chart itself IS the 1-minute chart, requesting "1" via
-// request.security is asking for the exact same series the chart already has — a redundant,
-// self-referential request that produced mismatched OHLC in practice (operator's own report,
-// 2026-10-22: a candle with a visible wick got flagged wickless, and the resulting bad level also
-// never tested/deleted correctly — both symptoms point at the SAME corrupted fetch). Bypassed
-// entirely by using the chart's own native open[1]/high[1]/low[1]/close[1]/time[1] whenever
-// timeframe.period == '1', with newBar1m simply always true in that case (every closed chart bar
-// IS a new 1-minute bar when the chart itself is 1-minute). The request.security call still runs
-// unconditionally either way — Pine doesn't allow skipping it based on a runtime branch — its
-// result is just ignored on the native path.
-isNative1m = timeframe.period == '1'
-[sec_time1m, sec_open1m, sec_high1m, sec_low1m, sec_close1m] = request.security(syminfo.tickerid, '1', [time[1], open[1], high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
-newBar1m = isNative1m ? true : timeframe.change('1')
-time1m   = isNative1m ? time[1]  : sec_time1m
-open1m   = isNative1m ? open[1]  : sec_open1m
-high1m   = isNative1m ? high[1]  : sec_high1m
-low1m    = isNative1m ? low[1]   : sec_low1m
-close1m  = isNative1m ? close[1] : sec_close1m
+                if (hBodyLow - st.accL) <= tolerance
+                    hBaseTxt = st.tag + ' WLS L' + hDebugTxt
+                    hNewLine = line.new(st.boundary, st.accL, labelX, st.accL, xloc = xloc.bar_time, color = st.col, width = lineWidthInput, style = line.style_solid)
+                    label hNewLabel = na
+                    if showLabels
+                        hNewLabel := label.new(labelX, st.accL, hBaseTxt, xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 100), textcolor = st.col, size = size.small)
+                    array.push(st.botLines, hNewLine)
+                    array.push(st.botLevels, st.accL)
+                    array.push(st.botLabels, hNewLabel)
+                    array.push(st.botTexts, hBaseTxt)
+                    if array.size(st.botLines) > maxLevelsPerTf
+                        oldLine  = array.shift(st.botLines)
+                        array.shift(st.botLevels)
+                        oldLabel = array.shift(st.botLabels)
+                        array.shift(st.botTexts)
+                        line.delete(oldLine)
+                        if not na(oldLabel)
+                            label.delete(oldLabel)
 
-newBar5m = timeframe.change('5')
-[time5m, open5m, high5m, low5m, close5m] = request.security(syminfo.tickerid, '5', [time[1], open[1], high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
+            if not st.accValid or boundary != st.boundary
+                // Starting a fresh higher-timeframe candle at this native bar. accC assigned last
+                // in both branches so the if/else's own (unused, but type-checked) result type
+                // matches — Pine errors on bool-vs-float otherwise, even when the value is discarded.
+                st.boundary := boundary
+                st.accValid := true
+                st.accO := open
+                st.accH := high
+                st.accL := low
+                st.accC := close
+            else
+                // Still inside the same higher-timeframe candle — extend it.
+                st.accH := math.max(st.accH, high)
+                st.accL := math.min(st.accL, low)
+                st.accC := close
 
-newBar15m = timeframe.change('15')
-[time15m, open15m, high15m, low15m, close15m] = request.security(syminfo.tickerid, '15', [time[1], open[1], high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
+processHtf(state5m,  show5m,  0)
+processHtf(state15m, show15m, 1)
+processHtf(state1h,  show1h,  2)
+processHtf(state4h,  show4h,  3)
 
-newBar1h = timeframe.change('60')
-[time1h, open1h, high1h, low1h, close1h] = request.security(syminfo.tickerid, '60', [time[1], open[1], high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
-
-newBar4h = timeframe.change('240')
-[time4h, open4h, high4h, low4h, close4h] = request.security(syminfo.tickerid, '240', [time[1], open[1], high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
-
-processWickless(state1m,  show1m,  newBar1m,  time1m,  open1m,  high1m,  low1m,  close1m,  '1m',  0)
-processWickless(state5m,  show5m,  newBar5m,  time5m,  open5m,  high5m,  low5m,  close5m,  '5m',  1)
-processWickless(state15m, show15m, newBar15m, time15m, open15m, high15m, low15m, close15m, '15m', 2)
-processWickless(state1h,  show1h,  newBar1h,  time1h,  open1h,  high1h,  low1h,  close1h,  '1H',  3)
-processWickless(state4h,  show4h,  newBar4h,  time4h,  open4h,  high4h,  low4h,  close4h,  '4H',  4)
-
-// === Alerts — generic across all five timeframes rather than ten granular ones ===
-top1m  = show1m  and newBar1m  and not na(open1m)  and (high1m  - math.max(open1m,  close1m))  <= tolerance
-top5m  = show5m  and newBar5m  and not na(open5m)  and (high5m  - math.max(open5m,  close5m))  <= tolerance
-top15m = show15m and newBar15m and not na(open15m) and (high15m - math.max(open15m, close15m)) <= tolerance
-top1h  = show1h  and newBar1h  and not na(open1h)  and (high1h  - math.max(open1h,  close1h))  <= tolerance
-top4h  = show4h  and newBar4h  and not na(open4h)  and (high4h  - math.max(open4h,  close4h))  <= tolerance
-anyNewTop = top1m or top5m or top15m or top1h or top4h
-
-bot1m  = show1m  and newBar1m  and not na(open1m)  and (math.min(open1m,  close1m)  - low1m)  <= tolerance
-bot5m  = show5m  and newBar5m  and not na(open5m)  and (math.min(open5m,  close5m)  - low5m)  <= tolerance
-bot15m = show15m and newBar15m and not na(open15m) and (math.min(open15m, close15m) - low15m) <= tolerance
-bot1h  = show1h  and newBar1h  and not na(open1h)  and (math.min(open1h,  close1h)  - low1h)  <= tolerance
-bot4h  = show4h  and newBar4h  and not na(open4h)  and (math.min(open4h,  close4h)  - low4h)  <= tolerance
-anyNewBottom = bot1m or bot5m or bot15m or bot1h or bot4h
-
-alertcondition(anyNewTop, title = 'Wickless Top formed', message = 'Wickless top candle formed (no upper wick) on a watched timeframe.')
-alertcondition(anyNewBottom, title = 'Wickless Bottom formed', message = 'Wickless bottom candle formed (no lower wick) on a watched timeframe.')
+// === Alerts ===
+alertcondition(showNative and barstate.isconfirmed and (high - math.max(open, close)) <= tolerance, title = 'Wickless Top formed (native)', message = 'Wickless top candle formed (no upper wick) on the chart\'s own timeframe.')
+alertcondition(showNative and barstate.isconfirmed and (math.min(open, close) - low) <= tolerance, title = 'Wickless Bottom formed (native)', message = 'Wickless bottom candle formed (no lower wick) on the chart\'s own timeframe.')
