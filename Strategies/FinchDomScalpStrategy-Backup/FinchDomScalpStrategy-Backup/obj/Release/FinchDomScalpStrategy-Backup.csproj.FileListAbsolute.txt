@@ -1,0 +1,13 @@
+C:\Quantower\Settings\Scripts\Strategies\FinchDomScalpStrategy-Backup\FinchDomScalpStrategy-Backup.deps.json
+C:\Quantower\Settings\Scripts\Strategies\FinchDomScalpStrategy-Backup\FinchDomScalpStrategy-Backup.dll
+C:\Quantower\Settings\Scripts\Strategies\FinchDomScalpStrategy-Backup\FinchDomScalpStrategy-Backup.pdb
+E:\Trading\Quantower-storage\Strategies\FinchDomScalpStrategy-Backup\FinchDomScalpStrategy-Backup\obj\Release\FinchDomScalpStrategy-Backup.csproj.AssemblyReference.cache
+E:\Trading\Quantower-storage\Strategies\FinchDomScalpStrategy-Backup\FinchDomScalpStrategy-Backup\obj\Release\FinchDomScalpStrategy-Backup.GeneratedMSBuildEditorConfig.editorconfig
+E:\Trading\Quantower-storage\Strategies\FinchDomScalpStrategy-Backup\FinchDomScalpStrategy-Backup\obj\Release\FinchDomScalpStrategy-Backup.AssemblyInfoInputs.cache
+E:\Trading\Quantower-storage\Strategies\FinchDomScalpStrategy-Backup\FinchDomScalpStrategy-Backup\obj\Release\FinchDomScalpStrategy-Backup.AssemblyInfo.cs
+E:\Trading\Quantower-storage\Strategies\FinchDomScalpStrategy-Backup\FinchDomScalpStrategy-Backup\obj\Release\FinchDomScalpStrategy-Backup.csproj.CoreCompileInputs.cache
+E:\Trading\Quantower-storage\Strategies\FinchDomScalpStrategy-Backup\FinchDomScalpStrategy-Backup\obj\Release\FinchDomScalpStrategy-Backup.sourcelink.json
+E:\Trading\Quantower-storage\Strategies\FinchDomScalpStrategy-Backup\FinchDomScalpStrategy-Backup\obj\Release\FinchDomScalpStrategy-Backup.dll
+E:\Trading\Quantower-storage\Strategies\FinchDomScalpStrategy-Backup\FinchDomScalpStrategy-Backup\obj\Release\refint\FinchDomScalpStrategy-Backup.dll
+E:\Trading\Quantower-storage\Strategies\FinchDomScalpStrategy-Backup\FinchDomScalpStrategy-Backup\obj\Release\FinchDomScalpStrategy-Backup.pdb
+E:\Trading\Quantower-storage\Strategies\FinchDomScalpStrategy-Backup\FinchDomScalpStrategy-Backup\obj\Release\ref\FinchDomScalpStrategy-Backup.dll

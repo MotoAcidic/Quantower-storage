@@ -1,0 +1,10 @@
+E:\Trading\Quantower-storage\Indicators\Finch-Lite\src\Finch.Lite.Indicator\bin\Release\net10.0-windows\FinchLiteIndicator.deps.json
+E:\Trading\Quantower-storage\Indicators\Finch-Lite\src\Finch.Lite.Indicator\bin\Release\net10.0-windows\FinchLiteIndicator.dll
+E:\Trading\Quantower-storage\Indicators\Finch-Lite\src\Finch.Lite.Indicator\obj\Release\net10.0-windows\Finch.Lite.Indicator.csproj.AssemblyReference.cache
+E:\Trading\Quantower-storage\Indicators\Finch-Lite\src\Finch.Lite.Indicator\obj\Release\net10.0-windows\Finch.Lite.Indicator.GeneratedMSBuildEditorConfig.editorconfig
+E:\Trading\Quantower-storage\Indicators\Finch-Lite\src\Finch.Lite.Indicator\obj\Release\net10.0-windows\Finch.Lite.Indicator.AssemblyInfoInputs.cache
+E:\Trading\Quantower-storage\Indicators\Finch-Lite\src\Finch.Lite.Indicator\obj\Release\net10.0-windows\Finch.Lite.Indicator.AssemblyInfo.cs
+E:\Trading\Quantower-storage\Indicators\Finch-Lite\src\Finch.Lite.Indicator\obj\Release\net10.0-windows\Finch.Lite.Indicator.csproj.CoreCompileInputs.cache
+E:\Trading\Quantower-storage\Indicators\Finch-Lite\src\Finch.Lite.Indicator\obj\Release\net10.0-windows\FinchLiteIndicator.dll
+E:\Trading\Quantower-storage\Indicators\Finch-Lite\src\Finch.Lite.Indicator\obj\Release\net10.0-windows\refint\FinchLiteIndicator.dll
+E:\Trading\Quantower-storage\Indicators\Finch-Lite\src\Finch.Lite.Indicator\obj\Release\net10.0-windows\ref\FinchLiteIndicator.dll

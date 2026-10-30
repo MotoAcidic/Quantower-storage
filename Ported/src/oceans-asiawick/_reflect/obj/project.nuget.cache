@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "b+PzLnhPMBI=",
+  "success": true,
+  "projectFilePath": "E:\\Trading\\Quantower-storage\\Ported\\src\\oceans-asiawick\\_reflect\\reflect.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\travi\\.nuget\\packages\\system.reflection.metadataloadcontext\\9.0.0\\system.reflection.metadataloadcontext.9.0.0.nupkg.sha512"
+  ],
+  "logs": []
+}

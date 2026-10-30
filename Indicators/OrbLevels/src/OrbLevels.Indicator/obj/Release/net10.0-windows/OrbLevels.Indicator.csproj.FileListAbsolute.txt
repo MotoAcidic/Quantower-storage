@@ -1,0 +1,10 @@
+E:\Trading\Quantower-storage\Indicators\OrbLevels\src\OrbLevels.Indicator\bin\Release\net10.0-windows\OrbLevelsIndicator.deps.json
+E:\Trading\Quantower-storage\Indicators\OrbLevels\src\OrbLevels.Indicator\bin\Release\net10.0-windows\OrbLevelsIndicator.dll
+E:\Trading\Quantower-storage\Indicators\OrbLevels\src\OrbLevels.Indicator\obj\Release\net10.0-windows\OrbLevels.Indicator.csproj.AssemblyReference.cache
+E:\Trading\Quantower-storage\Indicators\OrbLevels\src\OrbLevels.Indicator\obj\Release\net10.0-windows\OrbLevels.Indicator.GeneratedMSBuildEditorConfig.editorconfig
+E:\Trading\Quantower-storage\Indicators\OrbLevels\src\OrbLevels.Indicator\obj\Release\net10.0-windows\OrbLevels.Indicator.AssemblyInfoInputs.cache
+E:\Trading\Quantower-storage\Indicators\OrbLevels\src\OrbLevels.Indicator\obj\Release\net10.0-windows\OrbLevels.Indicator.AssemblyInfo.cs
+E:\Trading\Quantower-storage\Indicators\OrbLevels\src\OrbLevels.Indicator\obj\Release\net10.0-windows\OrbLevels.Indicator.csproj.CoreCompileInputs.cache
+E:\Trading\Quantower-storage\Indicators\OrbLevels\src\OrbLevels.Indicator\obj\Release\net10.0-windows\OrbLevelsIndicator.dll
+E:\Trading\Quantower-storage\Indicators\OrbLevels\src\OrbLevels.Indicator\obj\Release\net10.0-windows\refint\OrbLevelsIndicator.dll
+E:\Trading\Quantower-storage\Indicators\OrbLevels\src\OrbLevels.Indicator\obj\Release\net10.0-windows\ref\OrbLevelsIndicator.dll

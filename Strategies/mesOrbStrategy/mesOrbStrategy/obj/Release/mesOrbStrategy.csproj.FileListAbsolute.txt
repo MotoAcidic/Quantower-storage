@@ -1,0 +1,13 @@
+C:\Quantower\Settings\Scripts\Strategies\mesOrbStrategy\mesOrbStrategy.deps.json
+C:\Quantower\Settings\Scripts\Strategies\mesOrbStrategy\mesOrbStrategy.dll
+C:\Quantower\Settings\Scripts\Strategies\mesOrbStrategy\mesOrbStrategy.pdb
+E:\Trading\Quantower-storage\Strategies\mesOrbStrategy\mesOrbStrategy\obj\Release\mesOrbStrategy.csproj.AssemblyReference.cache
+E:\Trading\Quantower-storage\Strategies\mesOrbStrategy\mesOrbStrategy\obj\Release\mesOrbStrategy.GeneratedMSBuildEditorConfig.editorconfig
+E:\Trading\Quantower-storage\Strategies\mesOrbStrategy\mesOrbStrategy\obj\Release\mesOrbStrategy.AssemblyInfoInputs.cache
+E:\Trading\Quantower-storage\Strategies\mesOrbStrategy\mesOrbStrategy\obj\Release\mesOrbStrategy.AssemblyInfo.cs
+E:\Trading\Quantower-storage\Strategies\mesOrbStrategy\mesOrbStrategy\obj\Release\mesOrbStrategy.csproj.CoreCompileInputs.cache
+E:\Trading\Quantower-storage\Strategies\mesOrbStrategy\mesOrbStrategy\obj\Release\mesOrbStrategy.sourcelink.json
+E:\Trading\Quantower-storage\Strategies\mesOrbStrategy\mesOrbStrategy\obj\Release\mesOrbStrategy.dll
+E:\Trading\Quantower-storage\Strategies\mesOrbStrategy\mesOrbStrategy\obj\Release\refint\mesOrbStrategy.dll
+E:\Trading\Quantower-storage\Strategies\mesOrbStrategy\mesOrbStrategy\obj\Release\mesOrbStrategy.pdb
+E:\Trading\Quantower-storage\Strategies\mesOrbStrategy\mesOrbStrategy\obj\Release\ref\mesOrbStrategy.dll

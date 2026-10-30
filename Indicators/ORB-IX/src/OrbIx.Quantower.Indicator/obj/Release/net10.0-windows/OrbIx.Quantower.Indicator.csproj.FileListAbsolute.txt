@@ -1,0 +1,11 @@
+E:\Trading\Quantower-storage\Indicators\ORB-IX\src\OrbIx.Quantower.Indicator\bin\Release\net10.0-windows\orbix.default.json
+E:\Trading\Quantower-storage\Indicators\ORB-IX\src\OrbIx.Quantower.Indicator\bin\Release\net10.0-windows\OrbIxIndicator.deps.json
+E:\Trading\Quantower-storage\Indicators\ORB-IX\src\OrbIx.Quantower.Indicator\bin\Release\net10.0-windows\OrbIxIndicator.dll
+E:\Trading\Quantower-storage\Indicators\ORB-IX\src\OrbIx.Quantower.Indicator\obj\Release\net10.0-windows\OrbIx.Quantower.Indicator.csproj.AssemblyReference.cache
+E:\Trading\Quantower-storage\Indicators\ORB-IX\src\OrbIx.Quantower.Indicator\obj\Release\net10.0-windows\OrbIx.Quantower.Indicator.GeneratedMSBuildEditorConfig.editorconfig
+E:\Trading\Quantower-storage\Indicators\ORB-IX\src\OrbIx.Quantower.Indicator\obj\Release\net10.0-windows\OrbIx.Quantower.Indicator.AssemblyInfoInputs.cache
+E:\Trading\Quantower-storage\Indicators\ORB-IX\src\OrbIx.Quantower.Indicator\obj\Release\net10.0-windows\OrbIx.Quantower.Indicator.AssemblyInfo.cs
+E:\Trading\Quantower-storage\Indicators\ORB-IX\src\OrbIx.Quantower.Indicator\obj\Release\net10.0-windows\OrbIx.Quantower.Indicator.csproj.CoreCompileInputs.cache
+E:\Trading\Quantower-storage\Indicators\ORB-IX\src\OrbIx.Quantower.Indicator\obj\Release\net10.0-windows\OrbIxIndicator.dll
+E:\Trading\Quantower-storage\Indicators\ORB-IX\src\OrbIx.Quantower.Indicator\obj\Release\net10.0-windows\refint\OrbIxIndicator.dll
+E:\Trading\Quantower-storage\Indicators\ORB-IX\src\OrbIx.Quantower.Indicator\obj\Release\net10.0-windows\ref\OrbIxIndicator.dll

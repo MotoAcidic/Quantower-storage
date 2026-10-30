@@ -5,7 +5,7 @@ This document provides technical context and logic documentation for all trading
 
 ---
 
-## Repository Layout (reorganized 2026-09-14)
+## Repository Layout (reorganized 2026-09-14; TradingView/ moved out 2026-10-29)
 
 ```text
 Quantower-storage/
@@ -14,20 +14,24 @@ Quantower-storage/
 │   └── Backups/         - dated/backup copies of strategies, kept separate from the active ones
 ├── Indicators/           - every Quantower Indicator project (AlgoType=Indicator)
 │   └── ORB-IX/           - see "Indicator Catalog" below
-├── TradingView/          - reference .pine scripts strategies here are ported FROM (not
-│                           themselves a Strategy or Indicator project - source material only)
 ├── CLAUDE.md             - this file
 └── README.md             - user-facing parameter reference (not yet updated for every
                             strategy below - see "Known gaps" at the end of this file)
 ```
 
-Before this date everything sat loose at the repo root with no distinction between what
+Before 2026-09-14 everything sat loose at the repo root with no distinction between what
 Quantower treats as a Strategy vs. an Indicator - `Strategies/` and `Indicators/` now mirror
 that platform-level distinction directly, so it's visible at a glance which category
 something belongs to without opening it. All strategy `**File:**`/`**Readme:**` paths below
 are relative to the repo root and already reflect the new `Strategies/` prefix.
 `C:\Quantower\Settings\Scripts\...` paths (deployment targets) are unaffected by this repo's
 own layout and unchanged throughout.
+
+**`TradingView/` moved out to `E:\Trading\TradingView\` on 2026-10-29** — it's now a sibling of
+`Quantower-storage/`, not a subfolder of it. It still holds the same thing: reference `.pine`
+scripts strategies here are ported FROM, not itself a Strategy or Indicator project. Any
+`TradingView/...` path in the entries below (most pre-date the move) means that new location now,
+not a path under this repo.
 
 **Note while moving files**: a background C# language server (VS Code's C# Dev Kit) was
 holding file locks on `obj/`/`.vs/` folders inside several strategy projects, and had also
@@ -4371,7 +4375,7 @@ new `[Risk] protective TARGET/STOP is missing ...` log line should appear instea
 `oceansStackStrategy.cs`, `ValueAreaEngine.cs`, `SessionPoolTracker.cs`, `AbsorptionTracker.cs`,
 `FuelPoolSelector.cs`, `SweepZoneTracker.cs`, `DeltaTracker.cs`, `Bar.cs`, `SETTINGS.md`.
 
-A live port of `Quantower-storage/TradingView/ocean.pine` ("Ocean's Stack v2") — a session-based
+A live port of `TradingView/ocean.pine` (now at `E:\Trading\TradingView\ocean.pine`; "Ocean's Stack v2") — a session-based
 **liquidity sweep failure** swing system for NQ, handed to the operator as a TradingView indicator
 and turned into a real, order-placing Quantower Strategy. Genuinely different character from
 `finchDomScalpStrategy`: once-per-day zones and a single morning trigger window, swing-sized

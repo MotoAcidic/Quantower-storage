@@ -1,0 +1,10 @@
+E:\Trading\Quantower-storage\Indicators\OceansStack\src\OceansStack.Indicator\bin\Release\net10.0-windows\OceansStackIndicator.deps.json
+E:\Trading\Quantower-storage\Indicators\OceansStack\src\OceansStack.Indicator\bin\Release\net10.0-windows\OceansStackIndicator.dll
+E:\Trading\Quantower-storage\Indicators\OceansStack\src\OceansStack.Indicator\obj\Release\net10.0-windows\OceansStack.Indicator.csproj.AssemblyReference.cache
+E:\Trading\Quantower-storage\Indicators\OceansStack\src\OceansStack.Indicator\obj\Release\net10.0-windows\OceansStack.Indicator.GeneratedMSBuildEditorConfig.editorconfig
+E:\Trading\Quantower-storage\Indicators\OceansStack\src\OceansStack.Indicator\obj\Release\net10.0-windows\OceansStack.Indicator.AssemblyInfoInputs.cache
+E:\Trading\Quantower-storage\Indicators\OceansStack\src\OceansStack.Indicator\obj\Release\net10.0-windows\OceansStack.Indicator.AssemblyInfo.cs
+E:\Trading\Quantower-storage\Indicators\OceansStack\src\OceansStack.Indicator\obj\Release\net10.0-windows\OceansStack.Indicator.csproj.CoreCompileInputs.cache
+E:\Trading\Quantower-storage\Indicators\OceansStack\src\OceansStack.Indicator\obj\Release\net10.0-windows\OceansStackIndicator.dll
+E:\Trading\Quantower-storage\Indicators\OceansStack\src\OceansStack.Indicator\obj\Release\net10.0-windows\refint\OceansStackIndicator.dll
+E:\Trading\Quantower-storage\Indicators\OceansStack\src\OceansStack.Indicator\obj\Release\net10.0-windows\ref\OceansStackIndicator.dll

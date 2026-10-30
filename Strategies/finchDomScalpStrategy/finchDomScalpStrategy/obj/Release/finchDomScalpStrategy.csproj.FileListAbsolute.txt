@@ -1,0 +1,13 @@
+E:\Trading\Quantower-storage\Strategies\finchDomScalpStrategy\finchDomScalpStrategy\obj\Release\finchDomScalpStrategy.csproj.AssemblyReference.cache
+E:\Trading\Quantower-storage\Strategies\finchDomScalpStrategy\finchDomScalpStrategy\obj\Release\finchDomScalpStrategy.GeneratedMSBuildEditorConfig.editorconfig
+E:\Trading\Quantower-storage\Strategies\finchDomScalpStrategy\finchDomScalpStrategy\obj\Release\finchDomScalpStrategy.AssemblyInfoInputs.cache
+E:\Trading\Quantower-storage\Strategies\finchDomScalpStrategy\finchDomScalpStrategy\obj\Release\finchDomScalpStrategy.AssemblyInfo.cs
+E:\Trading\Quantower-storage\Strategies\finchDomScalpStrategy\finchDomScalpStrategy\obj\Release\finchDomScalpStrategy.csproj.CoreCompileInputs.cache
+E:\Trading\Quantower-storage\Strategies\finchDomScalpStrategy\finchDomScalpStrategy\obj\Release\finchDomScalpStrategy.sourcelink.json
+C:\Quantower\Settings\Scripts\Strategies\finchDomScalpStrategy\finchDomScalpStrategy.deps.json
+C:\Quantower\Settings\Scripts\Strategies\finchDomScalpStrategy\finchDomScalpStrategy.dll
+C:\Quantower\Settings\Scripts\Strategies\finchDomScalpStrategy\finchDomScalpStrategy.pdb
+E:\Trading\Quantower-storage\Strategies\finchDomScalpStrategy\finchDomScalpStrategy\obj\Release\finchDomScalpStrategy.dll
+E:\Trading\Quantower-storage\Strategies\finchDomScalpStrategy\finchDomScalpStrategy\obj\Release\refint\finchDomScalpStrategy.dll
+E:\Trading\Quantower-storage\Strategies\finchDomScalpStrategy\finchDomScalpStrategy\obj\Release\finchDomScalpStrategy.pdb
+E:\Trading\Quantower-storage\Strategies\finchDomScalpStrategy\finchDomScalpStrategy\obj\Release\ref\finchDomScalpStrategy.dll

@@ -1,0 +1,13 @@
+E:\Trading\Quantower-storage\Indicators\LevelsMap\src\LevelsMap.Indicator\bin\Release\net10.0-windows\LevelsMapIndicator.deps.json
+E:\Trading\Quantower-storage\Indicators\LevelsMap\src\LevelsMap.Indicator\bin\Release\net10.0-windows\LevelsMapIndicator.dll
+E:\Trading\Quantower-storage\Indicators\LevelsMap\src\LevelsMap.Indicator\bin\Release\net10.0-windows\LevelsMapIndicator.pdb
+E:\Trading\Quantower-storage\Indicators\LevelsMap\src\LevelsMap.Indicator\obj\Release\net10.0-windows\LevelsMap.Indicator.csproj.AssemblyReference.cache
+E:\Trading\Quantower-storage\Indicators\LevelsMap\src\LevelsMap.Indicator\obj\Release\net10.0-windows\LevelsMap.Indicator.GeneratedMSBuildEditorConfig.editorconfig
+E:\Trading\Quantower-storage\Indicators\LevelsMap\src\LevelsMap.Indicator\obj\Release\net10.0-windows\LevelsMap.Indicator.AssemblyInfoInputs.cache
+E:\Trading\Quantower-storage\Indicators\LevelsMap\src\LevelsMap.Indicator\obj\Release\net10.0-windows\LevelsMap.Indicator.AssemblyInfo.cs
+E:\Trading\Quantower-storage\Indicators\LevelsMap\src\LevelsMap.Indicator\obj\Release\net10.0-windows\LevelsMap.Indicator.csproj.CoreCompileInputs.cache
+E:\Trading\Quantower-storage\Indicators\LevelsMap\src\LevelsMap.Indicator\obj\Release\net10.0-windows\LevelsMap.Indicator.sourcelink.json
+E:\Trading\Quantower-storage\Indicators\LevelsMap\src\LevelsMap.Indicator\obj\Release\net10.0-windows\LevelsMapIndicator.dll
+E:\Trading\Quantower-storage\Indicators\LevelsMap\src\LevelsMap.Indicator\obj\Release\net10.0-windows\refint\LevelsMapIndicator.dll
+E:\Trading\Quantower-storage\Indicators\LevelsMap\src\LevelsMap.Indicator\obj\Release\net10.0-windows\LevelsMapIndicator.pdb
+E:\Trading\Quantower-storage\Indicators\LevelsMap\src\LevelsMap.Indicator\obj\Release\net10.0-windows\ref\LevelsMapIndicator.dll

@@ -1,0 +1,13 @@
+C:\Quantower\Settings\Scripts\Strategies\srmAutoStrategy\srmAutoStrategy.deps.json
+C:\Quantower\Settings\Scripts\Strategies\srmAutoStrategy\srmAutoStrategy.dll
+C:\Quantower\Settings\Scripts\Strategies\srmAutoStrategy\srmAutoStrategy.pdb
+E:\Trading\Quantower-storage\Strategies\srmAutoStrategy\srmAutoStrategy\obj\Release\srmAutoStrategy.csproj.AssemblyReference.cache
+E:\Trading\Quantower-storage\Strategies\srmAutoStrategy\srmAutoStrategy\obj\Release\srmAutoStrategy.GeneratedMSBuildEditorConfig.editorconfig
+E:\Trading\Quantower-storage\Strategies\srmAutoStrategy\srmAutoStrategy\obj\Release\srmAutoStrategy.AssemblyInfoInputs.cache
+E:\Trading\Quantower-storage\Strategies\srmAutoStrategy\srmAutoStrategy\obj\Release\srmAutoStrategy.AssemblyInfo.cs
+E:\Trading\Quantower-storage\Strategies\srmAutoStrategy\srmAutoStrategy\obj\Release\srmAutoStrategy.csproj.CoreCompileInputs.cache
+E:\Trading\Quantower-storage\Strategies\srmAutoStrategy\srmAutoStrategy\obj\Release\srmAutoStrategy.sourcelink.json
+E:\Trading\Quantower-storage\Strategies\srmAutoStrategy\srmAutoStrategy\obj\Release\srmAutoStrategy.dll
+E:\Trading\Quantower-storage\Strategies\srmAutoStrategy\srmAutoStrategy\obj\Release\refint\srmAutoStrategy.dll
+E:\Trading\Quantower-storage\Strategies\srmAutoStrategy\srmAutoStrategy\obj\Release\srmAutoStrategy.pdb
+E:\Trading\Quantower-storage\Strategies\srmAutoStrategy\srmAutoStrategy\obj\Release\ref\srmAutoStrategy.dll

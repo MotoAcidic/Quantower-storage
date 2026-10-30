@@ -1,0 +1,13 @@
+E:\Trading\Quantower-storage\Strategies\oceansStackStrategy\oceansStackStrategy\obj\Release\oceansStackStrategy.csproj.AssemblyReference.cache
+E:\Trading\Quantower-storage\Strategies\oceansStackStrategy\oceansStackStrategy\obj\Release\oceansStackStrategy.GeneratedMSBuildEditorConfig.editorconfig
+E:\Trading\Quantower-storage\Strategies\oceansStackStrategy\oceansStackStrategy\obj\Release\oceansStackStrategy.AssemblyInfoInputs.cache
+E:\Trading\Quantower-storage\Strategies\oceansStackStrategy\oceansStackStrategy\obj\Release\oceansStackStrategy.AssemblyInfo.cs
+E:\Trading\Quantower-storage\Strategies\oceansStackStrategy\oceansStackStrategy\obj\Release\oceansStackStrategy.csproj.CoreCompileInputs.cache
+E:\Trading\Quantower-storage\Strategies\oceansStackStrategy\oceansStackStrategy\obj\Release\oceansStackStrategy.sourcelink.json
+C:\Quantower\Settings\Scripts\Strategies\oceansStackStrategy\oceansStackStrategy.deps.json
+C:\Quantower\Settings\Scripts\Strategies\oceansStackStrategy\oceansStackStrategy.dll
+C:\Quantower\Settings\Scripts\Strategies\oceansStackStrategy\oceansStackStrategy.pdb
+E:\Trading\Quantower-storage\Strategies\oceansStackStrategy\oceansStackStrategy\obj\Release\oceansStackStrategy.dll
+E:\Trading\Quantower-storage\Strategies\oceansStackStrategy\oceansStackStrategy\obj\Release\refint\oceansStackStrategy.dll
+E:\Trading\Quantower-storage\Strategies\oceansStackStrategy\oceansStackStrategy\obj\Release\oceansStackStrategy.pdb
+E:\Trading\Quantower-storage\Strategies\oceansStackStrategy\oceansStackStrategy\obj\Release\ref\oceansStackStrategy.dll

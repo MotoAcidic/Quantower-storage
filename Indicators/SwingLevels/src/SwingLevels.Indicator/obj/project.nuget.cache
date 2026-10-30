@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "48AGQTow7xY=",
+  "success": true,
+  "projectFilePath": "e:\\Trading\\Quantower-storage\\Indicators\\SwingLevels\\src\\SwingLevels.Indicator\\SwingLevels.Indicator.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\travi\\.nuget\\packages\\microsoft.win32.systemevents\\9.0.0\\microsoft.win32.systemevents.9.0.0.nupkg.sha512",
+    "C:\\Users\\travi\\.nuget\\packages\\system.drawing.common\\9.0.0\\system.drawing.common.9.0.0.nupkg.sha512"
+  ],
+  "logs": []
+}

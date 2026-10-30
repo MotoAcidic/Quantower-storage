@@ -1,0 +1,13 @@
+C:\Quantower\Settings\Scripts\Strategies\wicklessTrendStrategy\wicklessTrendStrategy.deps.json
+C:\Quantower\Settings\Scripts\Strategies\wicklessTrendStrategy\wicklessTrendStrategy.dll
+C:\Quantower\Settings\Scripts\Strategies\wicklessTrendStrategy\wicklessTrendStrategy.pdb
+E:\Trading\Quantower-storage\Strategies\wicklessTrendStrategy\wicklessTrendStrategy\obj\Release\wicklessTrendStrategy.csproj.AssemblyReference.cache
+E:\Trading\Quantower-storage\Strategies\wicklessTrendStrategy\wicklessTrendStrategy\obj\Release\wicklessTrendStrategy.GeneratedMSBuildEditorConfig.editorconfig
+E:\Trading\Quantower-storage\Strategies\wicklessTrendStrategy\wicklessTrendStrategy\obj\Release\wicklessTrendStrategy.AssemblyInfoInputs.cache
+E:\Trading\Quantower-storage\Strategies\wicklessTrendStrategy\wicklessTrendStrategy\obj\Release\wicklessTrendStrategy.AssemblyInfo.cs
+E:\Trading\Quantower-storage\Strategies\wicklessTrendStrategy\wicklessTrendStrategy\obj\Release\wicklessTrendStrategy.csproj.CoreCompileInputs.cache
+E:\Trading\Quantower-storage\Strategies\wicklessTrendStrategy\wicklessTrendStrategy\obj\Release\wicklessTrendStrategy.sourcelink.json
+E:\Trading\Quantower-storage\Strategies\wicklessTrendStrategy\wicklessTrendStrategy\obj\Release\wicklessTrendStrategy.dll
+E:\Trading\Quantower-storage\Strategies\wicklessTrendStrategy\wicklessTrendStrategy\obj\Release\refint\wicklessTrendStrategy.dll
+E:\Trading\Quantower-storage\Strategies\wicklessTrendStrategy\wicklessTrendStrategy\obj\Release\wicklessTrendStrategy.pdb
+E:\Trading\Quantower-storage\Strategies\wicklessTrendStrategy\wicklessTrendStrategy\obj\Release\ref\wicklessTrendStrategy.dll

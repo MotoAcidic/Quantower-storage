@@ -1,0 +1,13 @@
+E:\Trading\Quantower-storage\Indicators\Finch-Lite-Backup\src\Finch.Lite.Indicator-Backup\obj\Release\net10.0-windows\Finch.Lite.Indicator-Backup.csproj.AssemblyReference.cache
+E:\Trading\Quantower-storage\Indicators\Finch-Lite-Backup\src\Finch.Lite.Indicator-Backup\obj\Release\net10.0-windows\Finch.Lite.Indicator-Backup.GeneratedMSBuildEditorConfig.editorconfig
+E:\Trading\Quantower-storage\Indicators\Finch-Lite-Backup\src\Finch.Lite.Indicator-Backup\obj\Release\net10.0-windows\Finch.Lite.Indicator-Backup.AssemblyInfoInputs.cache
+E:\Trading\Quantower-storage\Indicators\Finch-Lite-Backup\src\Finch.Lite.Indicator-Backup\obj\Release\net10.0-windows\Finch.Lite.Indicator-Backup.AssemblyInfo.cs
+E:\Trading\Quantower-storage\Indicators\Finch-Lite-Backup\src\Finch.Lite.Indicator-Backup\obj\Release\net10.0-windows\Finch.Lite.Indicator-Backup.csproj.CoreCompileInputs.cache
+E:\Trading\Quantower-storage\Indicators\Finch-Lite-Backup\src\Finch.Lite.Indicator-Backup\obj\Release\net10.0-windows\Finch.Lite.Indicator-Backup.sourcelink.json
+E:\Trading\Quantower-storage\Indicators\Finch-Lite-Backup\src\Finch.Lite.Indicator-Backup\bin\Release\net10.0-windows\FinchLiteBackupIndicator.deps.json
+E:\Trading\Quantower-storage\Indicators\Finch-Lite-Backup\src\Finch.Lite.Indicator-Backup\bin\Release\net10.0-windows\FinchLiteBackupIndicator.dll
+E:\Trading\Quantower-storage\Indicators\Finch-Lite-Backup\src\Finch.Lite.Indicator-Backup\bin\Release\net10.0-windows\FinchLiteBackupIndicator.pdb
+E:\Trading\Quantower-storage\Indicators\Finch-Lite-Backup\src\Finch.Lite.Indicator-Backup\obj\Release\net10.0-windows\FinchLiteBackupIndicator.dll
+E:\Trading\Quantower-storage\Indicators\Finch-Lite-Backup\src\Finch.Lite.Indicator-Backup\obj\Release\net10.0-windows\refint\FinchLiteBackupIndicator.dll
+E:\Trading\Quantower-storage\Indicators\Finch-Lite-Backup\src\Finch.Lite.Indicator-Backup\obj\Release\net10.0-windows\FinchLiteBackupIndicator.pdb
+E:\Trading\Quantower-storage\Indicators\Finch-Lite-Backup\src\Finch.Lite.Indicator-Backup\obj\Release\net10.0-windows\ref\FinchLiteBackupIndicator.dll
